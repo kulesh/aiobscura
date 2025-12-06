@@ -11,5 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
+anyhow.workspace = true
+tracing = "0.1"
 
 [dev-dependencies]

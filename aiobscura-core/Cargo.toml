@@ -6,6 +6,28 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# Dependencies will be added as needed
+thiserror.workspace = true
+serde.workspace = true
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Config
+toml = "0.8"
+dirs = "5"
+
+# Hashing
+sha2 = "0.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# JSON for raw_data storage
+serde_json = "1.0"
 
 [dev-dependencies]
