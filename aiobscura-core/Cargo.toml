@@ -1,0 +1,11 @@
+[package]
+name = "aiobscura-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Dependencies will be added as needed
+
+[dev-dependencies]

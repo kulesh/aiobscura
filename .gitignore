@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target/
+debug/
+release/
+
+# Cargo lock is committed for binaries, but this is a library+binary workspace
+# Cargo.lock
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment and secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs (except test fixtures)
+*.log
+!tests/fixtures/**/*.log
+
+# Database files (local dev)
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage reports
+*.lcov
+coverage/

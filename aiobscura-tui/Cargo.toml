@@ -1,0 +1,15 @@
+[package]
+name = "aiobscura-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aiobscura"
+path = "src/main.rs"
+
+[dependencies]
+aiobscura-core = { path = "../aiobscura-core" }
+
+[dev-dependencies]
