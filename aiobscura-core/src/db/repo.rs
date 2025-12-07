@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::types::*;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Database handle with connection pooling (single connection for now)
@@ -98,12 +98,12 @@ impl Database {
     }
 
     /// Get a project by path
-    pub fn get_project_by_path(&self, path: &PathBuf) -> Result<Option<Project>> {
+    pub fn get_project_by_path(&self, path: &Path) -> Result<Option<Project>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT * FROM projects WHERE path = ?",
             [path.to_string_lossy().to_string()],
-            |row| Self::row_to_project(row),
+            Self::row_to_project,
         )
         .optional()
         .map_err(Error::from)
@@ -162,7 +162,7 @@ impl Database {
         conn.query_row(
             "SELECT * FROM backing_models WHERE id = ?",
             [id],
-            |row| Self::row_to_backing_model(row),
+            Self::row_to_backing_model,
         )
         .optional()
         .map_err(Error::from)
@@ -247,7 +247,7 @@ impl Database {
         conn.query_row(
             "SELECT * FROM source_files WHERE path = ?",
             [path],
-            |row| Self::row_to_source_file(row),
+            Self::row_to_source_file,
         )
         .optional()
         .map_err(Error::from)
@@ -394,7 +394,7 @@ impl Database {
 
         let mut stmt = conn.prepare(&sql)?;
         let sessions = stmt
-            .query_map(params_refs.as_slice(), |row| Self::row_to_session(row))?
+            .query_map(params_refs.as_slice(), Self::row_to_session)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(sessions)
@@ -461,7 +461,7 @@ impl Database {
         )?;
 
         let threads = stmt
-            .query_map([session_id], |row| Self::row_to_thread(row))?
+            .query_map([session_id], Self::row_to_thread)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(threads)

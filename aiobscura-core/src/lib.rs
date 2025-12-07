@@ -32,11 +32,13 @@
 pub use config::Config;
 pub use db::{Database, SessionFilter};
 pub use error::{Error, Result};
+pub use ingest::{IngestCoordinator, SyncResult};
 pub use types::*;
 
 // Public modules
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod ingest;
 pub mod logging;
 pub mod types;

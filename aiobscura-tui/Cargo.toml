@@ -9,9 +9,17 @@ license.workspace = true
 name = "aiobscura"
 path = "src/main.rs"
 
+[[bin]]
+name = "aiobscura-debug"
+path = "src/debug.rs"
+
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
 anyhow.workspace = true
 tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
 
 [dev-dependencies]

@@ -105,7 +105,7 @@ impl std::str::FromStr for FileType {
 }
 
 /// Checkpoint strategy depends on file type
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Checkpoint {
     /// For append-only files (JSONL): track byte offset
@@ -122,13 +122,8 @@ pub enum Checkpoint {
     },
 
     /// Not yet parsed
+    #[default]
     None,
-}
-
-impl Default for Checkpoint {
-    fn default() -> Self {
-        Checkpoint::None
-    }
 }
 
 /// A source file from Layer 0 (raw log file)

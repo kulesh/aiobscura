@@ -30,4 +30,11 @@ tracing-appender = "0.2"
 # JSON for raw_data storage
 serde_json = "1.0"
 
+# File discovery
+glob = "0.3"
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"] }
+
 [dev-dependencies]
+tempfile = "3"
