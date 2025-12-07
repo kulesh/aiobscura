@@ -160,6 +160,8 @@ struct ResponseItemPayload {
 enum ContentBlock {
     #[serde(rename = "input_text")]
     InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(other)]
@@ -513,6 +515,7 @@ impl AssistantParser for CodexParser {
                                 for block in blocks {
                                     let text = match block {
                                         ContentBlock::InputText { text } => Some(text.clone()),
+                                        ContentBlock::OutputText { text } => Some(text.clone()),
                                         ContentBlock::Text { text } => Some(text.clone()),
                                         ContentBlock::Unknown => None,
                                     };
@@ -697,6 +700,75 @@ impl AssistantParser for CodexParser {
                                 raw_data: raw_json.clone(),
                                 metadata: serde_json::json!({
                                     "git_snapshot": payload.ghost_commit,
+                                }),
+                            });
+                        }
+
+                        "custom_tool_call" => {
+                            // Custom tool calls (e.g., apply_patch) - handle like function_call
+                            seq += 1;
+
+                            // Track call_id for linking to output
+                            if let Some(ref call_id) = payload.call_id {
+                                call_id_to_seq.insert(call_id.clone(), seq);
+                            }
+
+                            result.messages.push(Message {
+                                id: 0,
+                                session_id: session_id.clone().unwrap_or_default(),
+                                thread_id: thread_id.clone().unwrap_or_default(),
+                                seq,
+                                ts,
+                                author_role: AuthorRole::Assistant,
+                                author_name: None,
+                                message_type: MessageType::ToolCall,
+                                content: None,
+                                tool_name: payload.name.clone(),
+                                tool_input: Some(serde_json::json!({
+                                    "input": event.payload.get("input"),
+                                })),
+                                tool_result: None,
+                                tokens_in: None,
+                                tokens_out: None,
+                                duration_ms: None,
+                                source_file_path: source_path.clone(),
+                                source_offset: record_offset as i64,
+                                source_line: Some(line_number),
+                                raw_data: raw_json.clone(),
+                                metadata: serde_json::json!({
+                                    "call_id": payload.call_id,
+                                    "custom_tool": true,
+                                }),
+                            });
+                        }
+
+                        "custom_tool_call_output" => {
+                            // Custom tool output - handle like function_call_output
+                            seq += 1;
+
+                            result.messages.push(Message {
+                                id: 0,
+                                session_id: session_id.clone().unwrap_or_default(),
+                                thread_id: thread_id.clone().unwrap_or_default(),
+                                seq,
+                                ts,
+                                author_role: AuthorRole::Tool,
+                                author_name: None,
+                                message_type: MessageType::ToolResult,
+                                content: None,
+                                tool_name: None,
+                                tool_input: None,
+                                tool_result: payload.output.clone(),
+                                tokens_in: None,
+                                tokens_out: None,
+                                duration_ms: None,
+                                source_file_path: source_path.clone(),
+                                source_offset: record_offset as i64,
+                                source_line: Some(line_number),
+                                raw_data: raw_json.clone(),
+                                metadata: serde_json::json!({
+                                    "call_id": payload.call_id,
+                                    "custom_tool": true,
                                 }),
                             });
                         }
