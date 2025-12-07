@@ -39,6 +39,10 @@ struct Args {
     /// Show plan file content
     #[arg(long)]
     show_plans: bool,
+
+    /// Include checkpoint info in output (for incremental parsing)
+    #[arg(long)]
+    show_checkpoint: bool,
 }
 
 /// Output structure for the parsed result
@@ -61,6 +65,16 @@ struct DebugOutput {
     agent_spawn_map: HashMap<String, i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<CheckpointOutput>,
+}
+
+/// Checkpoint info for incremental parsing
+#[derive(Serialize)]
+struct CheckpointOutput {
+    #[serde(rename = "type")]
+    checkpoint_type: String,
+    offset: u64,
 }
 
 /// Simplified plan output for debugging
@@ -184,6 +198,19 @@ fn parse_file(parser: &ClaudeCodeParser, file: &PathBuf) -> Result<ParseResult> 
 }
 
 fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> DebugOutput {
+    // Extract checkpoint if requested
+    let checkpoint = if args.show_checkpoint {
+        match &result.new_checkpoint {
+            Checkpoint::ByteOffset { offset } => Some(CheckpointOutput {
+                checkpoint_type: "ByteOffset".to_string(),
+                offset: *offset,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Compute statistics
     let stats = compute_stats(&result.messages);
 
@@ -236,6 +263,7 @@ fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> De
         stats,
         agent_spawn_map: result.agent_spawn_map.clone(),
         warnings,
+        checkpoint,
     }
 }
 

@@ -17,6 +17,10 @@ path = "src/debug_claude.rs"
 name = "aiobscura-debug-codex"
 path = "src/debug_codex.rs"
 
+[[bin]]
+name = "aiobscura-debug-claude-watch"
+path = "src/debug_claude_watch.rs"
+
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
 anyhow.workspace = true
@@ -25,5 +29,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 [dev-dependencies]
