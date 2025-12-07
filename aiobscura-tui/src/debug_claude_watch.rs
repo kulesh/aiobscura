@@ -1,6 +1,7 @@
 //! aiobscura-debug-claude-watch - Incremental Claude Code parser watcher
 //!
 //! Watches Claude Code log files for changes and outputs new content incrementally.
+//! Uses polling to reliably detect append operations on macOS.
 //! Outputs JSON in the same format as debug_claude for composability.
 
 use aiobscura_core::ingest::parsers::ClaudeCodeParser;
@@ -8,11 +9,10 @@ use aiobscura_core::ingest::{AssistantParser, ParseContext};
 use aiobscura_core::types::{Checkpoint, Message};
 use anyhow::{Context, Result};
 use clap::Parser;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
+use std::thread;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -32,9 +32,9 @@ struct Args {
     #[arg(long)]
     compact: bool,
 
-    /// Debounce interval in milliseconds
-    #[arg(long, default_value = "500")]
-    debounce: u64,
+    /// Poll interval in milliseconds
+    #[arg(long, default_value = "1000")]
+    poll: u64,
 }
 
 /// Output structure for incremental parse events
@@ -74,6 +74,7 @@ struct MessageOutput {
 
 /// State tracker for watched files
 struct FileState {
+    size: u64,
     checkpoint: Checkpoint,
 }
 
@@ -85,119 +86,106 @@ fn main() -> Result<()> {
         anyhow::bail!("Path does not exist: {}", args.path.display());
     }
 
-    // Determine files to watch
-    let watch_path = if args.path.is_dir() {
-        args.path.clone()
-    } else {
-        args.path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
-
     // Initialize parser and state
     let parser = ClaudeCodeParser::new();
     let mut file_states: HashMap<PathBuf, FileState> = HashMap::new();
 
-    // If watching a specific file, initialize its state with current file size
-    if args.path.is_file() {
-        let metadata = std::fs::metadata(&args.path)?;
-        file_states.insert(
-            args.path.clone(),
-            FileState {
-                checkpoint: Checkpoint::ByteOffset {
-                    offset: metadata.len(),
-                },
-            },
-        );
-        eprintln!(
-            "Watching {} from offset {} (use debug_claude for existing content)",
-            args.path.display(),
-            metadata.len()
-        );
+    // Collect files to watch
+    let files: Vec<PathBuf> = if args.path.is_file() {
+        vec![args.path.clone()]
     } else {
-        eprintln!(
-            "Watching directory {} for JSONL changes",
-            args.path.display()
-        );
-    }
+        std::fs::read_dir(&args.path)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect()
+    };
 
-    // Set up debounced file watcher
-    let (tx, rx) = channel();
-    let debounce_duration = Duration::from_millis(args.debounce);
-
-    let mut debouncer =
-        new_debouncer(debounce_duration, tx).context("Failed to create file watcher")?;
-
-    debouncer
-        .watcher()
-        .watch(&watch_path, notify::RecursiveMode::Recursive)
-        .context("Failed to start watching path")?;
-
-    eprintln!("Watching for changes (Ctrl+C to stop)...");
-
-    // Main event loop
-    for result in rx {
-        match result {
-            Ok(events) => {
-                for event in events {
-                    if event.kind != DebouncedEventKind::Any {
-                        continue;
-                    }
-
-                    let path = &event.path;
-
-                    // Only process JSONL files
-                    if path.extension().is_none_or(|ext| ext != "jsonl") {
-                        continue;
-                    }
-
-                    // Skip if watching specific file and this isn't it
-                    if args.path.is_file() && path != &args.path {
-                        continue;
-                    }
-
-                    // Process file change
-                    if let Err(e) = process_file_change(&parser, path, &mut file_states, &args) {
-                        eprintln!("Warning: Failed to process {}: {}", path.display(), e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Watch error: {:?}", e);
-            }
+    // Initialize file states with current sizes
+    for file in &files {
+        if let Ok(metadata) = std::fs::metadata(file) {
+            let size = metadata.len();
+            file_states.insert(
+                file.clone(),
+                FileState {
+                    size,
+                    checkpoint: Checkpoint::ByteOffset { offset: size },
+                },
+            );
         }
     }
 
-    Ok(())
+    eprintln!(
+        "Watching {} file(s) in {} (poll every {}ms)",
+        files.len(),
+        args.path.display(),
+        args.poll
+    );
+    eprintln!("Use debug_claude for existing content. Ctrl+C to stop...");
+
+    let poll_duration = Duration::from_millis(args.poll);
+
+    // Main poll loop
+    loop {
+        // Check for new files if watching directory
+        if args.path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&args.path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "jsonl")
+                        && !file_states.contains_key(&path)
+                    {
+                        // New file detected
+                        if std::fs::metadata(&path).is_ok() {
+                            eprintln!("New file detected: {}", path.display());
+                            file_states.insert(
+                                path.clone(),
+                                FileState {
+                                    size: 0, // Start from beginning for new files
+                                    checkpoint: Checkpoint::None,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check each tracked file for changes
+        for (path, state) in file_states.iter_mut() {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let current_size = metadata.len();
+
+                // Skip if file hasn't grown
+                if current_size <= state.size {
+                    continue;
+                }
+
+                // File has grown - parse new content
+                if let Err(e) = process_file_change(&parser, path, state, current_size, &args) {
+                    eprintln!("Warning: Failed to process {}: {}", path.display(), e);
+                }
+            }
+        }
+
+        thread::sleep(poll_duration);
+    }
 }
 
 fn process_file_change(
     parser: &ClaudeCodeParser,
     path: &Path,
-    file_states: &mut HashMap<PathBuf, FileState>,
+    state: &mut FileState,
+    new_size: u64,
     args: &Args,
 ) -> Result<()> {
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
-
-    let file_size = metadata.len();
-
-    // Get or create file state
-    let state = file_states.entry(path.to_path_buf()).or_insert(FileState {
-        checkpoint: Checkpoint::None,
-    });
-
-    // Get current offset
     let from_offset = match &state.checkpoint {
         Checkpoint::ByteOffset { offset } => *offset,
         _ => 0,
     };
 
-    // Skip if file hasn't grown
-    if file_size <= from_offset {
-        return Ok(());
-    }
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
 
     let modified_at = metadata
         .modified()
@@ -209,7 +197,7 @@ fn process_file_change(
     let ctx = ParseContext {
         path,
         checkpoint: &state.checkpoint,
-        file_size,
+        file_size: new_size,
         modified_at,
     };
 
@@ -217,13 +205,14 @@ fn process_file_change(
         .parse(&ctx)
         .with_context(|| format!("Failed to parse: {}", path.display()))?;
 
-    // Update checkpoint
-    state.checkpoint = result.new_checkpoint.clone();
-
+    // Update state
     let to_offset = match &result.new_checkpoint {
         Checkpoint::ByteOffset { offset } => *offset,
-        _ => file_size,
+        _ => new_size,
     };
+
+    state.size = new_size;
+    state.checkpoint = result.new_checkpoint.clone();
 
     // Skip output if no new messages
     if result.messages.is_empty() {
