@@ -1,4 +1,4 @@
-//! aiobscura-debug - Parser debugging tool
+//! aiobscura-debug-claude - Claude Code parser debugging tool
 //!
 //! Parses Claude Code log files and outputs canonical format for debugging.
 
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "aiobscura-debug")]
+#[command(name = "aiobscura-debug-claude")]
 #[command(about = "Parse Claude Code logs and output canonical format")]
 #[command(version)]
 struct Args {

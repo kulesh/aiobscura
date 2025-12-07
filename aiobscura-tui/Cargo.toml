@@ -10,8 +10,12 @@ name = "aiobscura"
 path = "src/main.rs"
 
 [[bin]]
-name = "aiobscura-debug"
-path = "src/debug.rs"
+name = "aiobscura-debug-claude"
+path = "src/debug_claude.rs"
+
+[[bin]]
+name = "aiobscura-debug-codex"
+path = "src/debug_codex.rs"
 
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }

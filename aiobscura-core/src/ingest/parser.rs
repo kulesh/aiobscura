@@ -103,7 +103,7 @@ pub trait AssistantParser: Send + Sync {
 
     /// Patterns for discovering source files.
     ///
-    /// Patterns are relative to [`root_path()`]. Each pattern includes
+    /// Patterns are relative to [`Self::root_path`]. Each pattern includes
     /// the file type for checkpoint strategy selection.
     fn source_patterns(&self) -> Vec<SourcePattern>;
 
@@ -135,7 +135,7 @@ pub trait AssistantParser: Send + Sync {
 
     /// Discover all source files matching this parser's patterns.
     ///
-    /// Default implementation uses glob patterns from [`source_patterns()`].
+    /// Default implementation uses glob patterns from [`Self::source_patterns`].
     fn discover_files(&self) -> Result<Vec<SourceFile>> {
         let root = match self.root_path() {
             Some(r) => r,
