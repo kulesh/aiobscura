@@ -9,6 +9,17 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Agent spawn info for linking threads to Task tool calls.
+#[derive(Debug, Clone)]
+pub struct AgentSpawnInfo {
+    /// Agent ID (e.g., "a4767a09")
+    pub agent_id: String,
+    /// Session ID where the agent was spawned
+    pub session_id: String,
+    /// Seq number of the spawning Task tool_use message
+    pub spawning_message_seq: i64,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -193,12 +204,14 @@ impl Database {
         let conn = self.conn.lock().unwrap();
 
         let (checkpoint_type, checkpoint_data) = match &file.checkpoint {
-            Checkpoint::ByteOffset { offset } => {
-                ("byte_offset".to_string(), serde_json::json!({"offset": offset}))
-            }
-            Checkpoint::ContentHash { hash } => {
-                ("content_hash".to_string(), serde_json::json!({"hash": hash}))
-            }
+            Checkpoint::ByteOffset { offset } => (
+                "byte_offset".to_string(),
+                serde_json::json!({"offset": offset}),
+            ),
+            Checkpoint::ContentHash { hash } => (
+                "content_hash".to_string(),
+                serde_json::json!({"hash": hash}),
+            ),
             Checkpoint::DatabaseCursor {
                 table,
                 cursor_column,
@@ -322,8 +335,8 @@ impl Database {
         conn.execute(
             r#"
             INSERT INTO sessions (id, assistant, backing_model_id, project_id, started_at,
-                                  last_activity_at, status, source_file_path, raw_data, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                  last_activity_at, status, source_file_path, metadata)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 backing_model_id = excluded.backing_model_id,
                 project_id = excluded.project_id,
@@ -340,7 +353,6 @@ impl Database {
                 session.last_activity_at.map(|t| t.to_rfc3339()),
                 session.status.as_str(),
                 session.source_file_path,
-                session.raw_data.as_ref().map(|v| v.to_string()),
                 session.metadata.to_string(),
             ],
         )?;
@@ -405,7 +417,6 @@ impl Database {
         let status_str: String = row.get("status")?;
         let started_at_str: String = row.get("started_at")?;
         let last_activity_str: Option<String> = row.get("last_activity_at")?;
-        let raw_data_str: Option<String> = row.get("raw_data")?;
         let metadata_str: String = row.get("metadata")?;
 
         Ok(Session {
@@ -421,7 +432,6 @@ impl Database {
                 .map(|dt| dt.with_timezone(&Utc)),
             status: status_str.parse().unwrap_or(SessionStatus::Stale),
             source_file_path: row.get("source_file_path")?,
-            raw_data: raw_data_str.and_then(|s| serde_json::from_str(&s).ok()),
             metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
         })
     }
@@ -456,9 +466,8 @@ impl Database {
     /// Get threads for a session
     pub fn get_session_threads(&self, session_id: &str) -> Result<Vec<Thread>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM threads WHERE session_id = ? ORDER BY started_at ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM threads WHERE session_id = ? ORDER BY started_at ASC")?;
 
         let threads = stmt
             .query_map([session_id], Self::row_to_thread)?
@@ -487,6 +496,76 @@ impl Database {
                 .map(|dt| dt.with_timezone(&Utc)),
             metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
         })
+    }
+
+    /// Update thread spawn info (for linking agent threads to spawning Task calls).
+    ///
+    /// Sets `spawned_by_message_id` and `parent_thread_id` for the given thread.
+    pub fn update_thread_spawn_info(
+        &self,
+        thread_id: &str,
+        spawned_by_message_id: i64,
+        parent_thread_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE threads
+            SET spawned_by_message_id = ?1, parent_thread_id = ?2
+            WHERE id = ?3
+            "#,
+            params![spawned_by_message_id, parent_thread_id, thread_id],
+        )?;
+        Ok(())
+    }
+
+    // ============================================
+    // Agent spawn operations
+    // ============================================
+
+    /// Insert or update agent spawn mapping.
+    ///
+    /// Used to persist spawn info for incremental parsing - survives across syncs.
+    pub fn upsert_agent_spawn(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        spawning_seq: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO agent_spawns (agent_id, session_id, spawning_message_seq, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                spawning_message_seq = excluded.spawning_message_seq
+            "#,
+            params![agent_id, session_id, spawning_seq, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Get spawn info for an agent.
+    ///
+    /// Returns the session ID and spawning message seq for linking agent threads.
+    pub fn get_agent_spawn(&self, agent_id: &str) -> Result<Option<AgentSpawnInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, session_id, spawning_message_seq FROM agent_spawns WHERE agent_id = ?",
+        )?;
+
+        let result = stmt
+            .query_row([agent_id], |row| {
+                Ok(AgentSpawnInfo {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    spawning_message_seq: row.get(2)?,
+                })
+            })
+            .optional()?;
+
+        Ok(result)
     }
 
     // ============================================
@@ -574,9 +653,8 @@ impl Database {
     /// Get messages for a session
     pub fn get_session_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC LIMIT ?",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC LIMIT ?")?;
 
         let messages = stmt
             .query_map(params![session_id, limit as i64], |row| {
@@ -590,9 +668,8 @@ impl Database {
     /// Get messages for a thread
     pub fn get_thread_messages(&self, thread_id: &str, limit: usize) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM messages WHERE thread_id = ? ORDER BY seq ASC LIMIT ?",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY seq ASC LIMIT ?")?;
 
         let messages = stmt
             .query_map(params![thread_id, limit as i64], |row| {
@@ -738,7 +815,6 @@ mod tests {
             last_activity_at: Some(Utc::now()),
             status: SessionStatus::Active,
             source_file_path: "/path/to/source.jsonl".to_string(),
-            raw_data: Some(serde_json::json!({"key": "value"})),
             metadata: serde_json::json!({}),
         }
     }

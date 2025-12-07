@@ -14,6 +14,7 @@ use crate::error::Result;
 use crate::types::{
     Assistant, Checkpoint, FileType, Message, Plan, Project, Session, SourceFile, Thread,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Pattern for discovering source files for an assistant.
@@ -49,6 +50,12 @@ pub struct ParseResult {
     pub new_checkpoint: Checkpoint,
     /// Warnings encountered during parsing (non-fatal)
     pub warnings: Vec<String>,
+    /// Map of agentId -> spawning message seq (for linking agent threads)
+    ///
+    /// Populated when parsing main session files that contain Task tool results.
+    /// Used by IngestCoordinator to set `Thread.spawned_by_message_id` when
+    /// parsing agent files.
+    pub agent_spawn_map: HashMap<String, i64>,
 }
 
 /// Context passed to parser with file metadata and checkpoint info.
@@ -141,11 +148,9 @@ pub trait AssistantParser: Send + Sync {
             let full_pattern = root.join(&pattern.pattern);
             let pattern_str = full_pattern.to_string_lossy();
 
-            let entries = glob::glob(&pattern_str).map_err(|e| {
-                crate::error::Error::Parse {
-                    agent: self.assistant().to_string(),
-                    message: format!("Invalid glob pattern: {}", e),
-                }
+            let entries = glob::glob(&pattern_str).map_err(|e| crate::error::Error::Parse {
+                agent: self.assistant().to_string(),
+                message: format!("Invalid glob pattern: {}", e),
             })?;
 
             for entry in entries.flatten() {
@@ -155,14 +160,8 @@ pub trait AssistantParser: Send + Sync {
                     .map(|m| {
                         (
                             m.len(),
-                            m.modified()
-                                .ok()
-                                .map(chrono::DateTime::from)
-                                .unwrap_or(now),
-                            m.created()
-                                .ok()
-                                .map(chrono::DateTime::from)
-                                .unwrap_or(now),
+                            m.modified().ok().map(chrono::DateTime::from).unwrap_or(now),
+                            m.created().ok().map(chrono::DateTime::from).unwrap_or(now),
                         )
                     })
                     .unwrap_or((0, now, now));

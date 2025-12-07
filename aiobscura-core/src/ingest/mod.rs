@@ -162,25 +162,21 @@ impl IngestCoordinator {
     ///
     /// This discovers all source files and syncs each one, respecting
     /// checkpoints for incremental parsing.
+    ///
+    /// ## Spawn Linkage
+    ///
+    /// Agent spawn info is persisted to the `agent_spawns` table during parsing.
+    /// This enables correct thread linkage even in incremental mode where main
+    /// sessions may have been fully parsed in previous syncs.
     pub fn sync_all(&self) -> Result<SyncResult> {
         let files = self.discover_files()?;
         let mut result = SyncResult::default();
 
+        // Process all files - order doesn't matter since spawn info is DB-backed
         for file in files {
-            match self.sync_file(&file.path) {
+            match self.sync_file_internal(&file.path) {
                 Ok(file_result) => {
-                    if file_result.new_messages > 0 {
-                        result.files_processed += 1;
-                        result.messages_inserted += file_result.new_messages;
-                        if file_result.is_new_session {
-                            result.sessions_created += 1;
-                        } else if file_result.session_id.is_some() {
-                            result.sessions_updated += 1;
-                        }
-                    } else {
-                        result.files_skipped += 1;
-                    }
-                    result.warnings.extend(file_result.warnings);
+                    Self::update_result(&mut result, &file_result);
                 }
                 Err(e) => {
                     result.errors.push((file.path.clone(), e.to_string()));
@@ -191,18 +187,43 @@ impl IngestCoordinator {
         Ok(result)
     }
 
+    /// Update result counters from a file sync result.
+    fn update_result(result: &mut SyncResult, file_result: &FileSyncResult) {
+        if file_result.new_messages > 0 {
+            result.files_processed += 1;
+            result.messages_inserted += file_result.new_messages;
+            if file_result.is_new_session {
+                result.sessions_created += 1;
+            } else if file_result.session_id.is_some() {
+                result.sessions_updated += 1;
+            }
+        } else {
+            result.files_skipped += 1;
+        }
+        result.warnings.extend(file_result.warnings.clone());
+    }
+
     /// Sync a single file.
     ///
     /// Loads the checkpoint from the database, parses new content,
     /// and stores the results.
     pub fn sync_file(&self, path: &Path) -> Result<FileSyncResult> {
+        self.sync_file_internal(path)
+    }
+
+    /// Internal sync implementation.
+    ///
+    /// Handles spawn info persistence and lookup:
+    /// - Main sessions: persist spawn map to DB after parsing
+    /// - Agent files: look up spawn info from DB to link threads
+    fn sync_file_internal(&self, path: &Path) -> Result<FileSyncResult> {
         // Find the parser for this file
-        let parser = self.parser_for_file(path).ok_or_else(|| {
-            crate::error::Error::Parse {
+        let parser = self
+            .parser_for_file(path)
+            .ok_or_else(|| crate::error::Error::Parse {
                 agent: "unknown".to_string(),
                 message: format!("No parser found for file: {}", path.display()),
-            }
-        })?;
+            })?;
 
         // Get existing source file record (for checkpoint)
         let existing = self.db.get_source_file(&path.to_string_lossy())?;
@@ -254,7 +275,10 @@ impl IngestCoordinator {
                 .map(|s| s.file_type)
                 .unwrap_or(crate::types::FileType::Jsonl),
             assistant: parser.assistant(),
-            created_at: existing.as_ref().map(|s| s.created_at).unwrap_or_else(Utc::now),
+            created_at: existing
+                .as_ref()
+                .map(|s| s.created_at)
+                .unwrap_or_else(Utc::now),
             modified_at,
             size_bytes: file_size,
             last_parsed_at: Some(Utc::now()),
@@ -275,12 +299,36 @@ impl IngestCoordinator {
             self.db.upsert_session(session)?;
         }
 
+        // Persist spawn info for main sessions (enables incremental agent linking)
+        if !is_agent_file(path) {
+            if let Some(ref sid) = session_id {
+                for (agent_id, spawning_seq) in &parse_result.agent_spawn_map {
+                    self.db.upsert_agent_spawn(agent_id, sid, *spawning_seq)?;
+                }
+            }
+        }
+
         // Store threads
         for thread in &parse_result.threads {
             // Check if thread already exists
             let existing_threads = self.db.get_session_threads(&thread.session_id)?;
             if !existing_threads.iter().any(|t| t.id == thread.id) {
                 self.db.insert_thread(thread)?;
+            }
+        }
+
+        // For agent files, look up spawn info from DB and link threads
+        if is_agent_file(path) {
+            if let Some(agent_id) = extract_agent_id(path) {
+                if let Some(spawn_info) = self.db.get_agent_spawn(&agent_id)? {
+                    for thread in &parse_result.threads {
+                        self.update_thread_spawn_info(
+                            &thread.id,
+                            spawn_info.spawning_message_seq,
+                            &spawn_info.session_id,
+                        )?;
+                    }
+                }
             }
         }
 
@@ -300,6 +348,20 @@ impl IngestCoordinator {
         })
     }
 
+    /// Update thread spawn info after parsing an agent file.
+    ///
+    /// Sets `spawned_by_message_id` and `parent_thread_id` for the given thread.
+    fn update_thread_spawn_info(
+        &self,
+        thread_id: &str,
+        spawning_seq: i64,
+        session_id: &str,
+    ) -> Result<()> {
+        let main_thread_id = format!("{}-main", session_id);
+        self.db
+            .update_thread_spawn_info(thread_id, spawning_seq, &main_thread_id)
+    }
+
     /// Find the parser that handles a given file.
     fn parser_for_file(&self, path: &Path) -> Option<&dyn AssistantParser> {
         for parser in &self.parsers {
@@ -313,6 +375,28 @@ impl IngestCoordinator {
     }
 }
 
+/// Check if a file is an agent file (agent-*.jsonl pattern).
+fn is_agent_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.starts_with("agent-"))
+        .unwrap_or(false)
+}
+
+/// Extract agent ID from an agent file path.
+///
+/// Given `agent-a4767a09.jsonl`, returns `Some("a4767a09")`.
+fn extract_agent_id(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    if !file_name.starts_with("agent-") {
+        return None;
+    }
+
+    // Strip "agent-" prefix and ".jsonl" suffix
+    let stem = path.file_stem()?.to_str()?;
+    stem.strip_prefix("agent-").map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +407,35 @@ mod tests {
         assert_eq!(result.files_processed, 0);
         assert_eq!(result.messages_inserted, 0);
         assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_is_agent_file() {
+        assert!(is_agent_file(Path::new("agent-a4767a09.jsonl")));
+        assert!(is_agent_file(Path::new("/path/to/agent-10b3de07.jsonl")));
+        assert!(!is_agent_file(Path::new(
+            "b4749c81-937a-4bd4-b62c-9d78905f0975.jsonl"
+        )));
+        assert!(!is_agent_file(Path::new("session.jsonl")));
+    }
+
+    #[test]
+    fn test_extract_agent_id() {
+        assert_eq!(
+            extract_agent_id(Path::new("agent-a4767a09.jsonl")),
+            Some("a4767a09".to_string())
+        );
+        assert_eq!(
+            extract_agent_id(Path::new("/path/to/agent-10b3de07.jsonl")),
+            Some("10b3de07".to_string())
+        );
+        assert_eq!(
+            extract_agent_id(Path::new("b4749c81-937a-4bd4-b62c-9d78905f0975.jsonl")),
+            None
+        );
+        assert_eq!(
+            extract_agent_id(Path::new("agent-.jsonl")),
+            Some("".to_string())
+        );
     }
 }

@@ -10,8 +10,8 @@ fn main() -> Result<()> {
     let config = Config::load().context("failed to load configuration")?;
 
     // Initialize logging
-    let _log_guard = aiobscura_core::logging::init(&config.logging)
-        .context("failed to initialize logging")?;
+    let _log_guard =
+        aiobscura_core::logging::init(&config.logging).context("failed to initialize logging")?;
 
     tracing::info!("aiobscura starting up");
 

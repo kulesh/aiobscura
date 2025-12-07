@@ -14,6 +14,7 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -211,6 +212,9 @@ impl AssistantParser for ClaudeCodeParser {
         let mut first_timestamp: Option<DateTime<Utc>> = None;
         let mut last_timestamp: Option<DateTime<Utc>> = None;
 
+        // Track uuid -> seq mapping for agent spawn linkage
+        let mut uuid_to_seq: HashMap<String, i32> = HashMap::new();
+
         let source_path = ctx.path.to_string_lossy().to_string();
 
         for line_result in reader.lines() {
@@ -280,9 +284,10 @@ impl AssistantParser for ClaudeCodeParser {
 
             // Extract session ID (first occurrence)
             if session_id.is_none() {
-                session_id = record.session_id.clone().or_else(|| {
-                    self.extract_session_id(ctx.path)
-                });
+                session_id = record
+                    .session_id
+                    .clone()
+                    .or_else(|| self.extract_session_id(ctx.path));
             }
 
             // Extract metadata from first record
@@ -308,9 +313,9 @@ impl AssistantParser for ClaudeCodeParser {
 
             // Create thread on first message if needed
             if thread_id.is_none() {
-                let sid = session_id.clone().unwrap_or_else(|| {
-                    uuid::Uuid::new_v4().to_string()
-                });
+                let sid = session_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                 // Determine thread type from file name
                 let ttype = if ctx
@@ -347,6 +352,10 @@ impl AssistantParser for ClaudeCodeParser {
                 }
             }
 
+            // Track uuid -> seq for the CURRENT seq (before messages are created)
+            // This will let us look up the seq of the spawning message later
+            let pre_message_seq = seq;
+
             // Convert to Message(s)
             let messages = self.record_to_messages(
                 &record,
@@ -359,6 +368,33 @@ impl AssistantParser for ClaudeCodeParser {
                 record_offset as i64,
                 Some(line_number),
             );
+
+            // Record uuid -> seq mapping for the first message created from this record
+            // (used for agent spawn linkage - the spawning message is the tool_use)
+            if let Some(uuid) = &record.uuid {
+                // Use pre_message_seq + 1 since seq is incremented when creating messages
+                if pre_message_seq < seq {
+                    uuid_to_seq.insert(uuid.clone(), pre_message_seq + 1);
+                }
+            }
+
+            // Check for agent spawn info in tool_result records (main session only)
+            // The toolUseResult.agentId field links to the agent file
+            if !is_agent_file {
+                if let Some(ref tool_use_result) = record.tool_use_result {
+                    if let Some(agent_id) = tool_use_result.get("agentId").and_then(|v| v.as_str())
+                    {
+                        // The parentUuid points to the tool_use message that spawned this agent
+                        if let Some(ref parent_uuid) = record.parent_uuid {
+                            if let Some(&spawning_seq) = uuid_to_seq.get(parent_uuid) {
+                                result
+                                    .agent_spawn_map
+                                    .insert(agent_id.to_string(), spawning_seq as i64);
+                            }
+                        }
+                    }
+                }
+            }
 
             result.messages.extend(messages);
         }
@@ -395,7 +431,6 @@ impl AssistantParser for ClaudeCodeParser {
                 last_activity_at: last_timestamp,
                 status: SessionStatus::from_last_activity(last_timestamp),
                 source_file_path: source_path,
-                raw_data: None,
                 metadata: serde_json::json!({
                     "project_path": project_path,
                     "cwd": cwd,
@@ -726,7 +761,8 @@ mod tests {
         let parser = ClaudeCodeParser::new();
 
         // Standard path
-        let path = PathBuf::from("/Users/test/.claude/projects/-Users-test-dev-myproject/session.jsonl");
+        let path =
+            PathBuf::from("/Users/test/.claude/projects/-Users-test-dev-myproject/session.jsonl");
         let project = parser.extract_project_path(&path);
         assert_eq!(project, Some(PathBuf::from("/Users/test/dev/myproject")));
     }

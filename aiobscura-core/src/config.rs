@@ -164,9 +164,8 @@ impl Config {
 
     /// Load configuration from a specific path
     pub fn load_from(path: &PathBuf) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("failed to read config file {:?}: {}", path, e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("failed to read config file {:?}: {}", path, e)))?;
 
         let config: Config = toml::from_str(&content)
             .map_err(|e| Error::Config(format!("failed to parse config: {}", e)))?;

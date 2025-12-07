@@ -337,10 +337,7 @@ pub struct Session {
     /// FK to source_files table (path is PK)
     pub source_file_path: String,
 
-    // Lossless capture
-    /// Original session metadata (if any) - complete JSON
-    pub raw_data: Option<serde_json::Value>,
-    /// Parsed assistant-specific fields we recognized
+    /// Parsed assistant-specific fields (cwd, git_branch, etc.)
     pub metadata: serde_json::Value,
 }
 
@@ -637,7 +634,10 @@ impl Message {
     /// (excludes tool calls, agent messages, system context)
     pub fn is_conversation_message(&self) -> bool {
         matches!(self.author_role, AuthorRole::Human | AuthorRole::Assistant)
-            && matches!(self.message_type, MessageType::Prompt | MessageType::Response)
+            && matches!(
+                self.message_type,
+                MessageType::Prompt | MessageType::Response
+            )
     }
 }
 
