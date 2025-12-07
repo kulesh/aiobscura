@@ -16,8 +16,9 @@ use std::path::PathBuf;
 #[command(about = "Parse Claude Code logs and output canonical format")]
 #[command(version)]
 struct Args {
-    /// Path to JSONL file to parse
-    file: PathBuf,
+    /// Path(s) to JSONL file(s) to parse
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
 
     /// Compact JSON output (default: pretty)
     #[arg(long)]
@@ -96,17 +97,50 @@ struct Stats {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Validate file exists
-    if !args.file.exists() {
-        anyhow::bail!("File not found: {}", args.file.display());
+    let parser = ClaudeCodeParser::new();
+    let mut outputs = Vec::new();
+
+    for file in &args.files {
+        // Validate file exists
+        if !file.exists() {
+            eprintln!("Warning: File not found: {}", file.display());
+            continue;
+        }
+
+        match parse_file(&parser, file) {
+            Ok(result) => {
+                let output = build_output(&args, file, &result);
+                outputs.push(output);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to parse {}: {}", file.display(), e);
+            }
+        }
     }
 
-    // Create parser
-    let parser = ClaudeCodeParser::new();
+    if outputs.is_empty() {
+        anyhow::bail!("No files were successfully parsed");
+    }
 
-    // Build context
-    let metadata = std::fs::metadata(&args.file)
-        .with_context(|| format!("Failed to read file metadata: {}", args.file.display()))?;
+    // Output: single object for one file, array for multiple
+    if outputs.len() == 1 {
+        if args.compact {
+            println!("{}", serde_json::to_string(&outputs[0])?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&outputs[0])?);
+        }
+    } else if args.compact {
+        println!("{}", serde_json::to_string(&outputs)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&outputs)?);
+    }
+
+    Ok(())
+}
+
+fn parse_file(parser: &ClaudeCodeParser, file: &PathBuf) -> Result<ParseResult> {
+    let metadata = std::fs::metadata(file)
+        .with_context(|| format!("Failed to read file metadata: {}", file.display()))?;
 
     let modified_at = metadata
         .modified()
@@ -115,31 +149,18 @@ fn main() -> Result<()> {
         .unwrap_or_else(chrono::Utc::now);
 
     let ctx = ParseContext {
-        path: &args.file,
+        path: file,
         checkpoint: &Checkpoint::None,
         file_size: metadata.len(),
         modified_at,
     };
 
-    // Parse
-    let result = parser
+    parser
         .parse(&ctx)
-        .with_context(|| format!("Failed to parse: {}", args.file.display()))?;
-
-    // Build output
-    let output = build_output(&args, &result);
-
-    // Serialize and print
-    if args.compact {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    }
-
-    Ok(())
+        .with_context(|| format!("Failed to parse: {}", file.display()))
 }
 
-fn build_output(args: &Args, result: &ParseResult) -> DebugOutput {
+fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> DebugOutput {
     // Compute statistics
     let stats = compute_stats(&result.messages);
 
@@ -162,7 +183,7 @@ fn build_output(args: &Args, result: &ParseResult) -> DebugOutput {
     };
 
     DebugOutput {
-        file: args.file.display().to_string(),
+        file: file.display().to_string(),
         project: result.project.clone(),
         session: result.session.clone(),
         threads: result.threads.clone(),
