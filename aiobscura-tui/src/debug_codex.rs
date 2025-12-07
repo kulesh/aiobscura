@@ -68,6 +68,8 @@ struct MessageOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_input: Option<serde_json::Value>,
@@ -204,6 +206,7 @@ fn message_to_output(msg: &Message, include_raw: bool) -> MessageOutput {
         author_name: msg.author_name.clone(),
         message_type: msg.message_type.as_str().to_string(),
         content: msg.content.clone(),
+        content_type: msg.content_type.as_ref().map(|ct| format!("{:?}", ct)),
         tool_name: msg.tool_name.clone(),
         tool_input: msg.tool_input.clone(),
         tool_result: msg.tool_result.clone(),
