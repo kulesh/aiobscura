@@ -8,13 +8,15 @@
 //! | Assistant | Module | Status |
 //! |-----------|--------|--------|
 //! | Claude Code | [`claude`] | ✅ Implemented |
-//! | Codex | `codex` | 🔜 Phase 3 |
+//! | Codex | [`codex`] | ✅ Implemented |
 //! | Aider | `aider` | 📋 Planned |
 //! | Cursor | `cursor` | 📋 Planned |
 
 mod claude;
+mod codex;
 
 pub use claude::ClaudeCodeParser;
+pub use codex::CodexParser;
 
 use super::AssistantParser;
 use crate::types::Assistant;
@@ -26,7 +28,7 @@ use crate::types::Assistant;
 pub fn create_all_parsers() -> Vec<Box<dyn AssistantParser>> {
     vec![
         Box::new(ClaudeCodeParser::new()),
-        // Future: Box::new(CodexParser::new()),
+        Box::new(CodexParser::new()),
         // Future: Box::new(AiderParser::new()),
         // Future: Box::new(CursorParser::new()),
     ]
@@ -38,6 +40,7 @@ pub fn create_all_parsers() -> Vec<Box<dyn AssistantParser>> {
 pub fn parser_for(assistant: Assistant) -> Option<Box<dyn AssistantParser>> {
     match assistant {
         Assistant::ClaudeCode => Some(Box::new(ClaudeCodeParser::new())),
+        Assistant::Codex => Some(Box::new(CodexParser::new())),
         _ => None, // Not yet implemented
     }
 }
@@ -63,8 +66,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_for_unimplemented() {
+    fn test_parser_for_codex() {
         let parser = parser_for(Assistant::Codex);
+        assert!(parser.is_some());
+        assert_eq!(parser.unwrap().assistant(), Assistant::Codex);
+    }
+
+    #[test]
+    fn test_parser_for_unimplemented() {
+        let parser = parser_for(Assistant::Aider);
         assert!(parser.is_none());
     }
 }

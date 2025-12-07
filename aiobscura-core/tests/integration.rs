@@ -4,9 +4,9 @@
 //! the end-to-end parsing and database storage flow.
 
 use aiobscura_core::db::Database;
-use aiobscura_core::ingest::parsers::ClaudeCodeParser;
+use aiobscura_core::ingest::parsers::{ClaudeCodeParser, CodexParser};
 use aiobscura_core::ingest::{AssistantParser, ParseContext};
-use aiobscura_core::types::{AuthorRole, Checkpoint, MessageType};
+use aiobscura_core::types::{Assistant, AuthorRole, Checkpoint, MessageType};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -429,4 +429,230 @@ fn test_backing_model_extraction() {
         model_id.contains("claude"),
         "model ID should contain 'claude'"
     );
+}
+
+// ============================================
+// Codex Parser Tests
+// ============================================
+
+/// Get the path to a Codex fixture file
+fn codex_fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex")
+        .join(name)
+}
+
+/// Create a parse context for a Codex fixture file
+fn codex_parse_context(path: &PathBuf) -> ParseContext<'_> {
+    let metadata = std::fs::metadata(path).unwrap();
+    ParseContext {
+        path,
+        checkpoint: &Checkpoint::None,
+        file_size: metadata.len(),
+        modified_at: chrono::Utc::now(),
+    }
+}
+
+#[test]
+fn test_codex_parse_minimal_session() {
+    let path = codex_fixture_path("minimal-session.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = codex_parse_context(&path);
+
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    // Should have created a session
+    assert!(result.session.is_some());
+    let session = result.session.as_ref().unwrap();
+    assert_eq!(session.id, "019ab86e-1e83-75b0-b2d7-d335492e7026");
+    assert_eq!(session.assistant, Assistant::Codex);
+
+    // Should have backing model
+    assert!(session.backing_model_id.is_some());
+    let model_id = session.backing_model_id.as_ref().unwrap();
+    assert!(
+        model_id.contains("openai:"),
+        "model ID should have openai prefix"
+    );
+    assert!(model_id.contains("gpt"), "model ID should contain 'gpt'");
+
+    // Should have created one main thread
+    assert_eq!(result.threads.len(), 1);
+    assert_eq!(
+        result.threads[0].thread_type,
+        aiobscura_core::types::ThreadType::Main
+    );
+
+    // Should have parsed messages (user + assistant)
+    assert!(!result.messages.is_empty());
+
+    // Check for user messages
+    let user_msgs: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.author_role == AuthorRole::Human)
+        .collect();
+    assert!(user_msgs.len() >= 2, "should have at least 2 user messages");
+
+    // Check for assistant messages
+    let assistant_msgs: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.author_role == AuthorRole::Assistant)
+        .collect();
+    assert!(
+        assistant_msgs.len() >= 2,
+        "should have at least 2 assistant messages"
+    );
+
+    // Check first user message content
+    assert!(user_msgs[0].content.as_ref().unwrap().contains("list"));
+}
+
+#[test]
+fn test_codex_parse_with_tool_calls() {
+    let path = codex_fixture_path("with-tool-calls.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = codex_parse_context(&path);
+
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    // Should have created a session
+    assert!(result.session.is_some());
+    let session = result.session.as_ref().unwrap();
+    assert_eq!(session.id, "019ab86e-2222-3333-4444-555566667777");
+
+    // Count tool calls and results
+    let tool_calls: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.message_type == MessageType::ToolCall)
+        .collect();
+    let tool_results: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.message_type == MessageType::ToolResult)
+        .collect();
+
+    // Should have 2 tool calls (shell_command and read_file)
+    assert_eq!(tool_calls.len(), 2, "should have 2 tool calls");
+
+    // Should have 2 tool results
+    assert_eq!(tool_results.len(), 2, "should have 2 tool results");
+
+    // Check tool names
+    let tool_names: Vec<_> = tool_calls
+        .iter()
+        .filter_map(|m| m.tool_name.as_ref())
+        .collect();
+    assert!(tool_names.contains(&&"shell_command".to_string()));
+    assert!(tool_names.contains(&&"read_file".to_string()));
+
+    // Check tool input is captured
+    let shell_call = tool_calls
+        .iter()
+        .find(|m| m.tool_name.as_ref() == Some(&"shell_command".to_string()))
+        .unwrap();
+    assert!(shell_call.tool_input.is_some());
+
+    // Check tool result is captured
+    let first_result = &tool_results[0];
+    assert!(first_result.tool_result.is_some());
+    assert!(first_result
+        .tool_result
+        .as_ref()
+        .unwrap()
+        .contains("Exit code: 0"));
+
+    // Check call_id is in metadata
+    assert!(shell_call.metadata.get("call_id").is_some());
+}
+
+#[test]
+fn test_codex_parse_empty_file() {
+    let path = codex_fixture_path("empty.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = codex_parse_context(&path);
+
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    // Empty file should produce no session, threads, or messages
+    assert!(result.session.is_none());
+    assert!(result.threads.is_empty());
+    assert!(result.messages.is_empty());
+}
+
+#[test]
+fn test_codex_incremental_parsing() {
+    let path = codex_fixture_path("minimal-session.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+
+    // First parse - from beginning
+    let ctx1 = codex_parse_context(&path);
+    let result1 = parser.parse(&ctx1).expect("first parse should succeed");
+
+    let first_message_count = result1.messages.len();
+    assert!(first_message_count > 0);
+
+    // Get checkpoint from first parse
+    let checkpoint = result1.new_checkpoint.clone();
+
+    // Second parse - from checkpoint (should find no new messages)
+    let metadata = std::fs::metadata(&path).unwrap();
+    let ctx2 = ParseContext {
+        path: &path,
+        checkpoint: &checkpoint,
+        file_size: metadata.len(),
+        modified_at: chrono::Utc::now(),
+    };
+
+    let result2 = parser.parse(&ctx2).expect("second parse should succeed");
+
+    // No new messages since file hasn't changed
+    assert_eq!(
+        result2.messages.len(),
+        0,
+        "incremental parse should find no new messages"
+    );
+}
+
+#[test]
+fn test_codex_session_metadata() {
+    let path = codex_fixture_path("minimal-session.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = codex_parse_context(&path);
+
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    let session = result.session.as_ref().unwrap();
+
+    // Check metadata fields are captured
+    let metadata = &session.metadata;
+    assert!(metadata.get("cwd").is_some(), "cwd should be in metadata");
+    assert!(metadata.get("git").is_some(), "git should be in metadata");
+
+    // Check git info
+    let git = metadata.get("git").unwrap();
+    assert!(git.get("branch").is_some(), "git branch should be captured");
+    assert!(
+        git.get("commit_hash").is_some(),
+        "git commit_hash should be captured"
+    );
+}
+
+#[test]
+fn test_codex_project_creation() {
+    let path = codex_fixture_path("minimal-session.jsonl");
+    let parser = CodexParser::with_root(codex_fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = codex_parse_context(&path);
+
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    // Should have created a project from cwd
+    assert!(result.project.is_some());
+    let project = result.project.as_ref().unwrap();
+
+    // Project path should match cwd from session_meta
+    assert_eq!(project.path.to_string_lossy(), "/Users/test/dev/myproject");
+    assert_eq!(project.name, Some("myproject".to_string()));
 }
