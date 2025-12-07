@@ -202,15 +202,105 @@ Agent files (`agent-[id].jsonl`) contain conversations from Task tool invocation
 {
   "agentId": "a1a93487",
   "slug": "warm-finding-russell",
-  "sessionId": "parent-session-uuid"
+  "sessionId": "parent-session-uuid",
+  "isSidechain": true
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `agentId` | Short identifier for this agent |
+| `agentId` | Short identifier for this agent (matches filename) |
 | `slug` | Human-readable slug (often matches plan file name) |
 | `sessionId` | Links back to the parent session |
+| `isSidechain` | Always `true` for agent files |
+
+### Agent File Linkage
+
+Agent files are linked to their spawning Task tool call through the `toolUseResult.agentId` field in the main session file.
+
+#### Correlation Path
+
+```
+Main Session                              Agent File
+────────────                              ──────────
+
+Task tool_use message
+  uuid: "5f41f821-..."
+  message.content[].name: "Task"
+           │
+           │ (parentUuid points back)
+           ▼
+Task tool_result message          ───────►  agent-a4767a09.jsonl
+  parentUuid: "5f41f821-..."                  agentId: "a4767a09"
+  toolUseResult.agentId: "a4767a09"           sessionId: "b4749c81-..."
+```
+
+#### Task Tool Call (in main session)
+
+When the assistant invokes the Task tool:
+
+```json
+{
+  "uuid": "5f41f821-63c5-4d8e-a0c4-80a8fb673d21",
+  "type": "assistant",
+  "message": {
+    "content": [{
+      "type": "tool_use",
+      "id": "toolu_01YYryTte3GmzGU3ZvMuZ22R",
+      "name": "Task",
+      "input": {
+        "subagent_type": "Plan",
+        "prompt": "Design the implementation..."
+      }
+    }]
+  },
+  "timestamp": "2025-12-06T18:21:29.464Z"
+}
+```
+
+#### Task Tool Result (in main session)
+
+When the agent completes, the result includes `agentId`:
+
+```json
+{
+  "uuid": "76cb4f38-9514-4d64-bdc5-6febe9fad4c4",
+  "parentUuid": "5f41f821-63c5-4d8e-a0c4-80a8fb673d21",
+  "type": "user",
+  "message": {
+    "content": [{
+      "type": "tool_result",
+      "tool_use_id": "toolu_01YYryTte3GmzGU3ZvMuZ22R",
+      "content": "Agent output..."
+    }]
+  },
+  "toolUseResult": {
+    "status": "completed",
+    "agentId": "a4767a09",
+    "prompt": "Design the implementation..."
+  }
+}
+```
+
+**Key insight**: The `toolUseResult.agentId` field provides the link between the spawning message and the agent file.
+
+#### Linking Algorithm
+
+To correlate agent files with their spawning messages:
+
+1. Parse main session, find `tool_result` records where `toolUseResult.name == "Task"` (or has `agentId`)
+2. Extract `toolUseResult.agentId` and `parentUuid`
+3. Build map: `agentId → spawning_message_uuid`
+4. When processing agent files, look up spawning message from map
+5. Set `Thread.spawned_by_message_id` to reference the spawning message
+
+#### Edge Cases
+
+| Case | Handling |
+|------|----------|
+| Agent file without tool result | Log warning, `spawned_by_message_id = None` |
+| Multiple agents with same slug | Use `agentId` for correlation (slugs can repeat) |
+| Orphaned agent file | Agent exists but no Task call in session (truncated?) |
 
 ## Token Usage
 
