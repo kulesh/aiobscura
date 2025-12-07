@@ -281,6 +281,50 @@ Captures uncommitted git state for potential rollback.
 
 Model thinking/reasoning (may be encrypted in production).
 
+#### Custom Tool Call
+
+```json
+{
+  "timestamp": "2025-11-25T00:50:09.953Z",
+  "type": "response_item",
+  "payload": {
+    "type": "custom_tool_call",
+    "status": "completed",
+    "call_id": "call_QOfB5vNqL65vduFUzXvV1ZZP",
+    "name": "apply_patch",
+    "input": "*** Begin Patch\n*** Add File: src/example.py\n..."
+  }
+}
+```
+
+Custom tools (like `apply_patch`) that aren't standard shell commands.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Tool name (e.g., `apply_patch`) |
+| `input` | string | Raw input (patch content, etc.) |
+| `call_id` | string | Unique ID for linking to output |
+| `status` | string | Execution status |
+
+#### Custom Tool Call Output
+
+```json
+{
+  "timestamp": "2025-11-25T00:50:09.953Z",
+  "type": "response_item",
+  "payload": {
+    "type": "custom_tool_call_output",
+    "call_id": "call_QOfB5vNqL65vduFUzXvV1ZZP",
+    "output": "{\"output\":\"Success. Updated the following files:\\nA src/example.py\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.0}}"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | string | Links to originating custom_tool_call |
+| `output` | string | JSON-encoded result with metadata |
+
 ### 4. Turn Context (`type: "turn_context"`)
 
 Environment snapshot at each conversation turn:
@@ -312,6 +356,35 @@ Environment snapshot at each conversation turn:
 | `model` | string | Active model name |
 | `summary` | string | Summary mode |
 
+### 5. Compacted (`type: "compacted"`)
+
+Context compaction marker, inserted when conversation history is summarized:
+
+```json
+{
+  "timestamp": "2025-11-25T01:23:56.949Z",
+  "type": "compacted",
+  "payload": {
+    "message": "",
+    "replacement_history": [
+      { "type": "message", "role": "user", "content": [...] },
+      { "type": "compaction_summary", "encrypted_content": "gAAAAABpJQUs..." },
+      { "type": "ghost_snapshot", "ghost_commit": {...} }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `message` | string | Optional human-readable message |
+| `replacement_history` | array | Summarized conversation history |
+
+The `replacement_history` array contains the compacted context, including:
+- Original user messages (preserved as-is)
+- Encrypted compaction summaries
+- Ghost snapshots of file state at compaction time
+
 ## Key Differences from Claude Code
 
 | Aspect | Claude Code | Codex |
@@ -335,8 +408,10 @@ Environment snapshot at each conversation turn:
 | `event_msg.agent_message` | `Agent` |
 | `response_item.message (role=user)` | `Human` |
 | `response_item.message (role=assistant)` | `Assistant` |
-| `response_item.function_call` | `Tool` |
+| `response_item.function_call` | `Assistant` |
 | `response_item.function_call_output` | `Tool` |
+| `response_item.custom_tool_call` | `Assistant` |
+| `response_item.custom_tool_call_output` | `Tool` |
 
 ### Message Type Mapping
 
@@ -346,9 +421,12 @@ Environment snapshot at each conversation turn:
 | `response_item.message (role=assistant)` | `Response` |
 | `response_item.function_call` | `ToolCall` |
 | `response_item.function_call_output` | `ToolResult` |
+| `response_item.custom_tool_call` | `ToolCall` |
+| `response_item.custom_tool_call_output` | `ToolResult` |
 | `response_item.reasoning` | `Context` |
 | `event_msg.agent_reasoning` | `Context` |
 | `response_item.ghost_snapshot` | `Context` |
+| `compacted` | `Context` |
 
 ### Field Mapping
 
