@@ -49,6 +49,8 @@ struct DebugOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     messages: Vec<MessageOutput>,
     stats: Stats,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    agent_spawn_map: HashMap<String, i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
 }
@@ -189,6 +191,7 @@ fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> De
         threads: result.threads.clone(),
         messages,
         stats,
+        agent_spawn_map: result.agent_spawn_map.clone(),
         warnings,
     }
 }

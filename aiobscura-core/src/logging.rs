@@ -31,9 +31,8 @@ pub fn init(config: &LoggingConfig) -> crate::error::Result<LoggingGuard> {
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // Build the filter from config or env var
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(&config.level)
-    });
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
     // File layer - structured logging with timestamps
     let file_layer = fmt::layer()

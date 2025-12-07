@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// SQL migrations, indexed by version number
 const MIGRATIONS: &[&str] = &[
@@ -243,8 +243,7 @@ const MIGRATIONS: &[&str] = &[
         last_activity_at DATETIME,
         status           TEXT,               -- 'active', 'inactive', 'stale'
         source_file_path TEXT NOT NULL REFERENCES source_files(path),
-        raw_data         JSON,
-        metadata         JSON
+        metadata         JSON                -- No raw_data: sessions are derived from messages
     );
 
     CREATE INDEX idx_sessions_project ON sessions(project_id);
@@ -389,6 +388,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_plugin_runs_plugin ON plugin_runs(plugin_name, started_at);
     CREATE INDEX idx_plugin_runs_status ON plugin_runs(status) WHERE status != 'success';
     "#,
+    // Version 3: Add agent_spawns table for incremental spawn linkage
+    r#"
+    -- Agent spawn mappings for linking agent threads to Task tool calls
+    -- Persisted to survive incremental parses
+    CREATE TABLE IF NOT EXISTS agent_spawns (
+        agent_id             TEXT PRIMARY KEY,
+        session_id           TEXT NOT NULL REFERENCES sessions(id),
+        spawning_message_seq INTEGER NOT NULL,
+        created_at           DATETIME NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_spawns_session ON agent_spawns(session_id);
+    "#,
 ];
 
 /// Run all pending migrations
@@ -464,6 +476,7 @@ mod tests {
             "assessments",
             "plugin_metrics",
             "plugin_runs",
+            "agent_spawns",
         ];
 
         for table in tables {
