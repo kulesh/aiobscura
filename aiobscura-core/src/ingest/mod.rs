@@ -338,6 +338,22 @@ impl IngestCoordinator {
             self.db.insert_messages(&parse_result.messages)?;
         }
 
+        // Store plans and link to session
+        if let Some(ref sid) = session_id {
+            for plan in &parse_result.plans {
+                // Upsert plan version (deduplicates by content hash)
+                self.db.upsert_plan_version(plan)?;
+
+                // Link session to plan
+                let first_used_at = parse_result
+                    .session
+                    .as_ref()
+                    .map(|s| s.started_at)
+                    .unwrap_or_else(Utc::now);
+                self.db.link_session_plan(sid, &plan.id, first_used_at)?;
+            }
+        }
+
         Ok(FileSyncResult {
             path: path.to_path_buf(),
             new_messages,

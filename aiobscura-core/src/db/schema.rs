@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// SQL migrations, indexed by version number
 const MIGRATIONS: &[&str] = &[
@@ -401,6 +401,32 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX IF NOT EXISTS idx_agent_spawns_session ON agent_spawns(session_id);
     "#,
+    // Version 4: Add session_plans join table and plan_versions for history
+    r#"
+    -- Session-Plan M:N relationship (sessions can have multiple plans, plans can be reused)
+    CREATE TABLE IF NOT EXISTS session_plans (
+        session_id       TEXT NOT NULL REFERENCES sessions(id),
+        plan_slug        TEXT NOT NULL,
+        first_used_at    DATETIME NOT NULL,
+        PRIMARY KEY (session_id, plan_slug)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_plans_slug ON session_plans(plan_slug);
+
+    -- Plan content versions (track changes over time, deduplicated by content hash)
+    CREATE TABLE IF NOT EXISTS plan_versions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_slug        TEXT NOT NULL,
+        content_hash     TEXT NOT NULL,
+        title            TEXT,
+        content          TEXT NOT NULL,
+        captured_at      DATETIME NOT NULL,
+        source_file      TEXT NOT NULL,
+        UNIQUE(plan_slug, content_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_plan_versions_slug ON plan_versions(plan_slug);
+    "#,
 ];
 
 /// Run all pending migrations
@@ -477,6 +503,8 @@ mod tests {
             "plugin_metrics",
             "plugin_runs",
             "agent_spawns",
+            "session_plans",
+            "plan_versions",
         ];
 
         for table in tables {
