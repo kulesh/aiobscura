@@ -38,8 +38,8 @@
 use crate::error::{Error, Result};
 use crate::ingest::parser::{AssistantParser, ParseContext, ParseResult, SourcePattern};
 use crate::types::{
-    Assistant, AuthorRole, Checkpoint, FileType, Message, MessageType, Project, Session,
-    SessionStatus, Thread, ThreadType,
+    Assistant, AuthorRole, Checkpoint, ContentType, FileType, Message, MessageType, Project,
+    Session, SessionStatus, Thread, ThreadType,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -151,9 +151,26 @@ enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
     // Catch-all for unknown block types
     #[serde(other)]
     Unknown,
+}
+
+/// Source information for an image content block.
+///
+/// The `data` field is intentionally omitted as it contains the full
+/// base64-encoded image which would be too large to store.
+#[derive(Debug, Deserialize)]
+struct ImageSource {
+    /// Source type, typically "base64" (not currently used but kept for completeness)
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    source_type: String,
+    /// Media type, e.g., "image/png", "image/jpeg"
+    media_type: String,
+    // data field intentionally omitted - too large to store
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -563,6 +580,7 @@ impl ClaudeCodeParser {
                                         author_name: None,
                                         message_type: MessageType::Response,
                                         content: Some(text.clone()),
+                                        content_type: Some(ContentType::Text),
                                         tool_name: None,
                                         tool_input: None,
                                         tool_result: None,
@@ -593,6 +611,7 @@ impl ClaudeCodeParser {
                                                     author_name: None,
                                                     message_type: MessageType::Response,
                                                     content: Some(text.clone()),
+                                                    content_type: Some(ContentType::Text),
                                                     tool_name: None,
                                                     tool_input: None,
                                                     tool_result: None,
@@ -619,6 +638,7 @@ impl ClaudeCodeParser {
                                                 author_name: None,
                                                 message_type: MessageType::ToolCall,
                                                 content: None,
+                                                content_type: None,
                                                 tool_name: Some(name.clone()),
                                                 tool_input: Some(input.clone()),
                                                 tool_result: None,
@@ -634,7 +654,104 @@ impl ClaudeCodeParser {
                                                 }),
                                             });
                                         }
-                                        _ => {} // Skip unknown block types
+                                        // Image and Unknown blocks in assistant messages are rare,
+                                        // but we capture them as Context rather than silently skip
+                                        ContentBlock::Image { source } => {
+                                            *seq += 1;
+                                            let media_subtype = source
+                                                .media_type
+                                                .strip_prefix("image/")
+                                                .unwrap_or(&source.media_type);
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Assistant,
+                                                author_name: None,
+                                                message_type: MessageType::Context,
+                                                content: None,
+                                                content_type: Some(ContentType::image_base64(
+                                                    media_subtype,
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in,
+                                                tokens_out,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
+                                        ContentBlock::ToolResult { .. } => {
+                                            // ToolResult blocks should not appear in assistant messages
+                                            // but if they do, capture them as Context
+                                            *seq += 1;
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Assistant,
+                                                author_name: None,
+                                                message_type: MessageType::Context,
+                                                content: Some(
+                                                    "[unexpected tool_result in assistant message]"
+                                                        .to_string(),
+                                                ),
+                                                content_type: Some(ContentType::Unknown(
+                                                    "tool_result".to_string(),
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in,
+                                                tokens_out,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
+                                        ContentBlock::Unknown => {
+                                            // Unknown block type - don't skip silently
+                                            *seq += 1;
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Assistant,
+                                                author_name: None,
+                                                message_type: MessageType::Context,
+                                                content: Some(
+                                                    "[unknown content block]".to_string(),
+                                                ),
+                                                content_type: Some(ContentType::Unknown(
+                                                    "unknown".to_string(),
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in,
+                                                tokens_out,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -659,6 +776,7 @@ impl ClaudeCodeParser {
                                         author_name: None,
                                         message_type: MessageType::Prompt,
                                         content: Some(text.clone()),
+                                        content_type: Some(ContentType::Text),
                                         tool_name: None,
                                         tool_input: None,
                                         tool_result: None,
@@ -689,6 +807,7 @@ impl ClaudeCodeParser {
                                                     author_name: None,
                                                     message_type: MessageType::Prompt,
                                                     content: Some(text.clone()),
+                                                    content_type: Some(ContentType::Text),
                                                     tool_name: None,
                                                     tool_input: None,
                                                     tool_result: None,
@@ -727,6 +846,7 @@ impl ClaudeCodeParser {
                                                     MessageType::ToolResult
                                                 },
                                                 content: None,
+                                                content_type: None,
                                                 tool_name: None,
                                                 tool_input: None,
                                                 tool_result: Some(result_str),
@@ -742,7 +862,103 @@ impl ClaudeCodeParser {
                                                 }),
                                             });
                                         }
-                                        _ => {}
+                                        // Image blocks in user messages are prompts (screenshots)
+                                        ContentBlock::Image { source } => {
+                                            *seq += 1;
+                                            let media_subtype = source
+                                                .media_type
+                                                .strip_prefix("image/")
+                                                .unwrap_or(&source.media_type);
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Human,
+                                                author_name: None,
+                                                message_type: MessageType::Prompt,
+                                                content: None,
+                                                content_type: Some(ContentType::image_base64(
+                                                    media_subtype,
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in: None,
+                                                tokens_out: None,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
+                                        ContentBlock::ToolUse { .. } => {
+                                            // ToolUse blocks should not appear in user messages
+                                            // but if they do, capture them as Context
+                                            *seq += 1;
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Human,
+                                                author_name: None,
+                                                message_type: MessageType::Context,
+                                                content: Some(
+                                                    "[unexpected tool_use in user message]"
+                                                        .to_string(),
+                                                ),
+                                                content_type: Some(ContentType::Unknown(
+                                                    "tool_use".to_string(),
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in: None,
+                                                tokens_out: None,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
+                                        ContentBlock::Unknown => {
+                                            // Unknown block type - don't skip silently
+                                            *seq += 1;
+                                            messages.push(Message {
+                                                id: 0,
+                                                session_id: session_id.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                seq: *seq,
+                                                ts,
+                                                author_role: AuthorRole::Human,
+                                                author_name: None,
+                                                message_type: MessageType::Context,
+                                                content: Some(
+                                                    "[unknown content block]".to_string(),
+                                                ),
+                                                content_type: Some(ContentType::Unknown(
+                                                    "unknown".to_string(),
+                                                )),
+                                                tool_name: None,
+                                                tool_input: None,
+                                                tool_result: None,
+                                                tokens_in: None,
+                                                tokens_out: None,
+                                                duration_ms: None,
+                                                source_file_path: source_path.to_string(),
+                                                source_offset,
+                                                source_line,
+                                                raw_data: raw_json.clone(),
+                                                metadata: serde_json::json!({}),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -763,6 +979,7 @@ impl ClaudeCodeParser {
                     author_name: Some(record_type.to_string()),
                     message_type: MessageType::Context,
                     content: None,
+                    content_type: Some(ContentType::Unknown(record_type.to_string())),
                     tool_name: None,
                     tool_input: None,
                     tool_result: None,

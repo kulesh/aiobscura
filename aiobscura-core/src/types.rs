@@ -564,6 +564,51 @@ impl std::str::FromStr for MessageType {
     }
 }
 
+// ============================================
+// Content Types
+// ============================================
+
+/// MIME-like content type for message content.
+///
+/// Describes the format of message content, similar to HTTP Content-Type headers.
+/// Used to distinguish text prompts from images, binary data, or unknown content types.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentType {
+    /// Plain text content (default)
+    #[default]
+    Text,
+    /// Image content with media type and optional encoding
+    Image {
+        /// Image format: "png", "jpeg", "gif", "webp", etc.
+        media_type: String,
+        /// Encoding used: "base64" for embedded images
+        encoding: Option<String>,
+    },
+    /// Unknown or unparsed content type (fallback)
+    Unknown(String),
+}
+
+impl ContentType {
+    /// Create an image content type with base64 encoding
+    pub fn image_base64(media_type: &str) -> Self {
+        ContentType::Image {
+            media_type: media_type.to_string(),
+            encoding: Some("base64".to_string()),
+        }
+    }
+
+    /// Check if this is text content
+    pub fn is_text(&self) -> bool {
+        matches!(self, ContentType::Text)
+    }
+
+    /// Check if this is image content
+    pub fn is_image(&self) -> bool {
+        matches!(self, ContentType::Image { .. })
+    }
+}
+
 /// A message within a session (the core unit of activity)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -591,6 +636,8 @@ pub struct Message {
     // Content
     /// Text content (prompt, response, etc.)
     pub content: Option<String>,
+    /// MIME-like type of content (text, image, unknown)
+    pub content_type: Option<ContentType>,
     /// Name of tool called (for tool_call/tool_result)
     pub tool_name: Option<String>,
     /// Input to the tool (JSON)

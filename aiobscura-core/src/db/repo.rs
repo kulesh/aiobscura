@@ -713,6 +713,7 @@ impl Database {
             author_name: row.get("author_name")?,
             message_type: message_type_str.parse().unwrap_or(MessageType::Response),
             content: row.get("content")?,
+            content_type: None, // TODO: Add content_type column to database schema
             tool_name: row.get("tool_name")?,
             tool_input: tool_input_str.and_then(|s| serde_json::from_str(&s).ok()),
             tool_result: row.get("tool_result")?,
@@ -830,6 +831,7 @@ mod tests {
             author_name: None,
             message_type: MessageType::Prompt,
             content: Some("Hello".to_string()),
+            content_type: None,
             tool_name: None,
             tool_input: None,
             tool_result: None,
