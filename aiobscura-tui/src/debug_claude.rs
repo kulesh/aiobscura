@@ -4,7 +4,7 @@
 
 use aiobscura_core::ingest::parsers::ClaudeCodeParser;
 use aiobscura_core::ingest::{AssistantParser, ParseContext, ParseResult};
-use aiobscura_core::types::{Checkpoint, Message, Project, Session, Thread};
+use aiobscura_core::types::{Checkpoint, Message, Plan, Project, Session, Thread};
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Serialize;
@@ -35,6 +35,10 @@ struct Args {
     /// Verbose output (show warnings)
     #[arg(short, long)]
     verbose: bool,
+
+    /// Show plan file content
+    #[arg(long)]
+    show_plans: bool,
 }
 
 /// Output structure for the parsed result
@@ -49,12 +53,25 @@ struct DebugOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     slugs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    plans: Vec<PlanOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     messages: Vec<MessageOutput>,
     stats: Stats,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     agent_spawn_map: HashMap<String, i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+/// Simplified plan output for debugging
+#[derive(Serialize)]
+struct PlanOutput {
+    slug: String,
+    title: Option<String>,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_preview: Option<String>,
+    content_hash: Option<String>,
 }
 
 /// Message output with optional raw_data filtering
@@ -201,16 +218,51 @@ fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> De
         })
         .unwrap_or_default();
 
+    // Convert plans to output format
+    let plans = if args.show_plans {
+        result.plans.iter().map(plan_to_output).collect()
+    } else {
+        vec![]
+    };
+
     DebugOutput {
         file: file.display().to_string(),
         project: result.project.clone(),
         session: result.session.clone(),
         threads: result.threads.clone(),
         slugs,
+        plans,
         messages,
         stats,
         agent_spawn_map: result.agent_spawn_map.clone(),
         warnings,
+    }
+}
+
+fn plan_to_output(plan: &Plan) -> PlanOutput {
+    // Create a content preview (first 200 chars)
+    let content_preview = plan.content.as_ref().map(|c| {
+        let preview: String = c.chars().take(200).collect();
+        if c.len() > 200 {
+            format!("{}...", preview)
+        } else {
+            preview
+        }
+    });
+
+    // Extract content hash from metadata
+    let content_hash = plan
+        .metadata
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s[..16].to_string()); // First 16 chars of hash
+
+    PlanOutput {
+        slug: plan.id.clone(),
+        title: plan.title.clone(),
+        path: plan.path.display().to_string(),
+        content_preview,
+        content_hash,
     }
 }
 

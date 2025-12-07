@@ -729,6 +729,130 @@ impl Database {
     }
 
     // ============================================
+    // Plan operations
+    // ============================================
+
+    /// Insert a plan version if content has changed (deduplicated by content hash)
+    ///
+    /// Returns true if a new version was inserted, false if this content already exists.
+    pub fn upsert_plan_version(&self, plan: &Plan) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+
+        // Extract content hash from metadata
+        let content_hash = plan
+            .metadata
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Try to insert - will fail silently if (slug, hash) already exists
+        let result = conn.execute(
+            r#"
+            INSERT OR IGNORE INTO plan_versions
+                (plan_slug, content_hash, title, content, captured_at, source_file)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                plan.id, // slug is the plan ID
+                content_hash,
+                plan.title,
+                plan.content,
+                Utc::now().to_rfc3339(),
+                plan.source_file_path,
+            ],
+        )?;
+
+        Ok(result > 0)
+    }
+
+    /// Link a session to a plan slug
+    ///
+    /// Uses INSERT OR IGNORE to handle duplicates gracefully.
+    pub fn link_session_plan(
+        &self,
+        session_id: &str,
+        plan_slug: &str,
+        first_used_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO session_plans (session_id, plan_slug, first_used_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![session_id, plan_slug, first_used_at.to_rfc3339(),],
+        )?;
+        Ok(())
+    }
+
+    /// Get the latest version of a plan by slug
+    pub fn get_plan_by_slug(&self, slug: &str) -> Result<Option<Plan>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                r#"
+                SELECT plan_slug, title, content, captured_at, source_file
+                FROM plan_versions
+                WHERE plan_slug = ?
+                ORDER BY captured_at DESC
+                LIMIT 1
+                "#,
+                [slug],
+                |row| {
+                    let captured_at_str: String = row.get("captured_at")?;
+                    Ok(Plan {
+                        id: row.get("plan_slug")?,
+                        session_id: String::new(), // Not stored in plan_versions
+                        path: PathBuf::from(row.get::<_, String>("source_file")?),
+                        title: row.get("title")?,
+                        created_at: DateTime::parse_from_rfc3339(&captured_at_str)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now()),
+                        modified_at: DateTime::parse_from_rfc3339(&captured_at_str)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now()),
+                        status: PlanStatus::Unknown,
+                        content: row.get("content")?,
+                        source_file_path: row.get("source_file")?,
+                        raw_data: serde_json::json!({}),
+                        metadata: serde_json::json!({}),
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
+    }
+
+    /// Get all plan slugs for a session
+    pub fn get_plan_slugs_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT plan_slug FROM session_plans WHERE session_id = ? ORDER BY first_used_at",
+        )?;
+
+        let slugs: Vec<String> = stmt
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        Ok(slugs)
+    }
+
+    /// Get all plans for a session (latest version of each)
+    pub fn get_plans_for_session(&self, session_id: &str) -> Result<Vec<Plan>> {
+        let slugs = self.get_plan_slugs_for_session(session_id)?;
+        let mut plans = Vec::new();
+
+        for slug in slugs {
+            if let Some(plan) = self.get_plan_by_slug(&slug)? {
+                plans.push(plan);
+            }
+        }
+
+        Ok(plans)
+    }
+
+    // ============================================
     // Statistics
     // ============================================
 

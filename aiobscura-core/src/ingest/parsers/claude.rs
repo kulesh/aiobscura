@@ -38,8 +38,8 @@
 use crate::error::{Error, Result};
 use crate::ingest::parser::{AssistantParser, ParseContext, ParseResult, SourcePattern};
 use crate::types::{
-    Assistant, AuthorRole, Checkpoint, ContentType, FileType, Message, MessageType, Project,
-    Session, SessionStatus, Thread, ThreadType,
+    Assistant, AuthorRole, Checkpoint, ContentType, FileType, Message, MessageType, Plan,
+    PlanStatus, Project, Session, SessionStatus, Thread, ThreadType,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -495,6 +495,13 @@ impl AssistantParser for ClaudeCodeParser {
                     "slugs": slugs,
                 }),
             });
+
+            // Parse plan files for each slug
+            for slug in &slugs {
+                if let Some(plan) = Self::parse_plan_file(slug) {
+                    result.plans.push(plan);
+                }
+            }
         }
 
         // Update checkpoint
@@ -546,6 +553,66 @@ impl ClaudeCodeParser {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string()
+    }
+
+    /// Parse a plan file and return a Plan object.
+    ///
+    /// Plan files are markdown files in `~/.claude/plans/[slug].md`.
+    /// We extract the title from the first `# ` heading and compute a content
+    /// hash for deduplication.
+    fn parse_plan_file(slug: &str) -> Option<Plan> {
+        // Construct plan file path
+        let plan_path = dirs::home_dir()?
+            .join(".claude/plans")
+            .join(format!("{}.md", slug));
+
+        if !plan_path.exists() {
+            return None;
+        }
+
+        // Read file content
+        let content = std::fs::read_to_string(&plan_path).ok()?;
+        let metadata = std::fs::metadata(&plan_path).ok()?;
+
+        // Extract title from first # heading
+        let title = content
+            .lines()
+            .find(|line| line.starts_with("# "))
+            .map(|line| line.trim_start_matches("# ").to_string());
+
+        // Compute content hash for deduplication
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hash = hasher.finalize();
+        let content_hash = format!("{:x}", hash);
+
+        // Get file timestamps
+        let created_at = metadata
+            .created()
+            .ok()
+            .map(DateTime::from)
+            .unwrap_or_else(Utc::now);
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .map(DateTime::from)
+            .unwrap_or_else(Utc::now);
+
+        Some(Plan {
+            id: slug.to_string(),
+            session_id: String::new(), // Linked via join table, not stored here
+            path: plan_path.clone(),
+            title,
+            created_at,
+            modified_at,
+            status: PlanStatus::Unknown,
+            content: Some(content),
+            source_file_path: plan_path.to_string_lossy().to_string(),
+            raw_data: serde_json::json!({}),
+            metadata: serde_json::json!({
+                "content_hash": content_hash,
+            }),
+        })
     }
 
     /// Convert a raw record to one or more Messages.
