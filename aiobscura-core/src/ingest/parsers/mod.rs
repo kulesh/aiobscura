@@ -1,16 +1,16 @@
 //! Assistant-specific parsers
 //!
 //! Each supported assistant has a parser module that implements
-//! the [`AssistantParser`](super::AssistantParser) trait.
+//! the [`AssistantParser`] trait.
 //!
 //! ## Supported Assistants
 //!
-//! | Assistant | Module | Status |
+//! | Assistant | Parser | Status |
 //! |-----------|--------|--------|
-//! | Claude Code | [`claude`] | ✅ Implemented |
-//! | Codex | [`codex`] | ✅ Implemented |
-//! | Aider | `aider` | 📋 Planned |
-//! | Cursor | `cursor` | 📋 Planned |
+//! | Claude Code | [`ClaudeCodeParser`] | ✅ Implemented |
+//! | Codex | [`CodexParser`] | ✅ Implemented |
+//! | Aider | - | 📋 Planned |
+//! | Cursor | - | 📋 Planned |
 
 mod claude;
 mod codex;
