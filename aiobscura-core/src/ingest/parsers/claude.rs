@@ -4,6 +4,36 @@
 //!
 //! See [`docs/claude-code-log-format.md`](../../../../docs/claude-code-log-format.md)
 //! for the complete format specification.
+//!
+//! # Error Handling
+//!
+//! The parser is designed to be resilient and recover from errors:
+//!
+//! - **Malformed JSON lines**: Logged as warning, line skipped, parsing continues.
+//!   The warning is recorded in [`ParseResult::warnings`].
+//!
+//! - **Missing required fields**: Uses sensible defaults via `#[serde(default)]`.
+//!   For example, missing `timestamp` falls back to `Utc::now()`.
+//!
+//! - **Empty content blocks**: Skipped without incrementing the message sequence
+//!   number. This prevents gaps in message ordering.
+//!
+//! - **Unknown record types**: Converted to [`MessageType::Context`] messages
+//!   rather than failing, preserving all data in the conversation thread.
+//!
+//! - **File truncation detected**: When the checkpoint offset exceeds the current
+//!   file size, the parser resets to offset 0 and re-parses from the beginning.
+//!
+//! - **Incomplete last line**: Parsing stops cleanly before incomplete lines.
+//!   The checkpoint is set to the last complete line, so incomplete data will
+//!   be parsed on the next sync when the file is complete.
+//!
+//! # Incremental Parsing
+//!
+//! The parser supports incremental parsing via [`Checkpoint::ByteOffset`].
+//! On subsequent parses, it seeks to the last checkpoint position and only
+//! processes new records. This enables efficient real-time sync without
+//! re-parsing entire files.
 
 use crate::error::{Error, Result};
 use crate::ingest::parser::{AssistantParser, ParseContext, ParseResult, SourcePattern};
