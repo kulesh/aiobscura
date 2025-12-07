@@ -259,6 +259,9 @@ impl AssistantParser for ClaudeCodeParser {
         let mut first_timestamp: Option<DateTime<Utc>> = None;
         let mut last_timestamp: Option<DateTime<Utc>> = None;
 
+        // Track plan slugs (sessions can have multiple plans)
+        let mut slugs: Vec<String> = Vec::new();
+
         // Track uuid -> seq mapping for agent spawn linkage
         let mut uuid_to_seq: HashMap<String, i32> = HashMap::new();
 
@@ -343,6 +346,13 @@ impl AssistantParser for ClaudeCodeParser {
             }
             if git_branch.is_none() {
                 git_branch = record.git_branch.clone();
+            }
+
+            // Collect unique slugs (plan file references)
+            if let Some(ref s) = record.slug {
+                if !slugs.contains(s) {
+                    slugs.push(s.clone());
+                }
             }
 
             // Parse timestamp
@@ -482,6 +492,7 @@ impl AssistantParser for ClaudeCodeParser {
                     "project_path": project_path,
                     "cwd": cwd,
                     "git_branch": git_branch,
+                    "slugs": slugs,
                 }),
             });
         }

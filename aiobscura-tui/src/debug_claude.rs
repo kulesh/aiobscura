@@ -47,6 +47,8 @@ struct DebugOutput {
     session: Option<Session>,
     threads: Vec<Thread>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    slugs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     messages: Vec<MessageOutput>,
     stats: Stats,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -186,11 +188,25 @@ fn build_output(args: &Args, file: &std::path::Path, result: &ParseResult) -> De
         vec![]
     };
 
+    // Extract slugs from session metadata
+    let slugs = result
+        .session
+        .as_ref()
+        .and_then(|s| s.metadata.get("slugs"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
     DebugOutput {
         file: file.display().to_string(),
         project: result.project.clone(),
         session: result.session.clone(),
         threads: result.threads.clone(),
+        slugs,
         messages,
         stats,
         agent_spawn_map: result.agent_spawn_map.clone(),
