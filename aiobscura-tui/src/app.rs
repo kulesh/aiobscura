@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, WrappedConfig, WrappedPeriod, WrappedStats,
+    generate_wrapped, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{Database, Message, Plan, SessionFilter, Thread, ThreadType};
@@ -45,6 +45,14 @@ pub enum ViewMode {
     },
     /// Wrapped view showing year/month in review
     Wrapped,
+    /// Project list view
+    ProjectList,
+    /// Project detail view showing stats
+    ProjectDetail {
+        #[allow(dead_code)]
+        project_id: String,
+        project_name: String,
+    },
 }
 
 /// Metadata for the detail view header.
@@ -110,6 +118,14 @@ pub struct App {
     pub snowflakes: Vec<(u16, u16, u8)>,
     /// Whether the app should exit
     pub should_quit: bool,
+
+    // ========== Project View State ==========
+    /// Projects loaded for display
+    pub projects: Vec<ProjectRow>,
+    /// Project table selection state
+    pub project_table_state: TableState,
+    /// Selected project stats (for detail view)
+    pub project_stats: Option<ProjectStats>,
 }
 
 impl App {
@@ -134,6 +150,10 @@ impl App {
             animation_frame: 0,
             snowflakes: Vec::new(),
             should_quit: false,
+            // Project view state
+            projects: Vec::new(),
+            project_table_state: TableState::default(),
+            project_stats: None,
         }
     }
 
@@ -373,6 +393,8 @@ impl App {
             ViewMode::PlanList { .. } => self.handle_plan_list_key(key),
             ViewMode::PlanDetail { .. } => self.handle_plan_detail_key(key),
             ViewMode::Wrapped => self.handle_wrapped_key(key),
+            ViewMode::ProjectList => self.handle_project_list_key(key),
+            ViewMode::ProjectDetail { .. } => self.handle_project_detail_key(key),
         }
     }
 
@@ -390,6 +412,9 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.open_wrapped_view();
+            }
+            KeyCode::Tab => {
+                self.open_project_list();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.select_next();
@@ -1029,6 +1054,159 @@ impl App {
             self.wrapped_cache.insert(self.wrapped_period, stats.clone());
             self.wrapped_stats = Some(stats);
             self.wrapped_card_index = 0;
+        }
+    }
+
+    // ========== Project View Methods ==========
+
+    /// Handle keyboard input in project list view.
+    fn handle_project_list_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Esc | KeyCode::Tab => {
+                self.close_project_list();
+            }
+            KeyCode::Enter => {
+                self.open_project_detail();
+            }
+            KeyCode::Char('w') => {
+                self.open_wrapped_view();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.select_next_project();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.select_previous_project();
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.select_first_project();
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.select_last_project();
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle keyboard input in project detail view.
+    fn handle_project_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Esc => {
+                self.close_project_detail();
+            }
+            KeyCode::Char('t') => {
+                // Navigate to threads filtered by this project
+                self.navigate_to_project_threads();
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the project list view.
+    fn open_project_list(&mut self) {
+        // Load projects from database
+        if let Ok(projects) = self.db.list_projects_with_stats() {
+            self.projects = projects;
+            self.project_table_state = TableState::default();
+            if !self.projects.is_empty() {
+                self.project_table_state.select(Some(0));
+            }
+            self.view_mode = ViewMode::ProjectList;
+        }
+    }
+
+    /// Close project list and return to thread list.
+    fn close_project_list(&mut self) {
+        self.view_mode = ViewMode::List;
+        self.projects.clear();
+        self.project_table_state = TableState::default();
+    }
+
+    /// Open project detail for the selected project.
+    fn open_project_detail(&mut self) {
+        if let Some(idx) = self.project_table_state.selected() {
+            if let Some(project) = self.projects.get(idx) {
+                let project_id = project.id.clone();
+                let project_name = project.name.clone();
+
+                // Load project stats
+                if let Ok(Some(stats)) = self.db.get_project_stats(&project_id) {
+                    self.project_stats = Some(stats);
+                    self.view_mode = ViewMode::ProjectDetail {
+                        project_id,
+                        project_name,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Close project detail and return to project list.
+    fn close_project_detail(&mut self) {
+        self.view_mode = ViewMode::ProjectList;
+        self.project_stats = None;
+    }
+
+    /// Navigate to thread list filtered by current project.
+    fn navigate_to_project_threads(&mut self) {
+        // Simply go back to list view for now
+        // Future: implement filtering
+        self.view_mode = ViewMode::List;
+        self.project_stats = None;
+    }
+
+    /// Select the next project in the list.
+    fn select_next_project(&mut self) {
+        if self.projects.is_empty() {
+            return;
+        }
+        let i = match self.project_table_state.selected() {
+            Some(i) => {
+                if i >= self.projects.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.project_table_state.select(Some(i));
+    }
+
+    /// Select the previous project in the list.
+    fn select_previous_project(&mut self) {
+        if self.projects.is_empty() {
+            return;
+        }
+        let i = match self.project_table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.projects.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.project_table_state.select(Some(i));
+    }
+
+    /// Select the first project.
+    fn select_first_project(&mut self) {
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(0));
+        }
+    }
+
+    /// Select the last project.
+    fn select_last_project(&mut self) {
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(self.projects.len() - 1));
         }
     }
 }

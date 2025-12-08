@@ -4,11 +4,14 @@
 //! - Wrapped (year/month in review)
 //! - Personality classification
 //! - Usage trends
+//! - Project-level analytics
 
 pub mod personality;
+pub mod project;
 pub mod wrapped;
 
 pub use personality::Personality;
+pub use project::{ProjectRow, ProjectStats};
 pub use wrapped::{
     generate_wrapped, MarathonSession, ProjectRanking, StreakStats, TimePatterns, ToolRankings,
     TotalStats, TrendComparison, WrappedConfig, WrappedPeriod, WrappedStats,
