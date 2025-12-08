@@ -20,6 +20,33 @@ pub struct AgentSpawnInfo {
     pub spawning_message_seq: i64,
 }
 
+/// Tool usage statistics for a thread.
+#[derive(Debug, Clone, Default)]
+pub struct ToolStats {
+    /// Total number of tool calls
+    pub total_calls: i64,
+    /// Breakdown by tool name, sorted by count descending
+    pub breakdown: Vec<(String, i64)>,
+}
+
+/// Token usage statistics.
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    /// Total input tokens
+    pub tokens_in: i64,
+    /// Total output tokens
+    pub tokens_out: i64,
+}
+
+/// File modification statistics for a thread.
+#[derive(Debug, Clone, Default)]
+pub struct FileStats {
+    /// Total number of unique files modified
+    pub total_files: i64,
+    /// Breakdown by file path, sorted by edit count descending
+    pub breakdown: Vec<(String, i64)>,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -665,6 +692,28 @@ impl Database {
         Ok(messages)
     }
 
+    /// Count messages for a session
+    pub fn count_session_messages(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count messages for a thread
+    pub fn count_thread_messages(&self, thread_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
+            [thread_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Get messages for a thread
     pub fn get_thread_messages(&self, thread_id: &str, limit: usize) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
@@ -882,6 +931,187 @@ impl Database {
     // Backward compatibility alias
     pub fn count_events(&self) -> Result<i64> {
         self.count_messages()
+    }
+
+    // ============================================
+    // Metadata/Stats operations (for TUI)
+    // ============================================
+
+    /// Get the source file path for a session
+    pub fn get_session_source_path(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT source_file_path FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(path)
+    }
+
+    /// Get the backing model display name for a session
+    pub fn get_session_model_name(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let name: Option<String> = conn
+            .query_row(
+                r#"
+                SELECT bm.display_name
+                FROM sessions s
+                JOIN backing_models bm ON s.backing_model_id = bm.id
+                WHERE s.id = ?
+                "#,
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(name)
+    }
+
+    /// Get session metadata (cwd, git_branch, etc.)
+    pub fn get_session_metadata(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let metadata: Option<String> = conn
+            .query_row(
+                "SELECT metadata FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match metadata {
+            Some(s) => Ok(Some(serde_json::from_str(&s).unwrap_or_default())),
+            None => Ok(None),
+        }
+    }
+
+    /// Count agent threads for a session
+    pub fn count_session_agents(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM threads WHERE session_id = ? AND thread_type = 'agent'",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count plans for a session
+    pub fn count_session_plans(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_plans WHERE session_id = ?",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get tool usage statistics for a thread
+    pub fn get_thread_tool_stats(&self, thread_id: &str) -> Result<ToolStats> {
+        let conn = self.conn.lock().unwrap();
+
+        // Get total tool calls
+        let total_calls: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND message_type = 'tool_call'",
+            [thread_id],
+            |r| r.get(0),
+        )?;
+
+        // Get breakdown by tool name
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT tool_name, COUNT(*) as cnt
+            FROM messages
+            WHERE thread_id = ? AND message_type = 'tool_call' AND tool_name IS NOT NULL
+            GROUP BY tool_name
+            ORDER BY cnt DESC
+            "#,
+        )?;
+        let breakdown: Vec<(String, i64)> = stmt
+            .query_map([thread_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(ToolStats {
+            total_calls,
+            breakdown,
+        })
+    }
+
+    /// Get file modification statistics for a thread (from Edit/Write tool_input)
+    pub fn get_thread_file_stats(&self, thread_id: &str) -> Result<FileStats> {
+        let conn = self.conn.lock().unwrap();
+
+        // Query all Edit/Write tool calls and extract file_path from JSON
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT json_extract(tool_input, '$.file_path') as file_path
+            FROM messages
+            WHERE thread_id = ?
+              AND message_type = 'tool_call'
+              AND tool_name IN ('Edit', 'Write', 'MultiEdit')
+              AND tool_input IS NOT NULL
+            "#,
+        )?;
+
+        // Count files - use HashMap to aggregate
+        let mut file_counts: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+
+        let rows = stmt.query_map([thread_id], |row| row.get::<_, Option<String>>(0))?;
+        for row in rows {
+            if let Ok(Some(path)) = row {
+                *file_counts.entry(path).or_insert(0) += 1;
+            }
+        }
+
+        let total_files = file_counts.len() as i64;
+
+        // Sort by count descending
+        let mut breakdown: Vec<(String, i64)> = file_counts.into_iter().collect();
+        breakdown.sort_by(|a, b| b.1.cmp(&a.1));
+
+        Ok(FileStats {
+            total_files,
+            breakdown,
+        })
+    }
+
+    /// Get session timestamps for duration calculation
+    pub fn get_session_timestamps(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(DateTime<Utc>, Option<DateTime<Utc>>)>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT started_at, last_activity_at FROM sessions WHERE id = ?",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        match result {
+            Some((started_str, last_str)) => {
+                let started = DateTime::parse_from_rfc3339(&started_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| Error::Parse {
+                        agent: "session".to_string(),
+                        message: format!("Invalid timestamp: {}", e),
+                    })?;
+                let last = last_str
+                    .map(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .ok()
+                    })
+                    .flatten();
+                Ok(Some((started, last)))
+            }
+            None => Ok(None),
+        }
     }
 }
 
