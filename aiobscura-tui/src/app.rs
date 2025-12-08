@@ -797,6 +797,12 @@ impl App {
             KeyCode::Char('m') => {
                 self.toggle_wrapped_period();
             }
+            KeyCode::Char('[') | KeyCode::Down | KeyCode::Char('j') => {
+                self.prev_wrapped_month();
+            }
+            KeyCode::Char(']') | KeyCode::Up | KeyCode::Char('k') => {
+                self.next_wrapped_month();
+            }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.wrapped_card_index = 0;
             }
@@ -889,6 +895,64 @@ impl App {
             WrappedPeriod::Month(year, _) => WrappedPeriod::Year(year),
         };
 
+        // Check cache first
+        if let Some(cached) = self.wrapped_cache.get(&self.wrapped_period) {
+            self.wrapped_stats = Some(cached.clone());
+            self.wrapped_card_index = 0;
+            return;
+        }
+
+        // Cache miss - generate and store
+        let config = WrappedConfig::default();
+        if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
+            self.wrapped_cache.insert(self.wrapped_period, stats.clone());
+            self.wrapped_stats = Some(stats);
+            self.wrapped_card_index = 0;
+        }
+    }
+
+    /// Go to previous month (or switch to month view if in year view).
+    fn prev_wrapped_month(&mut self) {
+        self.wrapped_period = match self.wrapped_period {
+            WrappedPeriod::Year(year) => {
+                // Switch to December of that year
+                WrappedPeriod::Month(year, 12)
+            }
+            WrappedPeriod::Month(year, month) => {
+                if month == 1 {
+                    WrappedPeriod::Month(year - 1, 12)
+                } else {
+                    WrappedPeriod::Month(year, month - 1)
+                }
+            }
+        };
+        self.load_wrapped_for_period();
+    }
+
+    /// Go to next month (or switch to month view if in year view).
+    fn next_wrapped_month(&mut self) {
+        let now = chrono::Utc::now();
+        self.wrapped_period = match self.wrapped_period {
+            WrappedPeriod::Year(year) => {
+                // Switch to January of that year
+                WrappedPeriod::Month(year, 1)
+            }
+            WrappedPeriod::Month(year, month) => {
+                // Don't go past current month
+                if year == now.year() && month >= now.month() {
+                    WrappedPeriod::Month(year, month) // Stay at current
+                } else if month == 12 {
+                    WrappedPeriod::Month(year + 1, 1)
+                } else {
+                    WrappedPeriod::Month(year, month + 1)
+                }
+            }
+        };
+        self.load_wrapped_for_period();
+    }
+
+    /// Load wrapped stats for current period (with caching).
+    fn load_wrapped_for_period(&mut self) {
         // Check cache first
         if let Some(cached) = self.wrapped_cache.get(&self.wrapped_period) {
             self.wrapped_stats = Some(cached.clone());
