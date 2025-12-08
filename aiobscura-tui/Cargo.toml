@@ -21,6 +21,10 @@ path = "src/debug_codex.rs"
 name = "aiobscura-debug-claude-watch"
 path = "src/debug_claude_watch.rs"
 
+[[bin]]
+name = "aiobscura-debug-codex-watch"
+path = "src/debug_codex_watch.rs"
+
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
 anyhow.workspace = true
