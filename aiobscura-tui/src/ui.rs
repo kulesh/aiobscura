@@ -1,16 +1,44 @@
 //! UI rendering for the TUI.
 
-use aiobscura_core::analytics::{TimePatterns, TrendComparison, WrappedStats};
+use aiobscura_core::analytics::{TimePatterns, WrappedStats};
 use aiobscura_core::{Message, MessageType, PlanStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
+    symbols,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Sparkline, Table, Wrap,
+    },
     Frame,
 };
 
 use crate::app::{App, ViewMode};
+
+// ========== Wrapped Color Palette ==========
+// Vibrant colors for a Spotify Wrapped-inspired experience
+
+/// Gold for achievements and #1 rankings
+const WRAPPED_GOLD: Color = Color::Rgb(255, 215, 0);
+/// Bright cyan for highlights and accents
+const WRAPPED_CYAN: Color = Color::Rgb(0, 255, 255);
+/// Magenta for personality and special reveals
+const WRAPPED_MAGENTA: Color = Color::Rgb(255, 0, 255);
+/// Lime green for positive trends
+const WRAPPED_LIME: Color = Color::Rgb(50, 205, 50);
+/// Coral for warm accents
+const WRAPPED_CORAL: Color = Color::Rgb(255, 127, 80);
+/// Silver for #2 rankings
+const WRAPPED_SILVER: Color = Color::Rgb(192, 192, 192);
+/// Bronze for #3 rankings
+const WRAPPED_BRONZE: Color = Color::Rgb(205, 127, 50);
+/// Purple for secondary highlights
+const WRAPPED_PURPLE: Color = Color::Rgb(138, 43, 226);
+/// Soft white for primary text
+const WRAPPED_WHITE: Color = Color::Rgb(250, 250, 250);
+/// Dim gray for secondary text
+const WRAPPED_DIM: Color = Color::Rgb(128, 128, 128);
 
 /// Render the application UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -778,83 +806,91 @@ fn get_wrapped_card_type(stats: &WrappedStats, index: usize) -> WrappedCardType 
 fn render_wrapped_title_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Big title
+    // Decorative sparkles and big title
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
+        Span::styled("        ✨ ", Style::default().fg(WRAPPED_GOLD)),
         Span::styled(
-            format!("     YOUR {} AI WRAPPED", stats.period.display_name().to_uppercase()),
-            Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::BOLD),
+            format!("YOUR {} AI WRAPPED", stats.period.display_name().to_uppercase()),
+            Style::default().fg(WRAPPED_CYAN).bold(),
         ),
+        Span::styled(" ✨", Style::default().fg(WRAPPED_GOLD)),
     ]));
     lines.push(Line::raw(""));
 
     if stats.totals.sessions == 0 {
         lines.push(Line::styled(
-            "     No activity found for this period.",
-            Style::default().fg(Color::DarkGray),
+            "        No activity found for this period.",
+            Style::default().fg(WRAPPED_DIM),
         ));
     } else {
-        // Stats in a nice grid layout
+        // Stats in a celebratory grid layout with big numbers
         lines.push(Line::from(vec![
-            Span::styled("     Sessions: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Sessions  ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                format!("{:<12}", stats.totals.sessions),
-                Style::default().fg(Color::White).bold(),
+                format!("{:<8}", stats.totals.sessions),
+                Style::default().fg(WRAPPED_GOLD).bold(),
             ),
-            Span::styled("Total Time: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Time      ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
                 stats.totals.duration_display(),
-                Style::default().fg(Color::White).bold(),
+                Style::default().fg(WRAPPED_CORAL).bold(),
             ),
         ]));
 
         lines.push(Line::from(vec![
-            Span::styled("     Tokens:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Tokens    ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                format!("{:<12}", stats.totals.tokens_display()),
-                Style::default().fg(Color::White).bold(),
+                format!("{:<8}", stats.totals.tokens_display()),
+                Style::default().fg(WRAPPED_CYAN).bold(),
             ),
-            Span::styled("Projects:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Projects  ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                stats.totals.unique_projects.to_string(),
-                Style::default().fg(Color::White).bold(),
-            ),
-        ]));
-
-        lines.push(Line::from(vec![
-            Span::styled("     Tools:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{:<12}", stats.totals.tool_calls),
-                Style::default().fg(Color::White).bold(),
-            ),
-            Span::styled("Plans:      ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.totals.plans.to_string(),
-                Style::default().fg(Color::White).bold(),
+                format!("{}", stats.totals.unique_projects),
+                Style::default().fg(WRAPPED_PURPLE).bold(),
             ),
         ]));
 
         lines.push(Line::from(vec![
-            Span::styled("     Agents:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Tools     ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                format!("{:<12}", stats.totals.agents_spawned),
-                Style::default().fg(Color::White).bold(),
+                format!("{:<8}", stats.totals.tool_calls),
+                Style::default().fg(WRAPPED_LIME).bold(),
             ),
-            Span::styled("Files:      ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Plans     ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                stats.totals.files_modified.to_string(),
-                Style::default().fg(Color::White).bold(),
+                format!("{}", stats.totals.plans),
+                Style::default().fg(WRAPPED_MAGENTA).bold(),
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("   ◆ Agents    ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("{:<8}", stats.totals.agents_spawned),
+                Style::default().fg(WRAPPED_CORAL).bold(),
+            ),
+            Span::styled("   ◆ Files     ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("{}", stats.totals.files_modified),
+                Style::default().fg(WRAPPED_WHITE).bold(),
             ),
         ]));
     }
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_CYAN))
+        .title(Span::styled(" ★ The Numbers ★ ", Style::default().fg(WRAPPED_GOLD).bold()));
+
     let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" The Numbers "))
+        .block(block)
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, area);
 }
 
-/// Render the top tools card.
+/// Render the top tools card with medals and visual bars.
 fn render_wrapped_tools_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
@@ -862,200 +898,290 @@ fn render_wrapped_tools_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
     if stats.tools.top_tools.is_empty() {
         lines.push(Line::styled(
             "     No tool usage recorded.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(WRAPPED_DIM),
         ));
     } else {
+        // Find max count for bar scaling
+        let max_count = stats.tools.top_tools.iter().map(|(_, c, _)| *c).max().unwrap_or(1);
+
         for (i, (name, count, desc)) in stats.tools.top_tools.iter().enumerate() {
-            let rank = match i {
-                0 => "     1 ",
-                1 => "     2 ",
-                2 => "     3 ",
-                3 => "     4 ",
-                4 => "     5 ",
-                _ => "       ",
-            };
-            let rank_color = match i {
-                0 => Color::Yellow,
-                1 => Color::LightBlue,
-                2 => Color::Magenta,
-                _ => Color::DarkGray,
+            // Medal emoji for top 3
+            let (medal, rank_color) = match i {
+                0 => ("  🥇 ", WRAPPED_GOLD),
+                1 => ("  🥈 ", WRAPPED_SILVER),
+                2 => ("  🥉 ", WRAPPED_BRONZE),
+                3 => ("   4 ", WRAPPED_DIM),
+                4 => ("   5 ", WRAPPED_DIM),
+                _ => ("     ", WRAPPED_DIM),
             };
 
-            let mut spans = vec![
-                Span::styled(rank, Style::default().fg(rank_color).bold()),
-                Span::styled(format!("{:<10}", name), Style::default().fg(Color::White).bold()),
-                Span::styled(format!(" {:>6}  ", count), Style::default().fg(Color::Cyan)),
+            // Visual bar showing relative usage
+            let bar_width = 12;
+            let filled = (((*count as f64 / max_count as f64) * bar_width as f64) as usize).max(1);
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+            let spans = vec![
+                Span::styled(medal, Style::default().fg(rank_color)),
+                Span::styled(format!("{:<10}", name), Style::default().fg(WRAPPED_WHITE).bold()),
+                Span::styled(format!("{:>6} ", count), Style::default().fg(rank_color).bold()),
+                Span::styled(bar, Style::default().fg(rank_color)),
             ];
 
-            if let Some(description) = desc {
-                spans.push(Span::styled(
-                    format!("\"{}\"", description),
-                    Style::default().fg(Color::DarkGray).italic(),
-                ));
-            }
-
             lines.push(Line::from(spans));
+
+            // Witty description on second line for top 3
+            if i < 3 {
+                if let Some(description) = desc {
+                    lines.push(Line::from(vec![
+                        Span::raw("       "),
+                        Span::styled(
+                            format!("\"{}\"", description),
+                            Style::default().fg(WRAPPED_DIM).italic(),
+                        ),
+                    ]));
+                }
+            }
         }
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Top Tools "));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_GOLD))
+        .title(Span::styled(" 🏆 Top Tools ", Style::default().fg(WRAPPED_GOLD).bold()));
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-/// Render the time patterns card.
+/// Render the time patterns card with sparkline visualization.
 fn render_wrapped_time_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
+    // Create inner layout: text info at top, sparkline at bottom
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_PURPLE))
+        .title(Span::styled(" ⏰ Time Patterns ", Style::default().fg(WRAPPED_PURPLE).bold()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner area: text section and sparkline section
+    let chunks = Layout::vertical([
+        Constraint::Min(6),    // Text info
+        Constraint::Length(4), // Sparkline + labels
+    ])
+    .split(inner);
+
+    // Text info section
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
 
-    // Peak hour
+    // Peak hour with celebration
+    let peak_comment = match stats.time_patterns.peak_hour {
+        0..=5 => " (night owl! 🦉)",
+        6..=9 => " (early bird! 🐦)",
+        10..=12 => " (morning person!)",
+        13..=17 => " (afternoon coder!)",
+        18..=21 => " (evening warrior!)",
+        _ => " (night owl! 🦉)",
+    };
     lines.push(Line::from(vec![
-        Span::styled("     Peak hour:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled("   ◆ Peak hour:    ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
             TimePatterns::hour_display(stats.time_patterns.peak_hour),
-            Style::default().fg(Color::White).bold(),
+            Style::default().fg(WRAPPED_GOLD).bold(),
         ),
+        Span::styled(peak_comment, Style::default().fg(WRAPPED_CYAN)),
     ]));
 
     // Busiest day
     lines.push(Line::from(vec![
-        Span::styled("     Busiest day:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("   ◆ Busiest day:  ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
             TimePatterns::day_name(stats.time_patterns.busiest_day),
-            Style::default().fg(Color::White).bold(),
+            Style::default().fg(WRAPPED_CORAL).bold(),
         ),
     ]));
 
-    // Marathon session
+    // Marathon session with special highlight
     if let Some(marathon) = &stats.time_patterns.marathon_session {
         let project = marathon.project_name.as_deref().unwrap_or("unknown");
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
-            Span::styled("     Marathon:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   🏃 Marathon:    ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                format!("{} - {} on {}", marathon.date_display(), marathon.duration_display(), project),
-                Style::default().fg(Color::Cyan),
+                format!("{} on ", marathon.date_display()),
+                Style::default().fg(WRAPPED_WHITE),
+            ),
+            Span::styled(project, Style::default().fg(WRAPPED_CYAN).bold()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("                   ", Style::default()),
+            Span::styled(
+                format!("{} of intense coding!", marathon.duration_display()),
+                Style::default().fg(WRAPPED_MAGENTA).bold(),
             ),
         ]));
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(""));
+    let text = Paragraph::new(lines);
+    frame.render_widget(text, chunks[0]);
 
-    // Hourly distribution bar chart
-    lines.push(Line::styled(
-        "     Activity by Hour:",
-        Style::default().fg(Color::DarkGray),
-    ));
+    // Sparkline section
+    let sparkline_data: Vec<u64> = stats.time_patterns.hourly_distribution
+        .iter()
+        .map(|&x| x as u64)
+        .collect();
 
-    let max_hourly = stats.time_patterns.hourly_distribution.iter().max().copied().unwrap_or(1).max(1);
-    let bar_width = (area.width as usize).saturating_sub(12).min(48); // Leave room for labels
+    let sparkline_chunks = Layout::vertical([
+        Constraint::Length(1), // Label
+        Constraint::Length(2), // Sparkline
+        Constraint::Length(1), // Time labels
+    ])
+    .split(chunks[1]);
 
-    // Create a simple bar chart line
-    let mut bar_chars: Vec<char> = Vec::new();
-    for &count in &stats.time_patterns.hourly_distribution {
-        let ratio = count as f64 / max_hourly as f64;
-        let char = if ratio > 0.75 {
-            '\u{2588}' // Full block
-        } else if ratio > 0.5 {
-            '\u{2586}' // 3/4 block
-        } else if ratio > 0.25 {
-            '\u{2584}' // Half block
-        } else if ratio > 0.0 {
-            '\u{2582}' // 1/4 block
-        } else {
-            '\u{2581}' // Minimal block
-        };
-        bar_chars.push(char);
-        bar_chars.push(char); // Double up for readability
-    }
-
-    // Truncate or pad to fit
-    let bar_str: String = bar_chars.iter().take(bar_width).collect();
-    lines.push(Line::from(vec![
-        Span::raw("     "),
-        Span::styled(bar_str, Style::default().fg(Color::Cyan)),
+    let label = Paragraph::new(Line::from(vec![
+        Span::styled("   Activity by hour: ", Style::default().fg(WRAPPED_DIM)),
     ]));
-    lines.push(Line::styled(
-        "     0h                  12h                 23h",
-        Style::default().fg(Color::DarkGray),
-    ));
+    frame.render_widget(label, sparkline_chunks[0]);
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Time Patterns "));
-    frame.render_widget(paragraph, area);
+    // Use Sparkline widget
+    let sparkline = Sparkline::default()
+        .data(&sparkline_data)
+        .style(Style::default().fg(WRAPPED_CYAN))
+        .bar_set(symbols::bar::NINE_LEVELS);
+
+    // Add padding for sparkline
+    let sparkline_area = Rect {
+        x: sparkline_chunks[1].x + 3,
+        y: sparkline_chunks[1].y,
+        width: sparkline_chunks[1].width.saturating_sub(6),
+        height: sparkline_chunks[1].height,
+    };
+    frame.render_widget(sparkline, sparkline_area);
+
+    let time_labels = Paragraph::new(Line::from(vec![
+        Span::styled("   0h        6h        12h       18h       23h", Style::default().fg(WRAPPED_DIM)),
+    ]));
+    frame.render_widget(time_labels, sparkline_chunks[2]);
 }
 
-/// Render the streaks card.
+/// Render the streaks card with gauge visualization.
 fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
+    // Create block and get inner area
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_CORAL))
+        .title(Span::styled(" 🔥 Streaks ", Style::default().fg(WRAPPED_CORAL).bold()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split into text and gauge areas
+    let chunks = Layout::vertical([
+        Constraint::Min(5),    // Streak info
+        Constraint::Length(3), // Gauge
+    ])
+    .split(inner);
+
+    // Streak info section
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
 
-    // Current streak
+    // Current streak with fire emoji celebration
+    let fire_emoji = if stats.streaks.current_streak_days >= 7 {
+        " 🔥🔥🔥"
+    } else if stats.streaks.current_streak_days >= 3 {
+        " 🔥🔥"
+    } else if stats.streaks.current_streak_days >= 1 {
+        " 🔥"
+    } else {
+        ""
+    };
     lines.push(Line::from(vec![
-        Span::styled("     Current streak:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("   ◆ Current streak:  ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
-            format!("{} day{}", stats.streaks.current_streak_days,
-                    if stats.streaks.current_streak_days == 1 { "" } else { "s" }),
-            Style::default().fg(Color::Yellow).bold(),
+            format!("{}", stats.streaks.current_streak_days),
+            Style::default().fg(WRAPPED_GOLD).bold(),
         ),
+        Span::styled(
+            format!(" day{}", if stats.streaks.current_streak_days == 1 { "" } else { "s" }),
+            Style::default().fg(WRAPPED_WHITE),
+        ),
+        Span::styled(fire_emoji, Style::default()),
     ]));
 
-    // Longest streak
+    // Longest streak with celebration
     if stats.streaks.longest_streak_days > 0 {
         let streak_dates = match (&stats.streaks.longest_streak_start, &stats.streaks.longest_streak_end) {
             (Some(start), Some(end)) => {
-                format!(" ({} - {})", start.format("%b %d"), end.format("%b %d"))
+                format!(" ({} – {})", start.format("%b %d"), end.format("%b %d"))
             }
             _ => String::new(),
         };
         lines.push(Line::from(vec![
-            Span::styled("     Longest streak:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   ◆ Longest streak:  ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
-                format!("{} day{}", stats.streaks.longest_streak_days,
-                        if stats.streaks.longest_streak_days == 1 { "" } else { "s" }),
-                Style::default().fg(Color::Cyan).bold(),
+                format!("{}", stats.streaks.longest_streak_days),
+                Style::default().fg(WRAPPED_CYAN).bold(),
             ),
-            Span::styled(streak_dates, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" day{}", if stats.streaks.longest_streak_days == 1 { "" } else { "s" }),
+                Style::default().fg(WRAPPED_WHITE),
+            ),
+            Span::styled(streak_dates, Style::default().fg(WRAPPED_DIM)),
         ]));
     }
 
-    // Activity percentage
+    // Active days summary
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("     Active days:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled("   ◆ Active days:     ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
-            format!("{} of {} ({:.0}%)",
-                    stats.streaks.active_days,
-                    stats.streaks.total_days,
-                    stats.streaks.activity_percentage()),
-            Style::default().fg(Color::White),
+            format!("{}", stats.streaks.active_days),
+            Style::default().fg(WRAPPED_LIME).bold(),
+        ),
+        Span::styled(
+            format!(" of {} days", stats.streaks.total_days),
+            Style::default().fg(WRAPPED_WHITE),
         ),
     ]));
 
-    // Visual activity bar
-    lines.push(Line::raw(""));
-    let bar_width = 40;
-    let filled = ((stats.streaks.activity_percentage() / 100.0) * bar_width as f64) as usize;
-    let empty = bar_width - filled;
-    lines.push(Line::from(vec![
-        Span::raw("     "),
-        Span::styled(
-            "\u{2588}".repeat(filled),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
-            "\u{2591}".repeat(empty),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+    let text = Paragraph::new(lines);
+    frame.render_widget(text, chunks[0]);
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Streaks "));
-    frame.render_widget(paragraph, area);
+    // Gauge for activity percentage
+    let activity_pct = stats.streaks.activity_percentage();
+    let gauge_color = if activity_pct >= 75.0 {
+        WRAPPED_LIME
+    } else if activity_pct >= 50.0 {
+        WRAPPED_GOLD
+    } else if activity_pct >= 25.0 {
+        WRAPPED_CORAL
+    } else {
+        WRAPPED_MAGENTA
+    };
+
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::Rgb(40, 40, 40)))
+        .ratio(activity_pct / 100.0)
+        .label(Span::styled(
+            format!("{:.0}% active", activity_pct),
+            Style::default().fg(WRAPPED_WHITE).bold(),
+        ));
+
+    let gauge_area = Rect {
+        x: chunks[1].x + 3,
+        y: chunks[1].y,
+        width: chunks[1].width.saturating_sub(6),
+        height: chunks[1].height,
+    };
+    frame.render_widget(gauge, gauge_area);
 }
 
-/// Render the projects card.
+/// Render the projects card with visual bars.
 fn render_wrapped_projects_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
@@ -1063,141 +1189,219 @@ fn render_wrapped_projects_card(frame: &mut Frame, stats: &WrappedStats, area: R
     if stats.projects.is_empty() {
         lines.push(Line::styled(
             "     No project data available.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(WRAPPED_DIM),
         ));
     } else {
+        // Find max tokens for bar scaling
+        let max_tokens = stats.projects.iter().map(|p| p.tokens).max().unwrap_or(1);
+
         for (i, project) in stats.projects.iter().take(5).enumerate() {
-            let rank = format!("  {}  ", i + 1);
-            let rank_color = if i == 0 { Color::Yellow } else { Color::DarkGray };
+            // Visual bar showing relative activity
+            let bar_width = 15;
+            let filled = (((project.tokens as f64 / max_tokens as f64) * bar_width as f64) as usize).max(1);
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+            // Rank indicator with special treatment for #1
+            let (rank_indicator, name_color, bar_color) = match i {
+                0 => ("  🏆 ", WRAPPED_GOLD, WRAPPED_GOLD),
+                1 => ("   2 ", WRAPPED_SILVER, WRAPPED_SILVER),
+                2 => ("   3 ", WRAPPED_BRONZE, WRAPPED_BRONZE),
+                _ => (if i == 3 { "   4 " } else { "   5 " }, WRAPPED_DIM, WRAPPED_DIM),
+            };
 
             lines.push(Line::from(vec![
-                Span::styled(rank, Style::default().fg(rank_color).bold()),
-                Span::styled(&project.name, Style::default().fg(Color::White).bold()),
+                Span::styled(rank_indicator, Style::default().fg(name_color)),
+                Span::styled(
+                    format!("{:<20}", &project.name),
+                    Style::default().fg(WRAPPED_WHITE).bold(),
+                ),
+                Span::styled(bar, Style::default().fg(bar_color)),
             ]));
 
             lines.push(Line::from(vec![
                 Span::raw("       "),
                 Span::styled(
-                    format!("{} sessions, {} tokens",
-                            project.sessions,
-                            format_tokens(project.tokens)),
-                    Style::default().fg(Color::DarkGray),
+                    format!("{} sessions", project.sessions),
+                    Style::default().fg(WRAPPED_DIM),
+                ),
+                Span::styled(" · ", Style::default().fg(WRAPPED_DIM)),
+                Span::styled(
+                    format!("{} tokens", format_tokens(project.tokens)),
+                    Style::default().fg(WRAPPED_CYAN),
                 ),
             ]));
         }
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Top Projects "));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_LIME))
+        .title(Span::styled(" 📁 Top Projects ", Style::default().fg(WRAPPED_LIME).bold()));
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-/// Render the trends comparison card.
+/// Render the trends comparison card with arrows and visual impact.
 fn render_wrapped_trends_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
 
     if let Some(trends) = &stats.trends {
-        lines.push(Line::styled(
-            "     Compared to previous period:",
-            Style::default().fg(Color::DarkGray),
-        ));
+        lines.push(Line::from(vec![
+            Span::styled("   Compared to previous period:", Style::default().fg(WRAPPED_DIM)),
+        ]));
         lines.push(Line::raw(""));
 
-        // Sessions
-        lines.push(Line::from(vec![
-            Span::styled("     Sessions:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                TrendComparison::format_delta(trends.sessions_delta_pct),
-                trend_color(trends.sessions_delta_pct),
-            ),
-        ]));
+        // Helper function to format trend with arrow
+        fn trend_line(label: &str, delta: f64) -> Line<'static> {
+            let (arrow, color) = if delta > 0.0 {
+                ("↑", WRAPPED_LIME)
+            } else if delta < 0.0 {
+                ("↓", Color::Rgb(255, 99, 71)) // Tomato red
+            } else {
+                ("→", WRAPPED_DIM)
+            };
 
-        // Tokens
-        lines.push(Line::from(vec![
-            Span::styled("     Tokens:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                TrendComparison::format_delta(trends.tokens_delta_pct),
-                trend_color(trends.tokens_delta_pct),
-            ),
-        ]));
+            Line::from(vec![
+                Span::styled(format!("   {} ", arrow), Style::default().fg(color).bold()),
+                Span::styled(format!("{:<12}", label), Style::default().fg(WRAPPED_DIM)),
+                Span::styled(
+                    format!("{:>+.0}%", delta),
+                    Style::default().fg(color).bold(),
+                ),
+            ])
+        }
 
-        // Tools
-        lines.push(Line::from(vec![
-            Span::styled("     Tools:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                TrendComparison::format_delta(trends.tools_delta_pct),
-                trend_color(trends.tools_delta_pct),
-            ),
-        ]));
+        lines.push(trend_line("Sessions", trends.sessions_delta_pct));
+        lines.push(trend_line("Tokens", trends.tokens_delta_pct));
+        lines.push(trend_line("Tools", trends.tools_delta_pct));
+        lines.push(trend_line("Duration", trends.duration_delta_pct));
 
-        // Duration
+        // Summary message
+        lines.push(Line::raw(""));
+        let overall_trend = (trends.sessions_delta_pct + trends.tokens_delta_pct) / 2.0;
+        let message = if overall_trend > 20.0 {
+            ("🚀 Major growth!", WRAPPED_LIME)
+        } else if overall_trend > 0.0 {
+            ("📈 Trending up!", WRAPPED_CYAN)
+        } else if overall_trend > -20.0 {
+            ("📉 Slight dip", WRAPPED_CORAL)
+        } else {
+            ("💤 Taking it easy", WRAPPED_DIM)
+        };
         lines.push(Line::from(vec![
-            Span::styled("     Duration:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                TrendComparison::format_delta(trends.duration_delta_pct),
-                trend_color(trends.duration_delta_pct),
-            ),
+            Span::styled(format!("   {}", message.0), Style::default().fg(message.1)),
         ]));
     } else {
         lines.push(Line::styled(
             "     No previous period data available.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(WRAPPED_DIM),
         ));
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" vs Previous Period "));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_CYAN))
+        .title(Span::styled(" 📈 vs Previous Period ", Style::default().fg(WRAPPED_CYAN).bold()));
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-/// Render the personality card.
+/// Render the personality card as the grand finale with dramatic presentation.
 fn render_wrapped_personality_card(frame: &mut Frame, stats: &WrappedStats, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::raw(""));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WRAPPED_MAGENTA))
+        .title(Span::styled(
+            " ✨ Your Coding Personality ✨ ",
+            Style::default().fg(WRAPPED_MAGENTA).bold(),
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     if let Some(personality) = &stats.personality {
-        lines.push(Line::from(vec![
-            Span::styled("     Your coding personality:", Style::default().fg(Color::DarkGray)),
-        ]));
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw("     "),
-            Span::styled(personality.emoji(), Style::default()),
-            Span::raw(" "),
+        // Split inner area for dramatic layout
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Top padding
+            Constraint::Length(1), // "And your personality is..."
+            Constraint::Length(1), // spacing
+            Constraint::Length(3), // HUGE emoji display
+            Constraint::Length(1), // spacing
+            Constraint::Length(1), // Personality name
+            Constraint::Length(1), // spacing
+            Constraint::Min(1),    // Tagline
+        ])
+        .split(inner);
+
+        // Reveal text
+        let reveal = Paragraph::new(Line::from(vec![
+            Span::styled("★ ", Style::default().fg(WRAPPED_GOLD)),
             Span::styled(
-                personality.name(),
-                Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::BOLD),
+                "And your coding personality is...",
+                Style::default().fg(WRAPPED_DIM).italic(),
             ),
-        ]));
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw("     "),
+            Span::styled(" ★", Style::default().fg(WRAPPED_GOLD)),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(reveal, chunks[1]);
+
+        // Large emoji display with decorative frame
+        let emoji = personality.emoji();
+        let emoji_lines = vec![
+            Line::from(Span::styled(
+                "╔═══════════════════╗",
+                Style::default().fg(WRAPPED_PURPLE),
+            )),
+            Line::from(vec![
+                Span::styled("║       ", Style::default().fg(WRAPPED_PURPLE)),
+                Span::raw(emoji),
+                Span::styled("        ║", Style::default().fg(WRAPPED_PURPLE)),
+            ]),
+            Line::from(Span::styled(
+                "╚═══════════════════╝",
+                Style::default().fg(WRAPPED_PURPLE),
+            )),
+        ];
+        let emoji_para = Paragraph::new(emoji_lines).alignment(Alignment::Center);
+        frame.render_widget(emoji_para, chunks[3]);
+
+        // Personality name in bold magenta
+        let name_line = Line::from(vec![
+            Span::styled("✦ ", Style::default().fg(WRAPPED_CORAL)),
+            Span::styled(
+                personality.name().to_uppercase(),
+                Style::default()
+                    .fg(WRAPPED_MAGENTA)
+                    .bold()
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ✦", Style::default().fg(WRAPPED_CORAL)),
+        ]);
+        let name_para = Paragraph::new(name_line).alignment(Alignment::Center);
+        frame.render_widget(name_para, chunks[5]);
+
+        // Tagline in styled italic
+        let tagline = Paragraph::new(Line::from(vec![
             Span::styled(
                 format!("\"{}\"", personality.tagline()),
-                Style::default().fg(Color::White).italic(),
+                Style::default().fg(WRAPPED_WHITE).italic(),
             ),
-        ]));
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(tagline, chunks[7]);
     } else {
-        lines.push(Line::styled(
-            "     Personality not available.",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Your Personality "));
-    frame.render_widget(paragraph, area);
-}
-
-/// Get color for trend percentage.
-fn trend_color(delta: f64) -> Style {
-    if delta > 0.0 {
-        Style::default().fg(Color::Green).bold()
-    } else if delta < 0.0 {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default().fg(Color::DarkGray)
+        let no_data = Paragraph::new(Line::styled(
+            "Personality not available - need more data!",
+            Style::default().fg(WRAPPED_DIM),
+        ))
+        .alignment(Alignment::Center);
+        frame.render_widget(no_data, inner);
     }
 }
 
@@ -1212,29 +1416,37 @@ fn format_tokens(tokens: i64) -> String {
     }
 }
 
-/// Render the footer for wrapped view.
+/// Render the wrapped footer with card position dots.
 fn render_wrapped_footer(frame: &mut Frame, app: &App, area: Rect) {
     let card_count = app.wrapped_card_count();
-    let current = app.wrapped_card_index + 1;
+    let current_index = app.wrapped_card_index;
 
     let period_hint = match app.wrapped_period {
         aiobscura_core::analytics::WrappedPeriod::Year(_) => "year",
         aiobscura_core::analytics::WrappedPeriod::Month(_, _) => "month",
     };
 
-    let footer = Line::from(vec![
-        Span::styled(" Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" back  "),
-        Span::styled("h/l", Style::default().fg(Color::Yellow)),
-        Span::raw(" prev/next  "),
-        Span::styled("m", Style::default().fg(Color::Yellow)),
-        Span::raw(format!(" toggle ({})  ", period_hint)),
-        Span::raw("│ "),
-        Span::styled(
-            format!("Card {}/{}", current, card_count),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    // Build card position dots (●○○○○)
+    let mut dots: Vec<Span> = Vec::new();
+    for i in 0..card_count {
+        if i == current_index {
+            dots.push(Span::styled("●", Style::default().fg(WRAPPED_CYAN)));
+        } else {
+            dots.push(Span::styled("○", Style::default().fg(WRAPPED_DIM)));
+        }
+    }
 
+    let mut footer_spans = vec![
+        Span::styled(" Esc", Style::default().fg(WRAPPED_GOLD)),
+        Span::styled(" back  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled("←/→", Style::default().fg(WRAPPED_GOLD)),
+        Span::styled(" navigate  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled("m", Style::default().fg(WRAPPED_GOLD)),
+        Span::styled(format!(" {} ", period_hint), Style::default().fg(WRAPPED_DIM)),
+        Span::styled("│ ", Style::default().fg(WRAPPED_DIM)),
+    ];
+    footer_spans.extend(dots);
+
+    let footer = Line::from(footer_spans);
     frame.render_widget(Paragraph::new(footer), area);
 }
