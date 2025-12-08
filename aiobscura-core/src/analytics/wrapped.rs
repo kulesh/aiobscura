@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Local, Utc};
 use super::Personality;
 
 /// Time period for wrapped statistics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WrappedPeriod {
     /// Full year (e.g., 2024)
     Year(i32),

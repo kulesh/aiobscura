@@ -102,6 +102,8 @@ pub struct App {
     pub wrapped_period: WrappedPeriod,
     /// Current wrapped card index (0-based)
     pub wrapped_card_index: usize,
+    /// Cache for wrapped stats by period (avoids recomputation)
+    wrapped_cache: HashMap<WrappedPeriod, WrappedStats>,
     /// Whether the app should exit
     pub should_quit: bool,
 }
@@ -124,6 +126,7 @@ impl App {
             wrapped_stats: None,
             wrapped_period: WrappedPeriod::current_year(),
             wrapped_card_index: 0,
+            wrapped_cache: HashMap::new(),
             should_quit: false,
         }
     }
@@ -806,9 +809,19 @@ impl App {
 
     /// Open the wrapped view.
     fn open_wrapped_view(&mut self) {
+        // Check cache first
+        if let Some(cached) = self.wrapped_cache.get(&self.wrapped_period) {
+            self.wrapped_stats = Some(cached.clone());
+            self.wrapped_card_index = 0;
+            self.view_mode = ViewMode::Wrapped;
+            return;
+        }
+
+        // Cache miss - generate and store
         let config = WrappedConfig::default();
         match generate_wrapped(&self.db, self.wrapped_period, &config) {
             Ok(stats) => {
+                self.wrapped_cache.insert(self.wrapped_period, stats.clone());
                 self.wrapped_stats = Some(stats);
                 self.wrapped_card_index = 0;
                 self.view_mode = ViewMode::Wrapped;
@@ -825,6 +838,7 @@ impl App {
         self.view_mode = ViewMode::List;
         self.wrapped_stats = None;
         self.wrapped_card_index = 0;
+        // Keep cache - stats are valid for the session duration
     }
 
     /// Get the number of cards to display.
@@ -875,9 +889,17 @@ impl App {
             WrappedPeriod::Month(year, _) => WrappedPeriod::Year(year),
         };
 
-        // Regenerate stats for new period
+        // Check cache first
+        if let Some(cached) = self.wrapped_cache.get(&self.wrapped_period) {
+            self.wrapped_stats = Some(cached.clone());
+            self.wrapped_card_index = 0;
+            return;
+        }
+
+        // Cache miss - generate and store
         let config = WrappedConfig::default();
         if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
+            self.wrapped_cache.insert(self.wrapped_period, stats.clone());
             self.wrapped_stats = Some(stats);
             self.wrapped_card_index = 0;
         }
