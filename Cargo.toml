@@ -1,5 +1,5 @@
 [workspace]
-members = ["aiobscura-core", "aiobscura-tui"]
+members = ["aiobscura-core", "aiobscura-tui", "aiobscura-wrapped"]
 resolver = "2"
 
 [workspace.package]

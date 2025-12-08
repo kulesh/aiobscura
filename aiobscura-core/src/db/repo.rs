@@ -1113,6 +1113,606 @@ impl Database {
             None => Ok(None),
         }
     }
+
+    // ============================================
+    // Wrapped Analytics Queries
+    // ============================================
+
+    /// Get aggregate totals for a time period (for Wrapped).
+    pub fn get_wrapped_totals(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::analytics::TotalStats> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        // Sessions and duration
+        let (sessions, total_duration_secs): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(
+                        CASE WHEN last_activity_at IS NOT NULL
+                        THEN (julianday(last_activity_at) - julianday(started_at)) * 86400
+                        ELSE 0 END
+                    ), 0)
+                FROM sessions
+                WHERE started_at >= ? AND started_at < ?
+                "#,
+                [&start_str, &end_str],
+                |r| Ok((r.get(0)?, r.get::<_, f64>(1)? as i64)),
+            )
+            .unwrap_or((0, 0));
+
+        // Tokens and tool calls from messages
+        let (tokens_in, tokens_out, tool_calls): (i64, i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COALESCE(SUM(tokens_in), 0),
+                    COALESCE(SUM(tokens_out), 0),
+                    COALESCE(SUM(CASE WHEN message_type = 'tool_call' THEN 1 ELSE 0 END), 0)
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                "#,
+                [&start_str, &end_str],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap_or((0, 0, 0));
+
+        // Plans
+        let plans: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT sp.plan_id)
+                FROM session_plans sp
+                JOIN sessions s ON sp.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Agents spawned
+        let agents_spawned: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM threads t
+                JOIN sessions s ON t.session_id = s.id
+                WHERE t.thread_type = 'agent'
+                  AND s.started_at >= ? AND s.started_at < ?
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Files modified (from Edit/Write tool_input)
+        let files_modified: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT json_extract(tool_input, '$.file_path'))
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                  AND m.message_type = 'tool_call'
+                  AND m.tool_name IN ('Edit', 'Write', 'MultiEdit')
+                  AND json_extract(tool_input, '$.file_path') IS NOT NULL
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Unique projects
+        let unique_projects: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT project_id)
+                FROM sessions
+                WHERE started_at >= ? AND started_at < ?
+                  AND project_id IS NOT NULL
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok(crate::analytics::TotalStats {
+            sessions,
+            total_duration_secs,
+            tokens_in,
+            tokens_out,
+            tool_calls,
+            plans,
+            agents_spawned,
+            files_modified,
+            unique_projects,
+        })
+    }
+
+    /// Get tool usage rankings for a time period.
+    pub fn get_wrapped_tool_rankings(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT m.tool_name, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.started_at >= ? AND s.started_at < ?
+              AND m.message_type = 'tool_call'
+              AND m.tool_name IS NOT NULL
+            GROUP BY m.tool_name
+            ORDER BY cnt DESC
+            LIMIT ?
+            "#,
+        )?;
+
+        let rows = stmt
+            .query_map(params![&start_str, &end_str, limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Get hourly activity distribution for a time period.
+    pub fn get_wrapped_hourly_distribution(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<[i64; 24]> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let mut distribution = [0i64; 24];
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT CAST(strftime('%H', ts) AS INTEGER) as hour, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.started_at >= ? AND s.started_at < ?
+            GROUP BY hour
+            "#,
+        )?;
+
+        let rows = stmt.query_map([&start_str, &end_str], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        for row in rows.flatten() {
+            let (hour, count) = row;
+            if hour >= 0 && hour < 24 {
+                distribution[hour as usize] = count;
+            }
+        }
+
+        Ok(distribution)
+    }
+
+    /// Get daily activity distribution for a time period (0=Sunday).
+    pub fn get_wrapped_daily_distribution(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<[i64; 7]> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let mut distribution = [0i64; 7];
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT CAST(strftime('%w', ts) AS INTEGER) as dow, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.started_at >= ? AND s.started_at < ?
+            GROUP BY dow
+            "#,
+        )?;
+
+        let rows = stmt.query_map([&start_str, &end_str], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        for row in rows.flatten() {
+            let (dow, count) = row;
+            if dow >= 0 && dow < 7 {
+                distribution[dow as usize] = count;
+            }
+        }
+
+        Ok(distribution)
+    }
+
+    /// Get project rankings for a time period.
+    pub fn get_wrapped_project_rankings(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::analytics::ProjectRanking>> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                COALESCE(p.name, '(no project)') as name,
+                COUNT(DISTINCT s.id) as sessions,
+                COALESCE(SUM(m.tokens_in + m.tokens_out), 0) as tokens,
+                COALESCE(SUM(
+                    CASE WHEN s.last_activity_at IS NOT NULL
+                    THEN (julianday(s.last_activity_at) - julianday(s.started_at)) * 86400
+                    ELSE 0 END
+                ), 0) as duration,
+                MIN(s.started_at) as first_session
+            FROM sessions s
+            LEFT JOIN projects p ON s.project_id = p.id
+            LEFT JOIN threads t ON t.session_id = s.id
+            LEFT JOIN messages m ON m.thread_id = t.id
+            WHERE s.started_at >= ? AND s.started_at < ?
+            GROUP BY COALESCE(p.id, 'none')
+            ORDER BY tokens DESC
+            LIMIT ?
+            "#,
+        )?;
+
+        let rows: Vec<crate::analytics::ProjectRanking> = stmt
+            .query_map(params![&start_str, &end_str, limit as i64], |row| {
+                let first_session_str: Option<String> = row.get(4)?;
+                let first_session = first_session_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .ok()
+                });
+                Ok(crate::analytics::ProjectRanking {
+                    name: row.get(0)?,
+                    sessions: row.get(1)?,
+                    tokens: row.get(2)?,
+                    duration_secs: row.get::<_, f64>(3)? as i64,
+                    files_modified: 0, // Would need a subquery
+                    first_session,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Get the longest (marathon) session in a time period.
+    pub fn get_wrapped_marathon_session(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Option<crate::analytics::MarathonSession>> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let result: Option<(String, f64, String, Option<String>, i64, i64)> = conn
+            .query_row(
+                r#"
+                SELECT
+                    s.id,
+                    (julianday(s.last_activity_at) - julianday(s.started_at)) * 86400 as duration,
+                    s.started_at,
+                    p.name,
+                    (SELECT COUNT(*) FROM messages m
+                     JOIN threads t ON m.thread_id = t.id
+                     WHERE t.session_id = s.id AND m.message_type = 'tool_call') as tool_calls,
+                    (SELECT COALESCE(SUM(m.tokens_in + m.tokens_out), 0) FROM messages m
+                     JOIN threads t ON m.thread_id = t.id
+                     WHERE t.session_id = s.id) as tokens
+                FROM sessions s
+                LEFT JOIN projects p ON s.project_id = p.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                  AND s.last_activity_at IS NOT NULL
+                ORDER BY duration DESC
+                LIMIT 1
+                "#,
+                [&start_str, &end_str],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match result {
+            Some((session_id, duration, date_str, project_name, tool_calls, tokens)) => {
+                let date = DateTime::parse_from_rfc3339(&date_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(Some(crate::analytics::MarathonSession {
+                    session_id,
+                    duration_secs: duration as i64,
+                    date,
+                    project_name,
+                    tool_calls,
+                    tokens,
+                    files_modified: 0, // Would need additional query
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get streak statistics for a time period.
+    pub fn get_wrapped_streak_stats(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::analytics::StreakStats> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        // Get all unique dates with activity
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT DISTINCT date(started_at) as activity_date
+            FROM sessions
+            WHERE started_at >= ? AND started_at < ?
+            ORDER BY activity_date
+            "#,
+        )?;
+
+        let dates: Vec<String> = stmt
+            .query_map([&start_str, &end_str], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let active_days = dates.len() as i64;
+        let total_days = (end - start).num_days();
+
+        // Calculate longest streak
+        let mut longest_streak = 0i64;
+        let mut longest_start: Option<DateTime<Utc>> = None;
+        let mut longest_end: Option<DateTime<Utc>> = None;
+        let mut current_streak = 0i64;
+        let mut current_start: Option<chrono::NaiveDate> = None;
+        let mut prev_date: Option<chrono::NaiveDate> = None;
+
+        for date_str in &dates {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                match prev_date {
+                    Some(prev) if (date - prev).num_days() == 1 => {
+                        // Consecutive day
+                        current_streak += 1;
+                    }
+                    _ => {
+                        // New streak
+                        if current_streak > longest_streak {
+                            longest_streak = current_streak;
+                            longest_start = current_start.map(|d| {
+                                d.and_hms_opt(0, 0, 0).unwrap().and_utc()
+                            });
+                            longest_end = prev_date.map(|d| {
+                                d.and_hms_opt(23, 59, 59).unwrap().and_utc()
+                            });
+                        }
+                        current_streak = 1;
+                        current_start = Some(date);
+                    }
+                }
+                prev_date = Some(date);
+            }
+        }
+
+        // Check final streak
+        if current_streak > longest_streak {
+            longest_streak = current_streak;
+            longest_start = current_start.map(|d| {
+                d.and_hms_opt(0, 0, 0).unwrap().and_utc()
+            });
+            longest_end = prev_date.map(|d| {
+                d.and_hms_opt(23, 59, 59).unwrap().and_utc()
+            });
+        }
+
+        // Calculate current streak (days from today going backwards)
+        let today = Utc::now().date_naive();
+        let mut current_streak_days = 0i64;
+
+        for date_str in dates.iter().rev() {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                let days_ago = (today - date).num_days();
+                if days_ago == current_streak_days {
+                    current_streak_days += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(crate::analytics::StreakStats {
+            current_streak_days,
+            longest_streak_days: longest_streak,
+            longest_streak_start: longest_start,
+            longest_streak_end: longest_end,
+            active_days,
+            total_days,
+        })
+    }
+
+    /// Get usage profile for personality classification.
+    pub fn get_wrapped_usage_profile(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::analytics::personality::UsageProfile> {
+        let conn = self.conn.lock().unwrap();
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        // Tool counts
+        let (read_count, edit_count, bash_count, total_tools): (i64, i64, i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    SUM(CASE WHEN tool_name = 'Read' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN tool_name IN ('Edit', 'MultiEdit', 'Write') THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN tool_name = 'Bash' THEN 1 ELSE 0 END),
+                    COUNT(*)
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                  AND m.message_type = 'tool_call'
+                "#,
+                [&start_str, &end_str],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap_or((0, 0, 0, 0));
+
+        // Sessions and agents
+        let (sessions, agents): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM sessions WHERE started_at >= ? AND started_at < ?),
+                    (SELECT COUNT(*) FROM threads t
+                     JOIN sessions s ON t.session_id = s.id
+                     WHERE t.thread_type = 'agent'
+                       AND s.started_at >= ? AND s.started_at < ?)
+                "#,
+                [&start_str, &end_str, &start_str, &end_str],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+
+        // Average session duration
+        let avg_duration: f64 = conn
+            .query_row(
+                r#"
+                SELECT AVG((julianday(last_activity_at) - julianday(started_at)) * 86400)
+                FROM sessions
+                WHERE started_at >= ? AND started_at < ?
+                  AND last_activity_at IS NOT NULL
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
+
+        // Plans
+        let plans: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT sp.plan_id)
+                FROM session_plans sp
+                JOIN sessions s ON sp.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                "#,
+                [&start_str, &end_str],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Time distribution for night owl / early bird
+        // Inline the query to avoid deadlock (can't call get_wrapped_hourly_distribution while holding lock)
+        let mut hourly = [0i64; 24];
+        {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT CAST(strftime('%H', ts) AS INTEGER) as hour, COUNT(*) as cnt
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.started_at >= ? AND s.started_at < ?
+                GROUP BY hour
+                "#,
+            )?;
+            let rows = stmt.query_map([&start_str, &end_str], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows.flatten() {
+                let (hour, count) = row;
+                if hour >= 0 && hour < 24 {
+                    hourly[hour as usize] = count;
+                }
+            }
+        }
+        let total_activity: i64 = hourly.iter().sum();
+        let late_night: i64 = hourly[22..24].iter().sum::<i64>() + hourly[0..4].iter().sum::<i64>();
+        let early_morning: i64 = hourly[5..9].iter().sum();
+
+        // Projects
+        let (unique_projects, top_project_sessions): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COUNT(DISTINCT project_id),
+                    (SELECT COUNT(*) FROM sessions s2
+                     WHERE s2.project_id = (
+                         SELECT project_id FROM sessions
+                         WHERE started_at >= ? AND started_at < ? AND project_id IS NOT NULL
+                         GROUP BY project_id ORDER BY COUNT(*) DESC LIMIT 1
+                     ) AND s2.started_at >= ? AND s2.started_at < ?)
+                FROM sessions
+                WHERE started_at >= ? AND started_at < ?
+                  AND project_id IS NOT NULL
+                "#,
+                params![&start_str, &end_str, &start_str, &end_str, &start_str, &end_str],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+
+        let sessions_f = sessions.max(1) as f64;
+        let total_tools_f = total_tools.max(1) as f64;
+        let total_activity_f = total_activity.max(1) as f64;
+
+        Ok(crate::analytics::personality::UsageProfile {
+            read_to_edit_ratio: if edit_count > 0 {
+                read_count as f64 / edit_count as f64
+            } else {
+                read_count as f64
+            },
+            agent_spawn_rate: agents as f64 / sessions_f,
+            avg_session_duration_secs: avg_duration,
+            edits_per_session: edit_count as f64 / sessions_f,
+            bash_percentage: bash_count as f64 / total_tools_f,
+            plans_per_session: plans as f64 / sessions_f,
+            late_night_percentage: late_night as f64 / total_activity_f,
+            early_morning_percentage: early_morning as f64 / total_activity_f,
+            project_diversity: unique_projects as f64 / sessions_f,
+            top_project_concentration: top_project_sessions as f64 / sessions_f,
+        })
+    }
 }
 
 /// Filter for listing sessions

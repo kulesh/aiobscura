@@ -36,6 +36,7 @@ pub use ingest::{IngestCoordinator, SyncResult};
 pub use types::*;
 
 // Public modules
+pub mod analytics;
 pub mod config;
 pub mod db;
 pub mod error;
