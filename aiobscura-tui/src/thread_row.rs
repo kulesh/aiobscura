@@ -25,6 +25,8 @@ pub struct ThreadRow {
     pub message_count: i64,
     /// Indentation level (0 for main/orphan, 1 for child agents)
     pub indent_level: usize,
+    /// Whether this is the last child of its parent (for tree drawing)
+    pub is_last_child: bool,
 }
 
 impl ThreadRow {
@@ -62,14 +64,4 @@ impl ThreadRow {
         }
     }
 
-    /// Returns the thread type with indentation for display.
-    pub fn display_thread_type(&self) -> String {
-        let indent = "  ".repeat(self.indent_level);
-        let type_str = match self.thread_type {
-            ThreadType::Main => "main",
-            ThreadType::Agent => "agent",
-            ThreadType::Background => "bg",
-        };
-        format!("{}{}", indent, type_str)
-    }
 }

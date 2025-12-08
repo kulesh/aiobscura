@@ -293,6 +293,7 @@ impl App {
                     assistant_name: main_info.assistant_name.clone(),
                     message_count,
                     indent_level: 0,
+                    is_last_child: false,
                 });
 
                 // Add child threads (agents spawned by this main thread)
@@ -304,7 +305,8 @@ impl App {
                     // Sort children by started_at
                     children.sort_by(|a, b| a.thread.started_at.cmp(&b.thread.started_at));
 
-                    for child_info in children {
+                    let child_count = children.len();
+                    for (child_idx, child_info) in children.into_iter().enumerate() {
                         let message_count = self
                             .db
                             .count_thread_messages(&child_info.thread.id)
@@ -323,6 +325,7 @@ impl App {
                             assistant_name: child_info.assistant_name.clone(),
                             message_count,
                             indent_level: 1,
+                            is_last_child: child_idx == child_count - 1,
                         });
                     }
                 }
@@ -349,6 +352,7 @@ impl App {
                     assistant_name: orphan_info.assistant_name.clone(),
                     message_count,
                     indent_level: 0,
+                    is_last_child: false,
                 });
             }
         }
@@ -424,7 +428,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => {
                 self.scroll_to_bottom();
             }
-            KeyCode::PageDown | KeyCode::Char('d') => {
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
                 self.scroll_down_page();
             }
             KeyCode::PageUp | KeyCode::Char('u') => {
@@ -659,7 +663,7 @@ impl App {
                     self.plan_scroll_offset = lines.saturating_sub(1);
                 }
             }
-            KeyCode::PageDown | KeyCode::Char('d') => {
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
                 self.plan_scroll_offset = self.plan_scroll_offset.saturating_add(10);
             }
             KeyCode::PageUp | KeyCode::Char('u') => {

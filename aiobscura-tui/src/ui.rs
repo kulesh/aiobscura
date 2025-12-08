@@ -1,7 +1,7 @@
 //! UI rendering for the TUI.
 
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
-use aiobscura_core::{Message, MessageType, PlanStatus};
+use aiobscura_core::{Message, MessageType, PlanStatus, ThreadType};
 use chrono::Local;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -40,6 +40,30 @@ const WRAPPED_PURPLE: Color = Color::Rgb(138, 43, 226);
 const WRAPPED_WHITE: Color = Color::Rgb(250, 250, 250);
 /// Dim gray for secondary text
 const WRAPPED_DIM: Color = Color::Rgb(128, 128, 128);
+
+// ========== Standard View Colors ==========
+// Consistent colors for main TUI views
+
+/// Main thread badge color
+const BADGE_MAIN: Color = Color::Rgb(0, 180, 180);
+/// Agent thread badge color
+const BADGE_AGENT: Color = Color::Rgb(220, 180, 0);
+/// Background thread badge color
+const BADGE_BG: Color = Color::Rgb(120, 120, 120);
+/// Separator line color
+const SEPARATOR_COLOR: Color = Color::Rgb(60, 60, 60);
+/// Border color for Session Info block
+const BORDER_INFO: Color = Color::Rgb(0, 150, 150);
+/// Border color for Messages block
+const BORDER_MESSAGES: Color = Color::Rgb(80, 160, 80);
+/// Label color for metadata attributes
+const LABEL_COLOR: Color = Color::Rgb(100, 180, 180);
+/// Border color for Plan/Content blocks
+const BORDER_PLAN: Color = Color::Rgb(180, 100, 180);
+/// Markdown header color
+const MD_HEADER: Color = Color::Rgb(255, 180, 100);
+/// Markdown code block color
+const MD_CODE: Color = Color::Rgb(150, 150, 150);
 
 /// Render the application UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -121,7 +145,7 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     // Row 1: Source file path
     let source_display = format_path(&meta.source_path);
     lines.push(Line::from(vec![
-        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Source: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(source_display, Style::default().fg(Color::White)),
     ]));
 
@@ -131,7 +155,7 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     // CWD with git branch
     if let Some(cwd) = &meta.cwd {
         let cwd_display = format_cwd(cwd);
-        row2_spans.push(Span::styled("CWD: ", Style::default().fg(Color::DarkGray)));
+        row2_spans.push(Span::styled("CWD: ", Style::default().fg(LABEL_COLOR)));
         row2_spans.push(Span::styled(cwd_display, Style::default().fg(Color::White)));
         if let Some(branch) = &meta.git_branch {
             row2_spans.push(Span::styled(format!(" ({})", branch), Style::default().fg(Color::Yellow)));
@@ -141,14 +165,14 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
 
     // Model
     if let Some(model) = &meta.model_name {
-        row2_spans.push(Span::styled("Model: ", Style::default().fg(Color::DarkGray)));
+        row2_spans.push(Span::styled("Model: ", Style::default().fg(LABEL_COLOR)));
         row2_spans.push(Span::styled(model.clone(), Style::default().fg(Color::Cyan)));
         row2_spans.push(Span::raw("  "));
     }
 
     // Duration
     let duration_display = format_duration(meta.duration_secs);
-    row2_spans.push(Span::styled("Duration: ", Style::default().fg(Color::DarkGray)));
+    row2_spans.push(Span::styled("Duration: ", Style::default().fg(LABEL_COLOR)));
     row2_spans.push(Span::styled(duration_display, Style::default().fg(Color::White)));
 
     lines.push(Line::from(row2_spans));
@@ -156,16 +180,16 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     // Row 3: Msgs | Agents | Tools | Plans
     let tools_display = format_tool_stats(&meta.tool_stats);
     lines.push(Line::from(vec![
-        Span::styled("Msgs: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Msgs: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(meta.message_count.to_string(), Style::default().fg(Color::White)),
         Span::raw("  "),
-        Span::styled("Agents: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Agents: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(meta.agent_count.to_string(), Style::default().fg(Color::White)),
         Span::raw("  "),
-        Span::styled("Tools: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Tools: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(tools_display, Style::default().fg(Color::White)),
         Span::raw("  "),
-        Span::styled("Plans: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Plans: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(meta.plan_count.to_string(), Style::default().fg(Color::Magenta)),
         Span::styled(" (p)", Style::default().fg(Color::DarkGray)),
     ]));
@@ -173,12 +197,18 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     // Row 4: Files modified
     let files_display = format_file_stats(&meta.file_stats);
     lines.push(Line::from(vec![
-        Span::styled("Files: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Files: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(files_display, Style::default().fg(Color::White)),
     ]));
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Session Info "));
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(" Session Info ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
+    );
     frame.render_widget(paragraph, area);
 }
 
@@ -304,13 +334,46 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let header = Row::new(header_cells).height(1);
 
     let rows = app.threads.iter().map(|thread| {
+        // Create styled type cell with badge and tree chars
+        let (badge, type_text, color) = match thread.thread_type {
+            ThreadType::Main => ("●", "main", BADGE_MAIN),
+            ThreadType::Agent => ("◎", "agent", BADGE_AGENT),
+            ThreadType::Background => ("◇", "bg", BADGE_BG),
+        };
+
+        // Use tree-drawing characters for hierarchy (single space indent)
+        let tree_prefix = if thread.indent_level > 0 {
+            if thread.is_last_child {
+                "└"
+            } else {
+                "├"
+            }
+        } else {
+            ""
+        };
+
+        let type_cell = Cell::from(Line::from(vec![
+            Span::styled(tree_prefix, Style::default().fg(SEPARATOR_COLOR)),
+            Span::styled(format!("{} ", badge), Style::default().fg(color)),
+            Span::styled(type_text, Style::default().fg(color)),
+        ]));
+
+        // Color-code message count (high activity = brighter)
+        let msg_style = if thread.message_count > 100 {
+            Style::default().fg(Color::Yellow)
+        } else if thread.message_count > 50 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
         Row::new([
             Cell::from(thread.relative_time()),
             Cell::from(thread.short_id()),
             Cell::from(thread.project_name.as_str()),
             Cell::from(thread.assistant_name.as_str()),
-            Cell::from(thread.display_thread_type()),
-            Cell::from(thread.message_count.to_string()),
+            type_cell,
+            Cell::from(thread.message_count.to_string()).style(msg_style),
         ])
     });
 
@@ -325,7 +388,12 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Threads "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Threads "),
+        )
         .row_highlight_style(
             Style::default()
                 .add_modifier(Modifier::REVERSED)
@@ -339,11 +407,21 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Render the messages in detail view.
 fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+    let total = app.messages.len();
 
-    for msg in &app.messages {
-        let msg_lines = format_message(msg);
+    for (idx, msg) in app.messages.iter().enumerate() {
+        // Add separator before each message (except first)
+        if idx > 0 {
+            let separator = "─".repeat(40);
+            lines.push(Line::from(Span::styled(
+                separator,
+                Style::default().fg(SEPARATOR_COLOR),
+            )));
+        }
+
+        let msg_lines = format_message(msg, idx + 1, total);
         lines.extend(msg_lines);
-        lines.push(Line::raw("")); // Blank line between messages
+        lines.push(Line::raw("")); // Blank line after content
     }
 
     // Clamp scroll offset
@@ -353,7 +431,14 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let paragraph = Paragraph::new(lines.clone())
-        .block(Block::default().borders(Borders::ALL).title(" Messages "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_MESSAGES))
+                .title(" Messages ")
+                .title_style(Style::default().fg(BORDER_MESSAGES).bold()),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset as u16, 0));
 
@@ -378,42 +463,70 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Format a single message into display lines.
-fn format_message(msg: &Message) -> Vec<Line<'static>> {
-    let (prefix, style) = match msg.message_type {
-        MessageType::Prompt => (
-            "[Human]".to_string(),
-            Style::default().fg(Color::Cyan).bold(),
-        ),
-        MessageType::Response => (
-            "[Assistant]".to_string(),
-            Style::default().fg(Color::Green),
-        ),
+fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static>> {
+    let (icon, label, style) = match msg.message_type {
+        MessageType::Prompt => ("💬", "Human", Style::default().fg(Color::Cyan).bold()),
+        MessageType::Response => ("🤖", "Assistant", Style::default().fg(Color::Green)),
         MessageType::ToolCall => {
             let name = msg.tool_name.as_deref().unwrap_or("unknown");
-            (
-                format!("[Tool: {}]", name),
-                Style::default().fg(Color::Yellow),
-            )
+            return format_tool_message(name, msg, index, total);
         }
-        MessageType::ToolResult => (
-            "[Result]".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        MessageType::Error => ("[Error]".to_string(), Style::default().fg(Color::Red)),
-        MessageType::Plan => ("[Plan]".to_string(), Style::default().fg(Color::Magenta)),
-        MessageType::Summary => ("[Summary]".to_string(), Style::default().fg(Color::Blue)),
-        MessageType::Context => ("[Context]".to_string(), Style::default().fg(Color::DarkGray)),
+        MessageType::ToolResult => ("📋", "Result", Style::default().fg(Color::DarkGray)),
+        MessageType::Error => ("❌", "Error", Style::default().fg(Color::Red)),
+        MessageType::Plan => ("📝", "Plan", Style::default().fg(Color::Magenta)),
+        MessageType::Summary => ("📊", "Summary", Style::default().fg(Color::Blue)),
+        MessageType::Context => ("📎", "Context", Style::default().fg(Color::DarkGray)),
     };
 
     let mut lines = Vec::new();
 
-    // Header line with prefix
-    lines.push(Line::from(Span::styled(prefix, style)));
+    // Header line with icon, label, and index
+    let counter = format!("[{}/{}]", index, total);
+    lines.push(Line::from(vec![
+        Span::raw(format!("{} ", icon)),
+        Span::styled(label, style),
+        Span::styled(format!(" {}", counter), Style::default().fg(Color::DarkGray)),
+    ]));
 
     // Content
     let content = get_message_content(msg);
     if !content.is_empty() {
         // Truncate very long content (respecting char boundaries)
+        let display_content = if content.chars().count() > 2000 {
+            let truncated: String = content.chars().take(2000).collect();
+            format!("{}... [truncated]", truncated)
+        } else {
+            content
+        };
+
+        for line in display_content.lines() {
+            lines.push(Line::from(Span::raw(format!("  {}", line))));
+        }
+    }
+
+    lines
+}
+
+/// Format a tool call message with special handling for the tool name.
+fn format_tool_message(
+    tool_name: &str,
+    msg: &Message,
+    index: usize,
+    total: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let counter = format!("[{}/{}]", index, total);
+    lines.push(Line::from(vec![
+        Span::raw("🔧 "),
+        Span::styled("Tool: ", Style::default().fg(Color::Yellow)),
+        Span::styled(tool_name.to_string(), Style::default().fg(Color::Yellow).bold()),
+        Span::styled(format!(" {}", counter), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Content
+    let content = get_message_content(msg);
+    if !content.is_empty() {
         let display_content = if content.chars().count() > 2000 {
             let truncated: String = content.chars().take(2000).collect();
             format!("{}... [truncated]", truncated)
@@ -545,7 +658,14 @@ fn render_plan_table(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.plans.is_empty() {
         let empty_msg = Paragraph::new("No plans found for this session")
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title(" Plans "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_PLAN))
+                    .title(" Plans ")
+                    .title_style(Style::default().fg(BORDER_PLAN).bold()),
+            );
         frame.render_widget(empty_msg, area);
         return;
     }
@@ -578,7 +698,14 @@ fn render_plan_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Plans "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_PLAN))
+                .title(" Plans ")
+                .title_style(Style::default().fg(BORDER_PLAN).bold()),
+        )
         .row_highlight_style(
             Style::default()
                 .add_modifier(Modifier::REVERSED)
@@ -589,14 +716,60 @@ fn render_plan_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.plan_table_state);
 }
 
-/// Render plan content.
+/// Render plan content with markdown-aware styling.
 fn render_plan_content(frame: &mut Frame, app: &mut App, area: Rect) {
     let content = match &app.selected_plan {
         Some(plan) => plan.content.as_deref().unwrap_or("(empty plan)"),
         None => "(no plan selected)",
     };
 
-    let lines: Vec<Line> = content.lines().map(|l| Line::raw(l.to_string())).collect();
+    // Parse markdown-style content for styling
+    let mut lines: Vec<Line> = Vec::new();
+    let mut in_code_block = false;
+
+    for line in content.lines() {
+        let styled_line = if line.starts_with("```") {
+            // Toggle code block state
+            in_code_block = !in_code_block;
+            Line::from(Span::styled(line.to_string(), Style::default().fg(MD_CODE)))
+        } else if in_code_block {
+            // Code block content
+            Line::from(Span::styled(line.to_string(), Style::default().fg(MD_CODE)))
+        } else if line.starts_with("# ") {
+            // H1 header
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(MD_HEADER).bold(),
+            ))
+        } else if line.starts_with("## ") {
+            // H2 header
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(MD_HEADER).bold(),
+            ))
+        } else if line.starts_with("### ") {
+            // H3 header
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(MD_HEADER),
+            ))
+        } else if line.starts_with("**") && line.ends_with("**") {
+            // Bold line (like **File:** ...)
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::Yellow),
+            ))
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            // Bullet points
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(BORDER_PLAN)),
+                Span::raw(line[2..].to_string()),
+            ])
+        } else {
+            Line::raw(line.to_string())
+        };
+        lines.push(styled_line);
+    }
 
     // Clamp scroll offset
     let max_scroll = lines.len().saturating_sub(area.height.saturating_sub(2) as usize);
@@ -605,7 +778,14 @@ fn render_plan_content(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let paragraph = Paragraph::new(lines.clone())
-        .block(Block::default().borders(Borders::ALL).title(" Content "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_PLAN))
+                .title(" Content ")
+                .title_style(Style::default().fg(BORDER_PLAN).bold()),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.plan_scroll_offset as u16, 0));
 
