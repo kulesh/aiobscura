@@ -428,7 +428,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => {
                 self.scroll_to_bottom();
             }
-            KeyCode::PageDown | KeyCode::Char('d') => {
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
                 self.scroll_down_page();
             }
             KeyCode::PageUp | KeyCode::Char('u') => {
@@ -663,7 +663,7 @@ impl App {
                     self.plan_scroll_offset = lines.saturating_sub(1);
                 }
             }
-            KeyCode::PageDown | KeyCode::Char('d') => {
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
                 self.plan_scroll_offset = self.plan_scroll_offset.saturating_add(10);
             }
             KeyCode::PageUp | KeyCode::Char('u') => {
