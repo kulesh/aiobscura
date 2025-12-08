@@ -8,4 +8,4 @@
 pub mod repo;
 pub mod schema;
 
-pub use repo::{Database, SessionFilter};
+pub use repo::{Database, FileStats, SessionFilter, ToolStats, TokenUsage};
