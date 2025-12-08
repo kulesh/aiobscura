@@ -2,9 +2,13 @@
 
 use std::collections::HashMap;
 
+use aiobscura_core::analytics::{
+    generate_wrapped, WrappedConfig, WrappedPeriod, WrappedStats,
+};
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{Database, Message, Plan, SessionFilter, Thread, ThreadType};
 use anyhow::Result;
+use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
@@ -39,6 +43,8 @@ pub enum ViewMode {
         plan_slug: String,
         plan_title: String,
     },
+    /// Wrapped view showing year/month in review
+    Wrapped,
 }
 
 /// Metadata for the detail view header.
@@ -90,6 +96,12 @@ pub struct App {
     pub plan_scroll_offset: usize,
     /// Metadata for current thread (detail view)
     pub thread_metadata: Option<ThreadMetadata>,
+    /// Wrapped stats for the wrapped view
+    pub wrapped_stats: Option<WrappedStats>,
+    /// Current wrapped period
+    pub wrapped_period: WrappedPeriod,
+    /// Current wrapped card index (0-based)
+    pub wrapped_card_index: usize,
     /// Whether the app should exit
     pub should_quit: bool,
 }
@@ -109,6 +121,9 @@ impl App {
             selected_plan: None,
             plan_scroll_offset: 0,
             thread_metadata: None,
+            wrapped_stats: None,
+            wrapped_period: WrappedPeriod::current_year(),
+            wrapped_card_index: 0,
             should_quit: false,
         }
     }
@@ -291,6 +306,7 @@ impl App {
             ViewMode::Detail { .. } => self.handle_detail_key(key),
             ViewMode::PlanList { .. } => self.handle_plan_list_key(key),
             ViewMode::PlanDetail { .. } => self.handle_plan_detail_key(key),
+            ViewMode::Wrapped => self.handle_wrapped_key(key),
         }
     }
 
@@ -305,6 +321,9 @@ impl App {
             }
             KeyCode::Char('p') => {
                 self.open_plan_list(false);
+            }
+            KeyCode::Char('w') => {
+                self.open_wrapped_view();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.select_next();
@@ -755,6 +774,112 @@ impl App {
     fn select_last_plan(&mut self) {
         if !self.plans.is_empty() {
             self.plan_table_state.select(Some(self.plans.len() - 1));
+        }
+    }
+
+    // ========== Wrapped View Methods ==========
+
+    /// Handle keyboard input in wrapped view.
+    fn handle_wrapped_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_wrapped_view();
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                self.next_wrapped_card();
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.prev_wrapped_card();
+            }
+            KeyCode::Char('m') => {
+                self.toggle_wrapped_period();
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.wrapped_card_index = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.wrapped_card_index = self.wrapped_card_count().saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the wrapped view.
+    fn open_wrapped_view(&mut self) {
+        let config = WrappedConfig::default();
+        match generate_wrapped(&self.db, self.wrapped_period, &config) {
+            Ok(stats) => {
+                self.wrapped_stats = Some(stats);
+                self.wrapped_card_index = 0;
+                self.view_mode = ViewMode::Wrapped;
+            }
+            Err(e) => {
+                // Log error but don't crash
+                tracing::error!("Failed to generate wrapped stats: {}", e);
+            }
+        }
+    }
+
+    /// Close the wrapped view.
+    fn close_wrapped_view(&mut self) {
+        self.view_mode = ViewMode::List;
+        self.wrapped_stats = None;
+        self.wrapped_card_index = 0;
+    }
+
+    /// Get the number of cards to display.
+    pub fn wrapped_card_count(&self) -> usize {
+        if self.wrapped_stats.is_none() {
+            return 0;
+        }
+        // Cards: Title, Tools, Time Patterns, Streaks, Projects, Trends (if available), Personality (if available)
+        let mut count = 5; // Title, Tools, Time, Streaks, Projects
+        if let Some(stats) = &self.wrapped_stats {
+            if stats.trends.is_some() {
+                count += 1;
+            }
+            if stats.personality.is_some() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Move to the next wrapped card.
+    fn next_wrapped_card(&mut self) {
+        let max = self.wrapped_card_count();
+        if max > 0 && self.wrapped_card_index < max - 1 {
+            self.wrapped_card_index += 1;
+        }
+    }
+
+    /// Move to the previous wrapped card.
+    fn prev_wrapped_card(&mut self) {
+        if self.wrapped_card_index > 0 {
+            self.wrapped_card_index -= 1;
+        }
+    }
+
+    /// Toggle between year and month period.
+    fn toggle_wrapped_period(&mut self) {
+        self.wrapped_period = match self.wrapped_period {
+            WrappedPeriod::Year(year) => {
+                // Switch to current month of that year (or current month if same year)
+                let now = chrono::Utc::now();
+                if year == now.year() {
+                    WrappedPeriod::Month(year, now.month())
+                } else {
+                    WrappedPeriod::Month(year, 12) // Default to December for past years
+                }
+            }
+            WrappedPeriod::Month(year, _) => WrappedPeriod::Year(year),
+        };
+
+        // Regenerate stats for new period
+        let config = WrappedConfig::default();
+        if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
+            self.wrapped_stats = Some(stats);
+            self.wrapped_card_index = 0;
         }
     }
 }
