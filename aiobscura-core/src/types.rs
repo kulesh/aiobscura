@@ -256,6 +256,19 @@ impl BackingModel {
             metadata: serde_json::json!({}),
         }
     }
+
+    /// Create a BackingModel from an ID string like "anthropic:claude-sonnet-4-20250514"
+    pub fn from_id(id: &str) -> Self {
+        let (provider, model_id) = id.split_once(':').unwrap_or(("unknown", id));
+        Self {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            display_name: None,
+            first_seen_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        }
+    }
 }
 
 // ============================================

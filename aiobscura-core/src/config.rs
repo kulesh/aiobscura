@@ -1,10 +1,43 @@
 //! Configuration loading and management
 //!
 //! Configuration is loaded from `~/.config/aiobscura/config.toml`
+//!
+//! This module follows the XDG Base Directory Specification:
+//! - Config: `$XDG_CONFIG_HOME/aiobscura/` (~/.config/aiobscura/)
+//! - Data: `$XDG_DATA_HOME/aiobscura/` (~/.local/share/aiobscura/)
+//! - State/Logs: `$XDG_STATE_HOME/aiobscura/` (~/.local/state/aiobscura/)
 
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
+
+/// Returns $HOME or panics
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME environment variable not set")
+}
+
+/// Returns XDG_CONFIG_HOME or ~/.config
+fn xdg_config_home() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".config"))
+}
+
+/// Returns XDG_DATA_HOME or ~/.local/share
+fn xdg_data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".local/share"))
+}
+
+/// Returns XDG_STATE_HOME or ~/.local/state
+fn xdg_state_home() -> PathBuf {
+    std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".local/state"))
+}
 
 /// Main configuration struct
 #[derive(Debug, Deserialize, Default)]
@@ -174,34 +207,36 @@ impl Config {
     }
 
     /// Returns the default config file path
+    ///
+    /// `$XDG_CONFIG_HOME/aiobscura/config.toml` (~/.config/aiobscura/config.toml)
     pub fn config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aiobscura")
-            .join("config.toml")
+        xdg_config_home().join("aiobscura").join("config.toml")
     }
 
     /// Returns the data directory path (for SQLite database)
+    ///
+    /// `$XDG_DATA_HOME/aiobscura/` (~/.local/share/aiobscura/)
     pub fn data_dir() -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aiobscura")
+        xdg_data_home().join("aiobscura")
     }
 
     /// Returns the state directory path (for logs)
+    ///
+    /// `$XDG_STATE_HOME/aiobscura/` (~/.local/state/aiobscura/)
     pub fn state_dir() -> PathBuf {
-        dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aiobscura")
+        xdg_state_home().join("aiobscura")
     }
 
     /// Returns the database file path
+    ///
+    /// `$XDG_DATA_HOME/aiobscura/data.db` (~/.local/share/aiobscura/data.db)
     pub fn database_path() -> PathBuf {
         Self::data_dir().join("data.db")
     }
 
     /// Returns the log file path
+    ///
+    /// `$XDG_STATE_HOME/aiobscura/aiobscura.log` (~/.local/state/aiobscura/aiobscura.log)
     pub fn log_path() -> PathBuf {
         Self::state_dir().join("aiobscura.log")
     }

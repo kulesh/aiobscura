@@ -81,6 +81,19 @@ pub struct FileSyncResult {
     pub is_new_session: bool,
     /// Warnings from parsing
     pub warnings: Vec<String>,
+    /// Reason the file was skipped (if skipped)
+    pub skip_reason: Option<SkipReason>,
+}
+
+/// Reason a file was skipped during sync.
+#[derive(Debug, Clone)]
+pub enum SkipReason {
+    /// File was already fully parsed (checkpoint matches or exceeds file size)
+    AlreadyParsed { checkpoint_offset: u64, file_size: u64 },
+    /// File is empty
+    EmptyFile,
+    /// No new content since last parse
+    NoNewContent,
 }
 
 /// Coordinates ingestion across all registered parsers.
@@ -169,11 +182,33 @@ impl IngestCoordinator {
     /// This enables correct thread linkage even in incremental mode where main
     /// sessions may have been fully parsed in previous syncs.
     pub fn sync_all(&self) -> Result<SyncResult> {
+        self.sync_all_with_progress(|_, _, _| {})
+    }
+
+    /// Sync all discovered files with progress callback.
+    ///
+    /// The callback receives `(current_file_index, total_files, file_path)` before
+    /// each file is processed. This allows callers to display progress indicators.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// coordinator.sync_all_with_progress(|current, total, path| {
+    ///     println!("Processing {}/{}: {}", current + 1, total, path.display());
+    /// })?;
+    /// ```
+    pub fn sync_all_with_progress<F>(&self, mut on_progress: F) -> Result<SyncResult>
+    where
+        F: FnMut(usize, usize, &Path),
+    {
         let files = self.discover_files()?;
+        let total = files.len();
         let mut result = SyncResult::default();
 
         // Process all files - order doesn't matter since spawn info is DB-backed
-        for file in files {
+        for (i, file) in files.iter().enumerate() {
+            on_progress(i, total, &file.path);
+
             match self.sync_file_internal(&file.path) {
                 Ok(file_result) => {
                     Self::update_result(&mut result, &file_result);
@@ -199,6 +234,25 @@ impl IngestCoordinator {
             }
         } else {
             result.files_skipped += 1;
+
+            // Log why the file was skipped
+            let reason = match &file_result.skip_reason {
+                Some(SkipReason::AlreadyParsed {
+                    checkpoint_offset,
+                    file_size,
+                }) => format!(
+                    "already parsed (checkpoint {} >= file size {})",
+                    checkpoint_offset, file_size
+                ),
+                Some(SkipReason::EmptyFile) => "empty file".to_string(),
+                Some(SkipReason::NoNewContent) => "no new content".to_string(),
+                None => "unknown".to_string(),
+            };
+            tracing::debug!(
+                path = %file_result.path.display(),
+                reason = %reason,
+                "File skipped"
+            );
         }
         result.warnings.extend(file_result.warnings.clone());
     }
@@ -257,6 +311,22 @@ impl IngestCoordinator {
             && parse_result.session.is_none()
             && parse_result.threads.is_empty()
         {
+            // Determine why the file was skipped
+            let skip_reason = if file_size == 0 {
+                Some(SkipReason::EmptyFile)
+            } else if let Checkpoint::ByteOffset { offset } = &checkpoint {
+                if *offset >= file_size {
+                    Some(SkipReason::AlreadyParsed {
+                        checkpoint_offset: *offset,
+                        file_size,
+                    })
+                } else {
+                    Some(SkipReason::NoNewContent)
+                }
+            } else {
+                Some(SkipReason::NoNewContent)
+            };
+
             return Ok(FileSyncResult {
                 path: path.to_path_buf(),
                 new_messages: 0,
@@ -264,6 +334,7 @@ impl IngestCoordinator {
                 new_checkpoint: parse_result.new_checkpoint,
                 is_new_session: false,
                 warnings: parse_result.warnings,
+                skip_reason,
             });
         }
 
@@ -289,6 +360,14 @@ impl IngestCoordinator {
         // Store project (before session, since session references it)
         if let Some(project) = &parse_result.project {
             self.db.upsert_project(project)?;
+        }
+
+        // Store backing model (before session, since session references it)
+        if let Some(ref session) = parse_result.session {
+            if let Some(ref model_id) = session.backing_model_id {
+                let backing_model = crate::types::BackingModel::from_id(model_id);
+                self.db.upsert_backing_model(&backing_model)?;
+            }
         }
 
         // Store session
@@ -361,6 +440,7 @@ impl IngestCoordinator {
             new_checkpoint: parse_result.new_checkpoint,
             is_new_session,
             warnings: parse_result.warnings,
+            skip_reason: None,
         })
     }
 
