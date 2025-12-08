@@ -64,6 +64,10 @@ fn main() -> Result<()> {
 /// Run the main application loop.
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
+        // Update animations
+        let size = terminal.size()?;
+        app.tick_animation(size.width, size.height);
+
         // Render
         terminal.draw(|frame| ui::render(frame, app))?;
 

@@ -718,6 +718,9 @@ fn format_relative_time(ts: chrono::DateTime<chrono::Utc>) -> String {
 fn render_wrapped_view(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
+    // Render snowflakes in background first
+    render_snowflakes(frame, app, area);
+
     // Layout: header, card content, footer
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
@@ -734,15 +737,74 @@ fn render_wrapped_view(frame: &mut Frame, app: &App) {
         }
     };
 
-    // Header with period
-    let title = format!("AI Wrapped - {}", stats.period.display_name());
-    render_header(frame, &title, chunks[0]);
+    // Header with period and holiday flair
+    let title = format!("🎄 AI Wrapped - {} 🎄", stats.period.display_name());
+    render_wrapped_header(frame, &title, app.animation_frame, chunks[0]);
 
     // Render the current card
     render_wrapped_card(frame, stats, app.wrapped_card_index, chunks[1]);
 
     // Footer
     render_wrapped_footer(frame, app, chunks[2]);
+}
+
+/// Render falling snowflakes in the background.
+fn render_snowflakes(frame: &mut Frame, app: &App, area: Rect) {
+    // Snowflake characters with varying "weights"
+    let snowflake_chars = ['❄', '❅', '❆', '✦', '·', '•', '*'];
+
+    for (i, (x, y, speed)) in app.snowflakes.iter().enumerate() {
+        // Skip if outside the render area
+        if *x >= area.width || *y >= area.height {
+            continue;
+        }
+
+        // Pick snowflake character based on index and speed
+        let char_idx = (i + *speed as usize) % snowflake_chars.len();
+        let flake = snowflake_chars[char_idx];
+
+        // Color based on speed (faster = dimmer, gives depth effect)
+        let color = match speed {
+            1 => WRAPPED_WHITE,
+            2 => WRAPPED_SILVER,
+            _ => WRAPPED_DIM,
+        };
+
+        // Twinkle effect - some snowflakes blink
+        let visible = if i % 5 == 0 {
+            app.animation_frame % 4 != 0
+        } else {
+            true
+        };
+
+        if visible {
+            let span = Span::styled(flake.to_string(), Style::default().fg(color));
+            let paragraph = Paragraph::new(span);
+            let snowflake_area = Rect::new(*x, *y, 1, 1);
+            frame.render_widget(paragraph, snowflake_area);
+        }
+    }
+}
+
+/// Render the wrapped header with animated decorations.
+fn render_wrapped_header(frame: &mut Frame, title: &str, animation_frame: u64, area: Rect) {
+    // Animated border characters for twinkling effect
+    let twinkle_chars = ['✨', '⭐', '🌟', '💫', '✧', '✦'];
+    let twinkle_idx = (animation_frame / 3) as usize % twinkle_chars.len();
+    let twinkle = twinkle_chars[twinkle_idx];
+
+    // Build the header with twinkling decorations
+    let header_line = Line::from(vec![
+        Span::styled(format!(" {} ", twinkle), Style::default().fg(WRAPPED_GOLD)),
+        Span::styled(title, Style::default().fg(WRAPPED_CYAN).bold()),
+        Span::styled(format!(" {} ", twinkle), Style::default().fg(WRAPPED_GOLD)),
+    ]);
+
+    let header = Paragraph::new(header_line)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::BOTTOM));
+
+    frame.render_widget(header, area);
 }
 
 /// Render a specific wrapped card by index.

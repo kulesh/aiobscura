@@ -104,6 +104,10 @@ pub struct App {
     pub wrapped_card_index: usize,
     /// Cache for wrapped stats by period (avoids recomputation)
     wrapped_cache: HashMap<WrappedPeriod, WrappedStats>,
+    /// Animation frame counter (increments each render)
+    pub animation_frame: u64,
+    /// Snowflake positions for holiday animation (x, y, speed)
+    pub snowflakes: Vec<(u16, u16, u8)>,
     /// Whether the app should exit
     pub should_quit: bool,
 }
@@ -127,7 +131,62 @@ impl App {
             wrapped_period: WrappedPeriod::current_year(),
             wrapped_card_index: 0,
             wrapped_cache: HashMap::new(),
+            animation_frame: 0,
+            snowflakes: Vec::new(),
             should_quit: false,
+        }
+    }
+
+    /// Tick the animation state (call each frame).
+    pub fn tick_animation(&mut self, width: u16, height: u16) {
+        self.animation_frame = self.animation_frame.wrapping_add(1);
+
+        // Initialize snowflakes if empty and in wrapped view
+        if matches!(self.view_mode, ViewMode::Wrapped) {
+            if self.snowflakes.is_empty() {
+                self.init_snowflakes(width, height);
+            }
+            self.update_snowflakes(height);
+        }
+    }
+
+    /// Initialize snowflakes with random positions.
+    fn init_snowflakes(&mut self, width: u16, height: u16) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Create ~30 snowflakes with pseudo-random positions
+        let count = 30;
+        for i in 0..count {
+            // Use a simple hash for pseudo-randomness
+            let mut hasher = DefaultHasher::new();
+            (i as u64 * 7919 + self.animation_frame).hash(&mut hasher);
+            let hash = hasher.finish();
+
+            let x = (hash % width as u64) as u16;
+            let y = ((hash / width as u64) % height as u64) as u16;
+            let speed = ((hash / (width as u64 * height as u64)) % 3 + 1) as u8;
+
+            self.snowflakes.push((x, y, speed));
+        }
+    }
+
+    /// Update snowflake positions (falling animation).
+    fn update_snowflakes(&mut self, height: u16) {
+        for (x, y, speed) in &mut self.snowflakes {
+            // Only update every few frames based on speed
+            if self.animation_frame % (*speed as u64 * 2) == 0 {
+                *y = (*y + 1) % height;
+
+                // Add slight horizontal drift
+                if self.animation_frame % 7 == 0 {
+                    if *x > 0 && self.animation_frame % 2 == 0 {
+                        *x -= 1;
+                    } else if *x < 200 {
+                        *x += 1;
+                    }
+                }
+            }
         }
     }
 
