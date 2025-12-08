@@ -2,7 +2,7 @@
 //!
 //! Generates "Spotify Wrapped"-style summaries of AI assistant usage.
 
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 
 use super::Personality;
 
@@ -357,9 +357,12 @@ impl MarathonSession {
         }
     }
 
-    /// Format date for display.
+    /// Format date for display in local timezone.
     pub fn date_display(&self) -> String {
-        self.date.format("%b %d").to_string()
+        self.date
+            .with_timezone(&Local)
+            .format("%b %d")
+            .to_string()
     }
 }
 

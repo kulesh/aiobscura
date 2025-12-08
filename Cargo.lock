@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "aiobscura-core",
  "anyhow",
+ "chrono",
  "clap",
  "serde_json",
 ]

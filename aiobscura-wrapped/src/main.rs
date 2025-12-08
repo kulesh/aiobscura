@@ -7,6 +7,7 @@ use aiobscura_core::analytics::{
 };
 use aiobscura_core::{Config, Database};
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -202,7 +203,11 @@ fn print_terminal(stats: &WrappedStats, fun_mode: bool) {
     if stats.streaks.longest_streak_days > 0 {
         let streak_dates = match (&stats.streaks.longest_streak_start, &stats.streaks.longest_streak_end) {
             (Some(start), Some(end)) => {
-                format!(" ({} - {})", start.format("%b %d"), end.format("%b %d"))
+                format!(
+                    " ({} - {})",
+                    start.with_timezone(&Local).format("%b %d"),
+                    end.with_timezone(&Local).format("%b %d")
+                )
             }
             _ => String::new(),
         };

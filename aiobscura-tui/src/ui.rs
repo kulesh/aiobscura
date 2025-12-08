@@ -2,6 +2,7 @@
 
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
 use aiobscura_core::{Message, MessageType, PlanStatus};
+use chrono::Local;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -1117,7 +1118,11 @@ fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Re
     if stats.streaks.longest_streak_days > 0 {
         let streak_dates = match (&stats.streaks.longest_streak_start, &stats.streaks.longest_streak_end) {
             (Some(start), Some(end)) => {
-                format!(" ({} – {})", start.format("%b %d"), end.format("%b %d"))
+                format!(
+                    " ({} – {})",
+                    start.with_timezone(&Local).format("%b %d"),
+                    end.with_timezone(&Local).format("%b %d")
+                )
             }
             _ => String::new(),
         };

@@ -1407,6 +1407,10 @@ impl Database {
     }
 
     /// Get the longest (marathon) session in a time period.
+    ///
+    /// This calculates the longest single-day coding session by measuring the
+    /// time span from first to last message on each day, rather than the full
+    /// session duration which can span multiple days.
     pub fn get_wrapped_marathon_session(
         &self,
         start: DateTime<Utc>,
@@ -1416,25 +1420,38 @@ impl Database {
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
+        // Find the longest single-day coding session by grouping messages by day
+        // and calculating the span from first to last message within that day
         let result: Option<(String, f64, String, Option<String>, i64, i64)> = conn
             .query_row(
                 r#"
+                WITH daily_sessions AS (
+                    SELECT
+                        s.id as session_id,
+                        p.name as project_name,
+                        date(m.ts) as session_date,
+                        MIN(m.ts) as first_msg,
+                        MAX(m.ts) as last_msg,
+                        (julianday(MAX(m.ts)) - julianday(MIN(m.ts))) * 86400 as duration_secs,
+                        COUNT(CASE WHEN m.message_type = 'tool_call' THEN 1 END) as tool_calls,
+                        COALESCE(SUM(m.tokens_in + m.tokens_out), 0) as tokens
+                    FROM messages m
+                    JOIN threads t ON m.thread_id = t.id
+                    JOIN sessions s ON t.session_id = s.id
+                    LEFT JOIN projects p ON s.project_id = p.id
+                    WHERE m.ts >= ? AND m.ts < ?
+                    GROUP BY s.id, date(m.ts)
+                    HAVING COUNT(*) > 1
+                )
                 SELECT
-                    s.id,
-                    (julianday(s.last_activity_at) - julianday(s.started_at)) * 86400 as duration,
-                    s.started_at,
-                    p.name,
-                    (SELECT COUNT(*) FROM messages m
-                     JOIN threads t ON m.thread_id = t.id
-                     WHERE t.session_id = s.id AND m.message_type = 'tool_call') as tool_calls,
-                    (SELECT COALESCE(SUM(m.tokens_in + m.tokens_out), 0) FROM messages m
-                     JOIN threads t ON m.thread_id = t.id
-                     WHERE t.session_id = s.id) as tokens
-                FROM sessions s
-                LEFT JOIN projects p ON s.project_id = p.id
-                WHERE s.started_at >= ? AND s.started_at < ?
-                  AND s.last_activity_at IS NOT NULL
-                ORDER BY duration DESC
+                    session_id,
+                    duration_secs,
+                    first_msg,
+                    project_name,
+                    tool_calls,
+                    tokens
+                FROM daily_sessions
+                ORDER BY duration_secs DESC
                 LIMIT 1
                 "#,
                 [&start_str, &end_str],
