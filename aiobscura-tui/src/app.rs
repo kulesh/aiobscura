@@ -18,7 +18,6 @@ use crate::thread_row::ThreadRow;
 #[derive(Debug, Clone, Default)]
 pub enum ViewMode {
     /// Thread list view
-    #[default]
     List,
     /// Thread detail view showing messages
     Detail {
@@ -45,7 +44,8 @@ pub enum ViewMode {
     },
     /// Wrapped view showing year/month in review
     Wrapped,
-    /// Project list view
+    /// Project list view (default)
+    #[default]
     ProjectList,
     /// Project detail view showing stats
     ProjectDetail {
@@ -1109,22 +1109,26 @@ impl App {
 
     /// Open the project list view.
     fn open_project_list(&mut self) {
-        // Load projects from database
-        if let Ok(projects) = self.db.list_projects_with_stats() {
-            self.projects = projects;
-            self.project_table_state = TableState::default();
-            if !self.projects.is_empty() {
-                self.project_table_state.select(Some(0));
+        // Load projects if not already loaded
+        if self.projects.is_empty() {
+            if let Ok(projects) = self.db.list_projects_with_stats() {
+                self.projects = projects;
+                self.project_table_state = TableState::default();
+                if !self.projects.is_empty() {
+                    self.project_table_state.select(Some(0));
+                }
             }
-            self.view_mode = ViewMode::ProjectList;
         }
+        self.view_mode = ViewMode::ProjectList;
     }
 
-    /// Close project list and return to thread list.
+    /// Close project list and switch to thread list.
     fn close_project_list(&mut self) {
+        // Load threads if not already loaded
+        if self.threads.is_empty() {
+            let _ = self.load_threads();
+        }
         self.view_mode = ViewMode::List;
-        self.projects.clear();
-        self.project_table_state = TableState::default();
     }
 
     /// Open project detail for the selected project.
@@ -1208,5 +1212,15 @@ impl App {
         if !self.projects.is_empty() {
             self.project_table_state.select(Some(self.projects.len() - 1));
         }
+    }
+
+    /// Load projects from the database (for initial startup).
+    pub fn load_projects(&mut self) -> Result<()> {
+        self.projects = self.db.list_projects_with_stats()?;
+        self.project_table_state = TableState::default();
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(0));
+        }
+        Ok(())
     }
 }

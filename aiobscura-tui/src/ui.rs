@@ -93,15 +93,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_list_view(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Layout: header, table, footer
+    // Layout: tab header, table, footer
     let chunks = Layout::vertical([
-        Constraint::Length(3), // Header
+        Constraint::Length(2), // Tab header
         Constraint::Min(5),    // Table
         Constraint::Length(1), // Footer
     ])
     .split(area);
 
-    render_header(frame, "aiobscura - AI Agent Activity Monitor", chunks[0]);
+    render_tab_header(frame, ActiveTab::Threads, chunks[0]);
     render_table(frame, app, chunks[1]);
     render_list_footer(frame, app, chunks[2]);
 }
@@ -131,6 +131,50 @@ fn render_header(frame: &mut Frame, title: &str, area: Rect) {
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, area);
+}
+
+/// Which tab is currently active.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ActiveTab {
+    Projects,
+    Threads,
+}
+
+/// Render the tab bar header with Projects and Threads tabs.
+fn render_tab_header(frame: &mut Frame, active: ActiveTab, area: Rect) {
+    // Layout: app name on left, tabs in center/right
+    let chunks = Layout::horizontal([
+        Constraint::Length(12), // App name
+        Constraint::Min(1),     // Tabs
+    ])
+    .split(area);
+
+    // App name
+    let app_name = Paragraph::new(" aiobscura")
+        .style(Style::default().fg(Color::Cyan).bold());
+    frame.render_widget(app_name, chunks[0]);
+
+    // Tab styling
+    let (projects_style, threads_style) = match active {
+        ActiveTab::Projects => (
+            Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED),
+            Style::default().fg(Color::DarkGray),
+        ),
+        ActiveTab::Threads => (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED),
+        ),
+    };
+
+    let tabs = Line::from(vec![
+        Span::styled(" Projects ", projects_style),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Threads ", threads_style),
+    ]);
+
+    let tabs_para = Paragraph::new(tabs)
+        .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(tabs_para, chunks[1]);
 }
 
 /// Render the thread metadata summary section.
@@ -1715,15 +1759,15 @@ fn render_wrapped_footer(frame: &mut Frame, app: &App, area: Rect) {
 fn render_project_list_view(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Layout: header, table, footer
+    // Layout: tab header, table, footer
     let chunks = Layout::vertical([
-        Constraint::Length(3), // Header
+        Constraint::Length(2), // Tab header
         Constraint::Min(5),    // Table
         Constraint::Length(1), // Footer
     ])
     .split(area);
 
-    render_header(frame, "aiobscura - Projects", chunks[0]);
+    render_tab_header(frame, ActiveTab::Projects, chunks[0]);
     render_project_table(frame, app, chunks[1]);
     render_project_list_footer(frame, app, chunks[2]);
 }
