@@ -95,8 +95,10 @@ impl ProjectStats {
 
     /// Returns a formatted duration string (e.g., "47h 23m").
     pub fn formatted_duration(&self) -> String {
-        let hours = self.total_duration_secs / 3600;
-        let minutes = (self.total_duration_secs % 3600) / 60;
+        // Clamp to 0 in case of negative values from timestamp issues
+        let secs = self.total_duration_secs.max(0);
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
         if hours > 0 {
             format!("{}h {}m", hours, minutes)
         } else {

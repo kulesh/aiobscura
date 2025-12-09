@@ -1664,8 +1664,8 @@ impl Database {
                 SELECT
                     COUNT(*),
                     COALESCE(SUM(
-                        CASE WHEN last_activity_at IS NOT NULL
-                        THEN (julianday(last_activity_at) - julianday(started_at)) * 86400
+                        CASE WHEN last_activity_at IS NOT NULL AND started_at IS NOT NULL
+                        THEN MAX(0, (julianday(last_activity_at) - julianday(started_at)) * 86400)
                         ELSE 0 END
                     ), 0),
                     MIN(started_at),
