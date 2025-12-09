@@ -11,7 +11,7 @@
 use aiobscura_core::ingest::IngestCoordinator;
 use aiobscura_core::{Config, Database};
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,9 +24,9 @@ use std::time::Duration;
 #[command(about = "Sync AI assistant logs to the database")]
 #[command(version)]
 struct Args {
-    /// Verbose output (show warnings during sync)
-    #[arg(short, long)]
-    verbose: bool,
+    /// Verbose output (-v per-file, -vv per-message)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 
     /// Dry run - discover files but don't sync
     #[arg(long)]
@@ -221,7 +221,24 @@ fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
                 result.sessions_created + result.sessions_updated
             );
 
-            if args.verbose && !result.warnings.is_empty() {
+            // -v: Show per-file details, -vv: Show per-message details
+            if args.verbose >= 1 {
+                for file_result in &result.file_results {
+                    if file_result.new_messages > 0 {
+                        let path_str = shorten_path(&file_result.path);
+                        println!("  {}: +{} messages", path_str, file_result.new_messages);
+
+                        // -vv: Show per-message details
+                        if args.verbose >= 2 {
+                            for msg in &file_result.message_summaries {
+                                println!("    [{}] {}", msg.role, msg.preview);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if args.verbose >= 1 && !result.warnings.is_empty() {
                 for warning in &result.warnings {
                     println!("  Warning: {}", warning);
                 }
@@ -246,7 +263,7 @@ fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
 }
 
 /// Print sync result summary
-fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: bool) {
+fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: u8) {
     println!("\nSync complete:");
     println!("  Files processed:  {}", result.files_processed);
     println!("  Files skipped:    {}", result.files_skipped);
@@ -255,7 +272,31 @@ fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: bool)
     println!("  Messages inserted: {}", result.messages_inserted);
     println!("  Threads created:  {}", result.threads_created);
 
-    if verbose && !result.warnings.is_empty() {
+    // -v: Show per-file details, -vv: Show per-message details
+    if verbose >= 1 {
+        let files_with_changes: Vec<_> = result
+            .file_results
+            .iter()
+            .filter(|f| f.new_messages > 0)
+            .collect();
+
+        if !files_with_changes.is_empty() {
+            println!("\nFiles synced:");
+            for file_result in files_with_changes {
+                let path_str = shorten_path(&file_result.path);
+                println!("  {}: +{} messages", path_str, file_result.new_messages);
+
+                // -vv: Show per-message details
+                if verbose >= 2 {
+                    for msg in &file_result.message_summaries {
+                        println!("    [{}] {}", msg.role, msg.preview);
+                    }
+                }
+            }
+        }
+    }
+
+    if verbose >= 1 && !result.warnings.is_empty() {
         println!("\nWarnings ({}):", result.warnings.len());
         for warning in &result.warnings {
             println!("  {}", warning);
@@ -268,4 +309,14 @@ fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: bool)
             println!("  {}: {}", path.display(), err);
         }
     }
+}
+
+/// Shorten a path for display by abbreviating the home directory
+fn shorten_path(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(suffix) = path.strip_prefix(&home) {
+            return format!("~/{}", suffix.display());
+        }
+    }
+    path.display().to_string()
 }

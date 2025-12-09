@@ -64,6 +64,8 @@ pub struct SyncResult {
     pub errors: Vec<(PathBuf, String)>,
     /// Warnings from parsing
     pub warnings: Vec<String>,
+    /// Per-file sync results (for verbose output)
+    pub file_results: Vec<FileSyncResult>,
 }
 
 /// Result of syncing a single file.
@@ -83,6 +85,17 @@ pub struct FileSyncResult {
     pub warnings: Vec<String>,
     /// Reason the file was skipped (if skipped)
     pub skip_reason: Option<SkipReason>,
+    /// Summaries of messages parsed (for verbose output)
+    pub message_summaries: Vec<MessageSummary>,
+}
+
+/// Lightweight summary of a message for verbose output.
+#[derive(Debug, Clone)]
+pub struct MessageSummary {
+    /// Message role (user, assistant, system, tool)
+    pub role: String,
+    /// First ~80 chars of content
+    pub preview: String,
 }
 
 /// Reason a file was skipped during sync.
@@ -211,7 +224,7 @@ impl IngestCoordinator {
 
             match self.sync_file_internal(&file.path) {
                 Ok(file_result) => {
-                    Self::update_result(&mut result, &file_result);
+                    Self::update_result(&mut result, file_result);
                 }
                 Err(e) => {
                     result.errors.push((file.path.clone(), e.to_string()));
@@ -223,7 +236,7 @@ impl IngestCoordinator {
     }
 
     /// Update result counters from a file sync result.
-    fn update_result(result: &mut SyncResult, file_result: &FileSyncResult) {
+    fn update_result(result: &mut SyncResult, file_result: FileSyncResult) {
         if file_result.new_messages > 0 {
             result.files_processed += 1;
             result.messages_inserted += file_result.new_messages;
@@ -254,7 +267,9 @@ impl IngestCoordinator {
                 "File skipped"
             );
         }
-        result.warnings.extend(file_result.warnings.clone());
+        result.warnings.extend(file_result.warnings.iter().cloned());
+        // Store per-file result for verbose output
+        result.file_results.push(file_result);
     }
 
     /// Sync a single file.
@@ -335,6 +350,7 @@ impl IngestCoordinator {
                 is_new_session: false,
                 warnings: parse_result.warnings,
                 skip_reason,
+                message_summaries: Vec::new(),
             });
         }
 
@@ -413,6 +429,28 @@ impl IngestCoordinator {
 
         // Store messages
         let new_messages = parse_result.messages.len();
+
+        // Build message summaries for verbose output
+        let message_summaries: Vec<MessageSummary> = parse_result
+            .messages
+            .iter()
+            .map(|msg| MessageSummary {
+                role: format!("{:?}", msg.author_role).to_lowercase(),
+                preview: msg
+                    .content
+                    .as_ref()
+                    .map(|c| {
+                        let cleaned = c.lines().next().unwrap_or("").trim();
+                        if cleaned.len() > 60 {
+                            format!("{}...", &cleaned[..60])
+                        } else {
+                            cleaned.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "[no content]".to_string()),
+            })
+            .collect();
+
         if !parse_result.messages.is_empty() {
             self.db.insert_messages(&parse_result.messages)?;
         }
@@ -441,6 +479,7 @@ impl IngestCoordinator {
             is_new_session,
             warnings: parse_result.warnings,
             skip_reason: None,
+            message_summaries,
         })
     }
 
