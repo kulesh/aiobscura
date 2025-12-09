@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2024-12-09
+
+### Changed
+
+- Consolidated distribution to single homebrew formula with two binaries:
+  - `aiobscura` - Terminal UI
+  - `aiobscura-sync` - Background watcher/sync daemon
+
+### Removed
+
+- `aiobscura-wrapped` from distribution (still available in codebase)
+- Debug binaries from distribution
+
 ## [0.1.0] - 2024-12-09
 
 ### Added
@@ -42,5 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kulesh/aiobscura/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kulesh/aiobscura/releases/tag/v0.1.0
