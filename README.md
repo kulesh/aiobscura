@@ -94,18 +94,23 @@ The binary will be at `target/release/aiobscura`.
 ### Running
 
 ```bash
-# Run the TUI
+# First, sync your AI agent logs to the database
+aiobscura-sync
+
+# Then launch the TUI
 aiobscura
 
-# Or with cargo
-cargo run
+# Or run sync in watch mode (background) to keep data fresh
+aiobscura-sync --watch &
+aiobscura
 ```
 
-On first run, aiobscura will:
+The sync command will:
 1. Scan for installed AI agents (Claude Code, Codex, etc.)
 2. Create a SQLite database at `~/.local/share/aiobscura/data.db`
-3. Ingest available session logs
-4. Launch the terminal UI
+3. Ingest available session logs (incremental - only new data)
+
+The TUI reads from this database to display your activity.
 
 ## Supported Agents
 
