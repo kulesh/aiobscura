@@ -3169,8 +3169,8 @@ fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     // Format numbers with appropriate suffixes
     let msgs = format_stat_number(stats.total_messages);
-    let tokens = format_stat_number(stats.total_tokens);
-    let agents = stats.total_agents.to_string();
+    let tokens = format_with_commas(stats.total_tokens); // Raw number for fun ticking effect
+    let assistants = stats.total_agents.to_string();
     let tools = format_stat_number(stats.total_tool_calls);
 
     let label_style = Style::default().fg(Color::DarkGray);
@@ -3185,8 +3185,8 @@ fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("Tokens: ", label_style),
         Span::styled(tokens, value_style),
         Span::styled("   ", separator_style),
-        Span::styled("Agents: ", label_style),
-        Span::styled(agents, value_style),
+        Span::styled("Assistants: ", label_style),
+        Span::styled(assistants, value_style),
         Span::styled("   ", separator_style),
         Span::styled("Tool calls: ", label_style),
         Span::styled(tools, value_style),
@@ -3195,24 +3195,26 @@ fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(footer, area);
 }
 
+/// Format a number with comma separators (e.g., 1234567 -> "1,234,567")
+fn format_with_commas(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 /// Format a number for display in stats (e.g., 1234 -> "1,234", 45200 -> "45.2k")
 fn format_stat_number(n: i64) -> String {
     if n >= 100_000 {
         format!("{:.0}k", n as f64 / 1000.0)
     } else if n >= 10_000 {
         format!("{:.1}k", n as f64 / 1000.0)
-    } else if n >= 1000 {
-        // Add comma separator
-        let s = n.to_string();
-        let mut result = String::new();
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                result.push(',');
-            }
-            result.push(c);
-        }
-        result.chars().rev().collect()
     } else {
-        n.to_string()
+        format_with_commas(n)
     }
 }
