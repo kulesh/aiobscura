@@ -3178,7 +3178,7 @@ fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
     let separator_style = Style::default().fg(Color::DarkGray);
 
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" 📊 ", Style::default()),
+        Span::styled(" 📊 (30m) ", Style::default().fg(Color::DarkGray)),
         Span::styled("Messages: ", label_style),
         Span::styled(msgs, value_style),
         Span::styled("   ", separator_style),
