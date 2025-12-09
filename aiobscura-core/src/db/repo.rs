@@ -1586,6 +1586,320 @@ impl Database {
         })
     }
 
+    // ============================================
+    // Project Analytics Queries (for TUI Project View)
+    // ============================================
+
+    /// List all projects with summary stats for the project list view.
+    pub fn list_projects_with_stats(&self) -> Result<Vec<crate::analytics::ProjectRow>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                p.id,
+                p.name,
+                p.path,
+                COUNT(DISTINCT s.id) as session_count,
+                MAX(s.last_activity_at) as last_activity,
+                COALESCE(SUM(m.tokens_in + m.tokens_out), 0) as total_tokens
+            FROM projects p
+            LEFT JOIN sessions s ON s.project_id = p.id
+            LEFT JOIN threads t ON t.session_id = s.id
+            LEFT JOIN messages m ON m.thread_id = t.id
+            GROUP BY p.id
+            ORDER BY last_activity DESC NULLS LAST
+            "#,
+        )?;
+
+        let rows: Vec<crate::analytics::ProjectRow> = stmt
+            .query_map([], |row| {
+                let last_activity_str: Option<String> = row.get(4)?;
+                let last_activity = last_activity_str
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok(crate::analytics::ProjectRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    session_count: row.get(3)?,
+                    last_activity,
+                    total_tokens: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Get detailed stats for a single project.
+    pub fn get_project_stats(&self, project_id: &str) -> Result<Option<crate::analytics::ProjectStats>> {
+        let conn = self.conn.lock().unwrap();
+
+        // First, get the project info
+        let project_info: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT id, name, path FROM projects WHERE id = ?",
+                [project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        let (id, name, path) = match project_info {
+            Some(info) => info,
+            None => return Ok(None),
+        };
+
+        // Activity summary
+        let (session_count, total_duration_secs, first_session_str, last_activity_str): (
+            i64,
+            f64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(
+                        CASE WHEN last_activity_at IS NOT NULL AND started_at IS NOT NULL
+                        THEN MAX(0, (julianday(last_activity_at) - julianday(started_at)) * 86400)
+                        ELSE 0 END
+                    ), 0),
+                    MIN(started_at),
+                    MAX(last_activity_at)
+                FROM sessions
+                WHERE project_id = ?
+                "#,
+                [project_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap_or((0, 0.0, None, None));
+
+        let first_session = first_session_str
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        let last_activity = last_activity_str
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        // Thread and message counts
+        let (thread_count, message_count): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COUNT(DISTINCT t.id),
+                    COUNT(m.id)
+                FROM threads t
+                JOIN sessions s ON t.session_id = s.id
+                LEFT JOIN messages m ON m.thread_id = t.id
+                WHERE s.project_id = ?
+                "#,
+                [project_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+
+        // Token usage
+        let (tokens_in, tokens_out): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COALESCE(SUM(m.tokens_in), 0),
+                    COALESCE(SUM(m.tokens_out), 0)
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.project_id = ?
+                "#,
+                [project_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+
+        // Tool stats
+        let total_calls: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM messages m
+                JOIN threads t ON m.thread_id = t.id
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.project_id = ? AND m.message_type = 'tool_call'
+                "#,
+                [project_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let mut tool_stmt = conn.prepare(
+            r#"
+            SELECT m.tool_name, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ? AND m.message_type = 'tool_call' AND m.tool_name IS NOT NULL
+            GROUP BY m.tool_name
+            ORDER BY cnt DESC
+            "#,
+        )?;
+        let tool_breakdown: Vec<(String, i64)> = tool_stmt
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let tool_stats = ToolStats {
+            total_calls,
+            breakdown: tool_breakdown,
+        };
+
+        // File stats
+        let mut file_stmt = conn.prepare(
+            r#"
+            SELECT json_extract(m.tool_input, '$.file_path') as file_path
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ?
+              AND m.message_type = 'tool_call'
+              AND m.tool_name IN ('Edit', 'Write', 'MultiEdit')
+              AND m.tool_input IS NOT NULL
+            "#,
+        )?;
+
+        let mut file_counts: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let rows = file_stmt.query_map([project_id], |row| row.get::<_, Option<String>>(0))?;
+        for row in rows {
+            if let Ok(Some(path)) = row {
+                *file_counts.entry(path).or_insert(0) += 1;
+            }
+        }
+
+        let total_files = file_counts.len() as i64;
+        let mut file_breakdown: Vec<(String, i64)> = file_counts.into_iter().collect();
+        file_breakdown.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let file_stats = FileStats {
+            total_files,
+            breakdown: file_breakdown,
+        };
+
+        // Agents spawned
+        let agents_spawned: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM threads t
+                JOIN sessions s ON t.session_id = s.id
+                WHERE s.project_id = ? AND t.thread_type = 'agent'
+                "#,
+                [project_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Plans created
+        let plans_created: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT sp.plan_slug)
+                FROM session_plans sp
+                JOIN sessions s ON sp.session_id = s.id
+                WHERE s.project_id = ?
+                "#,
+                [project_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Hourly distribution
+        let mut hourly = [0i64; 24];
+        let mut hourly_stmt = conn.prepare(
+            r#"
+            SELECT CAST(strftime('%H', m.ts) AS INTEGER) as hour, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ?
+            GROUP BY hour
+            "#,
+        )?;
+        let hourly_rows = hourly_stmt.query_map([project_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in hourly_rows.flatten() {
+            let (hour, count) = row;
+            if hour >= 0 && hour < 24 {
+                hourly[hour as usize] = count;
+            }
+        }
+
+        // Daily distribution
+        let mut daily = [0i64; 7];
+        let mut daily_stmt = conn.prepare(
+            r#"
+            SELECT CAST(strftime('%w', m.ts) AS INTEGER) as dow, COUNT(*) as cnt
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            WHERE s.project_id = ?
+            GROUP BY dow
+            "#,
+        )?;
+        let daily_rows = daily_stmt.query_map([project_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in daily_rows.flatten() {
+            let (dow, count) = row;
+            if dow >= 0 && dow < 7 {
+                daily[dow as usize] = count;
+            }
+        }
+
+        // Sessions by assistant
+        let mut assistant_stmt = conn.prepare(
+            r#"
+            SELECT assistant, COUNT(*) as cnt
+            FROM sessions
+            WHERE project_id = ?
+            GROUP BY assistant
+            ORDER BY cnt DESC
+            "#,
+        )?;
+        let sessions_by_assistant: Vec<(String, i64)> = assistant_stmt
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(Some(crate::analytics::ProjectStats {
+            id,
+            name,
+            path,
+            session_count,
+            thread_count,
+            message_count,
+            total_duration_secs: total_duration_secs as i64,
+            tokens_in,
+            tokens_out,
+            tool_stats,
+            file_stats,
+            agents_spawned,
+            plans_created,
+            hourly_distribution: hourly,
+            daily_distribution: daily,
+            first_session,
+            last_activity,
+            sessions_by_assistant,
+        }))
+    }
+
     /// Get usage profile for personality classification.
     pub fn get_wrapped_usage_profile(
         &self,

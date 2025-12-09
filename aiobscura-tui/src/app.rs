@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, WrappedConfig, WrappedPeriod, WrappedStats,
+    generate_wrapped, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{Database, Message, Plan, SessionFilter, Thread, ThreadType};
@@ -14,11 +14,20 @@ use ratatui::widgets::TableState;
 
 use crate::thread_row::ThreadRow;
 
+/// Sub-tab within Project detail view.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum ProjectSubTab {
+    #[default]
+    Overview,
+    Threads,
+    Plans,
+    Files,
+}
+
 /// Current view mode
 #[derive(Debug, Clone, Default)]
 pub enum ViewMode {
     /// Thread list view
-    #[default]
     List,
     /// Thread detail view showing messages
     Detail {
@@ -45,6 +54,15 @@ pub enum ViewMode {
     },
     /// Wrapped view showing year/month in review
     Wrapped,
+    /// Project list view (default)
+    #[default]
+    ProjectList,
+    /// Project detail view showing stats
+    ProjectDetail {
+        project_id: String,
+        project_name: String,
+        sub_tab: ProjectSubTab,
+    },
 }
 
 /// Metadata for the detail view header.
@@ -110,6 +128,33 @@ pub struct App {
     pub snowflakes: Vec<(u16, u16, u8)>,
     /// Whether the app should exit
     pub should_quit: bool,
+
+    // ========== Project View State ==========
+    /// Projects loaded for display
+    pub projects: Vec<ProjectRow>,
+    /// Project table selection state
+    pub project_table_state: TableState,
+    /// Selected project stats (for detail view)
+    pub project_stats: Option<ProjectStats>,
+
+    // ========== Project Sub-Tab State ==========
+    /// Threads for current project (filtered)
+    pub project_threads: Vec<ThreadRow>,
+    /// Project threads table selection state
+    pub project_threads_table_state: TableState,
+    /// Plans for current project
+    pub project_plans: Vec<Plan>,
+    /// Project plans table selection state
+    pub project_plans_table_state: TableState,
+    /// Files for current project (full list: path, edit_count)
+    pub project_files: Vec<(String, i64)>,
+    /// Project files table selection state
+    pub project_files_table_state: TableState,
+
+    // ========== Navigation Return State ==========
+    /// Return destination when exiting Detail/PlanDetail views
+    /// (project_id, project_name, sub_tab) - if set, return to project sub-tab
+    pub return_to_project: Option<(String, String, ProjectSubTab)>,
 }
 
 impl App {
@@ -134,6 +179,19 @@ impl App {
             animation_frame: 0,
             snowflakes: Vec::new(),
             should_quit: false,
+            // Project view state
+            projects: Vec::new(),
+            project_table_state: TableState::default(),
+            project_stats: None,
+            // Project sub-tab state
+            project_threads: Vec::new(),
+            project_threads_table_state: TableState::default(),
+            project_plans: Vec::new(),
+            project_plans_table_state: TableState::default(),
+            project_files: Vec::new(),
+            project_files_table_state: TableState::default(),
+            // Navigation return state
+            return_to_project: None,
         }
     }
 
@@ -373,6 +431,8 @@ impl App {
             ViewMode::PlanList { .. } => self.handle_plan_list_key(key),
             ViewMode::PlanDetail { .. } => self.handle_plan_detail_key(key),
             ViewMode::Wrapped => self.handle_wrapped_key(key),
+            ViewMode::ProjectList => self.handle_project_list_key(key),
+            ViewMode::ProjectDetail { .. } => self.handle_project_detail_key(key),
         }
     }
 
@@ -390,6 +450,9 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.open_wrapped_view();
+            }
+            KeyCode::Tab => {
+                self.open_project_list();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.select_next();
@@ -532,7 +595,16 @@ impl App {
 
     /// Close detail view and return to list.
     fn close_detail_view(&mut self) {
-        self.view_mode = ViewMode::List;
+        // Check if we should return to a project sub-tab
+        if let Some((project_id, project_name, sub_tab)) = self.return_to_project.take() {
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+        } else {
+            self.view_mode = ViewMode::List;
+        }
         self.messages.clear();
         self.scroll_offset = 0;
         self.thread_metadata = None;
@@ -769,6 +841,18 @@ impl App {
 
     /// Close plan detail and return to plan list.
     fn close_plan_detail(&mut self) {
+        // Check if we should return to a project sub-tab
+        if let Some((project_id, project_name, sub_tab)) = self.return_to_project.take() {
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+            self.selected_plan = None;
+            self.plan_scroll_offset = 0;
+            return;
+        }
+
         // We need to reconstruct the PlanList state
         // For now, find the session from the selected plan
         if let Some(plan) = &self.selected_plan {
@@ -1029,6 +1113,496 @@ impl App {
             self.wrapped_cache.insert(self.wrapped_period, stats.clone());
             self.wrapped_stats = Some(stats);
             self.wrapped_card_index = 0;
+        }
+    }
+
+    // ========== Project View Methods ==========
+
+    /// Handle keyboard input in project list view.
+    fn handle_project_list_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Esc | KeyCode::Tab => {
+                self.close_project_list();
+            }
+            KeyCode::Enter => {
+                self.open_project_detail();
+            }
+            KeyCode::Char('w') => {
+                self.open_wrapped_view();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.select_next_project();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.select_previous_project();
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.select_first_project();
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.select_last_project();
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle keyboard input in project detail view.
+    fn handle_project_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            // Quit
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            // Back to project list
+            KeyCode::Esc => {
+                self.close_project_detail();
+            }
+            // Sub-tab navigation by Tab key
+            KeyCode::Tab => {
+                self.cycle_project_sub_tab(true);
+            }
+            KeyCode::BackTab => {
+                self.cycle_project_sub_tab(false);
+            }
+            // Sub-tab navigation by number
+            KeyCode::Char('1') | KeyCode::Char('o') => {
+                self.set_project_sub_tab(ProjectSubTab::Overview);
+            }
+            KeyCode::Char('2') | KeyCode::Char('t') => {
+                self.set_project_sub_tab(ProjectSubTab::Threads);
+            }
+            KeyCode::Char('3') | KeyCode::Char('p') => {
+                self.set_project_sub_tab(ProjectSubTab::Plans);
+            }
+            KeyCode::Char('4') | KeyCode::Char('f') => {
+                self.set_project_sub_tab(ProjectSubTab::Files);
+            }
+            // List navigation (for Threads/Plans/Files tabs)
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.project_list_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.project_list_previous();
+            }
+            // Open selected item
+            KeyCode::Enter => {
+                self.open_project_item();
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the project list view.
+    fn open_project_list(&mut self) {
+        // Load projects if not already loaded
+        if self.projects.is_empty() {
+            if let Ok(projects) = self.db.list_projects_with_stats() {
+                self.projects = projects;
+                self.project_table_state = TableState::default();
+                if !self.projects.is_empty() {
+                    self.project_table_state.select(Some(0));
+                }
+            }
+        }
+        self.view_mode = ViewMode::ProjectList;
+    }
+
+    /// Close project list and switch to thread list.
+    fn close_project_list(&mut self) {
+        // Load threads if not already loaded
+        if self.threads.is_empty() {
+            let _ = self.load_threads();
+        }
+        self.view_mode = ViewMode::List;
+    }
+
+    /// Open project detail for the selected project.
+    fn open_project_detail(&mut self) {
+        if let Some(idx) = self.project_table_state.selected() {
+            if let Some(project) = self.projects.get(idx) {
+                let project_id = project.id.clone();
+                let project_name = project.name.clone();
+
+                // Load project stats
+                if let Ok(Some(stats)) = self.db.get_project_stats(&project_id) {
+                    self.project_stats = Some(stats);
+                    self.view_mode = ViewMode::ProjectDetail {
+                        project_id,
+                        project_name,
+                        sub_tab: ProjectSubTab::Overview,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Close project detail and return to project list.
+    fn close_project_detail(&mut self) {
+        self.view_mode = ViewMode::ProjectList;
+        self.project_stats = None;
+    }
+
+    /// Select the next project in the list.
+    fn select_next_project(&mut self) {
+        if self.projects.is_empty() {
+            return;
+        }
+        let i = match self.project_table_state.selected() {
+            Some(i) => {
+                if i >= self.projects.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.project_table_state.select(Some(i));
+    }
+
+    /// Select the previous project in the list.
+    fn select_previous_project(&mut self) {
+        if self.projects.is_empty() {
+            return;
+        }
+        let i = match self.project_table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.projects.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.project_table_state.select(Some(i));
+    }
+
+    /// Select the first project.
+    fn select_first_project(&mut self) {
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(0));
+        }
+    }
+
+    /// Select the last project.
+    fn select_last_project(&mut self) {
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(self.projects.len() - 1));
+        }
+    }
+
+    /// Load projects from the database (for initial startup).
+    pub fn load_projects(&mut self) -> Result<()> {
+        self.projects = self.db.list_projects_with_stats()?;
+        self.project_table_state = TableState::default();
+        if !self.projects.is_empty() {
+            self.project_table_state.select(Some(0));
+        }
+        Ok(())
+    }
+
+    // ========== Project Sub-Tab Data Loading ==========
+
+    /// Load threads filtered by project_id.
+    fn load_project_threads(&mut self, project_id: &str) -> Result<()> {
+        let sessions = self.db.list_sessions(&SessionFilter::default())?;
+        self.project_threads.clear();
+
+        for session in sessions {
+            // Skip sessions that don't belong to this project
+            if session.project_id.as_ref() != Some(&project_id.to_string()) {
+                continue;
+            }
+
+            // Get project name
+            let project_name = session
+                .project_id
+                .as_ref()
+                .and_then(|id| self.db.get_project(id).ok().flatten())
+                .and_then(|p| p.name)
+                .unwrap_or_else(|| "(no project)".to_string());
+
+            let assistant_name = session.assistant.display_name().to_string();
+
+            // Get all threads for this session
+            let threads = self.db.get_session_threads(&session.id).unwrap_or_default();
+
+            for thread in threads {
+                let message_count = self
+                    .db
+                    .count_thread_messages(&thread.id)
+                    .unwrap_or(0);
+
+                self.project_threads.push(ThreadRow {
+                    id: thread.id.clone(),
+                    session_id: session.id.clone(),
+                    thread_type: thread.thread_type,
+                    parent_thread_id: thread.parent_thread_id.clone(),
+                    last_activity: thread.ended_at.or(Some(thread.started_at)),
+                    project_name: project_name.clone(),
+                    assistant_name: assistant_name.clone(),
+                    message_count,
+                    indent_level: if thread.parent_thread_id.is_some() { 1 } else { 0 },
+                    is_last_child: false,
+                });
+            }
+        }
+
+        // Sort by last activity (most recent first)
+        self.project_threads.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+        // Select first if any
+        self.project_threads_table_state = TableState::default();
+        if !self.project_threads.is_empty() {
+            self.project_threads_table_state.select(Some(0));
+        }
+
+        Ok(())
+    }
+
+    /// Load plans for all sessions in a project.
+    fn load_project_plans(&mut self, project_id: &str) -> Result<()> {
+        let sessions = self.db.list_sessions(&SessionFilter::default())?;
+        self.project_plans.clear();
+
+        for session in sessions {
+            // Skip sessions that don't belong to this project
+            if session.project_id.as_ref() != Some(&project_id.to_string()) {
+                continue;
+            }
+
+            // Get plans for this session
+            if let Ok(plans) = self.db.get_plans_for_session(&session.id) {
+                self.project_plans.extend(plans);
+            }
+        }
+
+        // Sort by modified_at (most recent first)
+        self.project_plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+
+        // Select first if any
+        self.project_plans_table_state = TableState::default();
+        if !self.project_plans.is_empty() {
+            self.project_plans_table_state.select(Some(0));
+        }
+
+        Ok(())
+    }
+
+    /// Load complete file list for project.
+    fn load_project_files(&mut self, project_id: &str) -> Result<()> {
+        // Use the file_stats from ProjectStats if available
+        if let Some(stats) = &self.project_stats {
+            self.project_files = stats.file_stats.breakdown.clone();
+        } else if let Ok(Some(stats)) = self.db.get_project_stats(project_id) {
+            self.project_files = stats.file_stats.breakdown.clone();
+        } else {
+            self.project_files.clear();
+        }
+
+        // Select first if any
+        self.project_files_table_state = TableState::default();
+        if !self.project_files.is_empty() {
+            self.project_files_table_state.select(Some(0));
+        }
+
+        Ok(())
+    }
+
+    /// Cycle to the next/previous project sub-tab.
+    fn cycle_project_sub_tab(&mut self, forward: bool) {
+        if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
+            let next_tab = if forward {
+                match sub_tab {
+                    ProjectSubTab::Overview => ProjectSubTab::Threads,
+                    ProjectSubTab::Threads => ProjectSubTab::Plans,
+                    ProjectSubTab::Plans => ProjectSubTab::Files,
+                    ProjectSubTab::Files => ProjectSubTab::Overview,
+                }
+            } else {
+                match sub_tab {
+                    ProjectSubTab::Overview => ProjectSubTab::Files,
+                    ProjectSubTab::Threads => ProjectSubTab::Overview,
+                    ProjectSubTab::Plans => ProjectSubTab::Threads,
+                    ProjectSubTab::Files => ProjectSubTab::Plans,
+                }
+            };
+            self.set_project_sub_tab(next_tab);
+        }
+    }
+
+    /// Set the project sub-tab and load data if needed.
+    fn set_project_sub_tab(&mut self, sub_tab: ProjectSubTab) {
+        if let ViewMode::ProjectDetail { project_id, project_name, sub_tab: current_tab } = &self.view_mode {
+            // Skip if already on this tab
+            if *current_tab == sub_tab {
+                return;
+            }
+
+            let project_id = project_id.clone();
+            let project_name = project_name.clone();
+
+            // Load data for the new tab
+            match sub_tab {
+                ProjectSubTab::Overview => {
+                    // Overview data is already loaded in project_stats
+                }
+                ProjectSubTab::Threads => {
+                    let _ = self.load_project_threads(&project_id);
+                }
+                ProjectSubTab::Plans => {
+                    let _ = self.load_project_plans(&project_id);
+                }
+                ProjectSubTab::Files => {
+                    let _ = self.load_project_files(&project_id);
+                }
+            }
+
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+        }
+    }
+
+    /// Navigate in project sub-tab lists.
+    fn project_list_next(&mut self) {
+        if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
+            match sub_tab {
+                ProjectSubTab::Threads => {
+                    if self.project_threads.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_threads_table_state.selected() {
+                        Some(i) if i >= self.project_threads.len() - 1 => 0,
+                        Some(i) => i + 1,
+                        None => 0,
+                    };
+                    self.project_threads_table_state.select(Some(i));
+                }
+                ProjectSubTab::Plans => {
+                    if self.project_plans.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_plans_table_state.selected() {
+                        Some(i) if i >= self.project_plans.len() - 1 => 0,
+                        Some(i) => i + 1,
+                        None => 0,
+                    };
+                    self.project_plans_table_state.select(Some(i));
+                }
+                ProjectSubTab::Files => {
+                    if self.project_files.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_files_table_state.selected() {
+                        Some(i) if i >= self.project_files.len() - 1 => 0,
+                        Some(i) => i + 1,
+                        None => 0,
+                    };
+                    self.project_files_table_state.select(Some(i));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Navigate in project sub-tab lists (previous).
+    fn project_list_previous(&mut self) {
+        if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
+            match sub_tab {
+                ProjectSubTab::Threads => {
+                    if self.project_threads.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_threads_table_state.selected() {
+                        Some(0) => self.project_threads.len() - 1,
+                        Some(i) => i - 1,
+                        None => 0,
+                    };
+                    self.project_threads_table_state.select(Some(i));
+                }
+                ProjectSubTab::Plans => {
+                    if self.project_plans.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_plans_table_state.selected() {
+                        Some(0) => self.project_plans.len() - 1,
+                        Some(i) => i - 1,
+                        None => 0,
+                    };
+                    self.project_plans_table_state.select(Some(i));
+                }
+                ProjectSubTab::Files => {
+                    if self.project_files.is_empty() {
+                        return;
+                    }
+                    let i = match self.project_files_table_state.selected() {
+                        Some(0) => self.project_files.len() - 1,
+                        Some(i) => i - 1,
+                        None => 0,
+                    };
+                    self.project_files_table_state.select(Some(i));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Open the selected item in a project sub-tab.
+    fn open_project_item(&mut self) {
+        if let ViewMode::ProjectDetail { sub_tab, project_id, project_name } = self.view_mode.clone() {
+            match sub_tab {
+                ProjectSubTab::Threads => {
+                    // Open the selected thread in detail view
+                    if let Some(idx) = self.project_threads_table_state.selected() {
+                        if let Some(thread) = self.project_threads.get(idx) {
+                            let thread_id = thread.id.clone();
+                            let session_id = thread.session_id.clone();
+                            let thread_name = format!("{} - {}", thread.project_name, thread.short_id());
+
+                            // Load messages for this thread
+                            if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
+                                // Save return destination
+                                self.return_to_project = Some((project_id, project_name, sub_tab));
+                                self.messages = messages;
+                                self.scroll_offset = 0;
+                                self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
+                                self.view_mode = ViewMode::Detail {
+                                    thread_id,
+                                    thread_name,
+                                };
+                            }
+                        }
+                    }
+                }
+                ProjectSubTab::Plans => {
+                    // Open the selected plan in detail view
+                    if let Some(idx) = self.project_plans_table_state.selected() {
+                        if let Some(plan) = self.project_plans.get(idx) {
+                            let plan_slug = plan.id.clone();
+                            let plan_title = plan.title.clone().unwrap_or_else(|| plan_slug.clone());
+
+                            // Save return destination
+                            self.return_to_project = Some((project_id, project_name, sub_tab));
+                            self.selected_plan = Some(plan.clone());
+                            self.plan_scroll_offset = 0;
+                            self.view_mode = ViewMode::PlanDetail {
+                                plan_slug,
+                                plan_title,
+                            };
+                        }
+                    }
+                }
+                _ => {
+                    // No action for Overview or Files
+                }
+            }
         }
     }
 }
