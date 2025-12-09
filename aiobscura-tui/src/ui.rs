@@ -15,7 +15,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ViewMode};
+use crate::app::{App, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -83,8 +83,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         ViewMode::Wrapped => render_wrapped_view(frame, app),
         ViewMode::ProjectList => render_project_list_view(frame, app),
-        ViewMode::ProjectDetail { project_name, .. } => {
-            render_project_detail_view(frame, app, project_name.clone())
+        ViewMode::ProjectDetail { project_name, sub_tab, .. } => {
+            render_project_detail_view(frame, app, project_name.clone(), *sub_tab)
         }
     }
 }
@@ -1773,40 +1773,38 @@ fn render_project_list_view(frame: &mut Frame, app: &mut App) {
 }
 
 /// Render the project detail view.
-fn render_project_detail_view(frame: &mut Frame, app: &mut App, project_name: String) {
+fn render_project_detail_view(frame: &mut Frame, app: &mut App, project_name: String, sub_tab: ProjectSubTab) {
     let area = frame.area();
 
-    // Layout: header, overview, activity + tools, footer
+    // Layout: header, sub-tabs, content, footer
     let chunks = Layout::vertical([
         Constraint::Length(3),  // Header
-        Constraint::Length(6),  // Overview
-        Constraint::Min(10),    // Activity & Tools
+        Constraint::Length(2),  // Sub-tab bar
+        Constraint::Min(10),    // Content
         Constraint::Length(1),  // Footer
     ])
     .split(area);
 
     render_header(frame, &format!("Project: {}", project_name), chunks[0]);
+    render_project_sub_tabs(frame, sub_tab, chunks[1]);
 
-    if let Some(stats) = &app.project_stats {
-        render_project_overview(frame, stats, chunks[1]);
-
-        // Split the middle section into activity and tools/files
-        let middle_chunks = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(chunks[2]);
-
-        render_project_activity(frame, stats, middle_chunks[0]);
-        render_project_tools_files(frame, stats, middle_chunks[1]);
-    } else {
-        let placeholder = Paragraph::new("Loading project stats...")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(placeholder, chunks[1]);
+    // Render content based on sub-tab
+    match sub_tab {
+        ProjectSubTab::Overview => {
+            render_project_overview_content(frame, app, chunks[2]);
+        }
+        ProjectSubTab::Threads => {
+            render_project_threads_content(frame, app, chunks[2]);
+        }
+        ProjectSubTab::Plans => {
+            render_project_plans_content(frame, app, chunks[2]);
+        }
+        ProjectSubTab::Files => {
+            render_project_files_content(frame, app, chunks[2]);
+        }
     }
 
-    render_project_detail_footer(frame, chunks[3]);
+    render_project_detail_footer(frame, sub_tab, chunks[3]);
 }
 
 /// Render the projects table.
@@ -2140,15 +2138,301 @@ fn render_project_list_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the footer for project detail view.
-fn render_project_detail_footer(frame: &mut Frame, area: Rect) {
-    let footer = Line::from(vec![
+fn render_project_detail_footer(frame: &mut Frame, sub_tab: ProjectSubTab, area: Rect) {
+    let mut spans = vec![
         Span::styled(" Esc", Style::default().fg(Color::Yellow)),
         Span::raw(" back  "),
-        Span::styled("t", Style::default().fg(Color::Yellow)),
-        Span::raw(" threads  "),
-        Span::styled("q", Style::default().fg(Color::Yellow)),
-        Span::raw(" quit"),
-    ]);
+    ];
 
-    frame.render_widget(Paragraph::new(footer), area);
+    // Add context-specific hints
+    match sub_tab {
+        ProjectSubTab::Overview => {
+            // No extra hints for overview
+        }
+        ProjectSubTab::Threads | ProjectSubTab::Plans => {
+            spans.push(Span::styled("Enter", Style::default().fg(Color::Yellow)));
+            spans.push(Span::raw(" open  "));
+            spans.push(Span::styled("j/k", Style::default().fg(Color::Yellow)));
+            spans.push(Span::raw(" nav  "));
+        }
+        ProjectSubTab::Files => {
+            spans.push(Span::styled("j/k", Style::default().fg(Color::Yellow)));
+            spans.push(Span::raw(" nav  "));
+        }
+    }
+
+    // Tab navigation hints
+    spans.push(Span::styled("1-4", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" tabs  "));
+    spans.push(Span::styled("q", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" quit"));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Render the project sub-tab bar.
+fn render_project_sub_tabs(frame: &mut Frame, active: ProjectSubTab, area: Rect) {
+    let make_tab = |label: &str, key: &str, is_active: bool| -> Vec<Span<'static>> {
+        let style = if is_active {
+            Style::default().fg(BORDER_PROJECT).bold().add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        vec![
+            Span::styled(format!(" {}", label), style),
+            Span::styled(format!("({})", key), Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+        ]
+    };
+
+    let mut spans = Vec::new();
+    spans.push(Span::raw(" "));
+    spans.extend(make_tab("Overview", "1", active == ProjectSubTab::Overview));
+    spans.extend(make_tab("Threads", "2", active == ProjectSubTab::Threads));
+    spans.extend(make_tab("Plans", "3", active == ProjectSubTab::Plans));
+    spans.extend(make_tab("Files", "4", active == ProjectSubTab::Files));
+
+    let tabs = Paragraph::new(Line::from(spans))
+        .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(tabs, area);
+}
+
+/// Render the project overview content (stats, activity, tools).
+fn render_project_overview_content(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(stats) = &app.project_stats {
+        // Split into overview section and activity/tools section
+        let chunks = Layout::vertical([
+            Constraint::Length(6),  // Overview
+            Constraint::Min(5),     // Activity & Tools
+        ])
+        .split(area);
+
+        render_project_overview(frame, stats, chunks[0]);
+
+        // Split the lower section into activity and tools/files
+        let middle_chunks = Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .split(chunks[1]);
+
+        render_project_activity(frame, stats, middle_chunks[0]);
+        render_project_tools_files(frame, stats, middle_chunks[1]);
+    } else {
+        let placeholder = Paragraph::new("Loading project stats...")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(placeholder, area);
+    }
+}
+
+/// Render the project threads content (table of threads).
+fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.project_threads.is_empty() {
+        let empty_msg = Paragraph::new("No threads found for this project")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_PROJECT))
+                    .title(" Threads ")
+                    .title_style(Style::default().fg(BORDER_PROJECT).bold()),
+            );
+        frame.render_widget(empty_msg, area);
+        return;
+    }
+
+    let header_cells = ["Last Updated", "Thread ID", "Type", "Msgs"]
+        .into_iter()
+        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header = Row::new(header_cells).height(1);
+
+    let rows = app.project_threads.iter().map(|thread| {
+        let (badge, type_text, color) = match thread.thread_type {
+            aiobscura_core::ThreadType::Main => ("●", "main", BADGE_MAIN),
+            aiobscura_core::ThreadType::Agent => ("◎", "agent", BADGE_AGENT),
+            aiobscura_core::ThreadType::Background => ("◇", "bg", BADGE_BG),
+        };
+
+        let type_cell = Cell::from(Line::from(vec![
+            Span::styled(format!("{} ", badge), Style::default().fg(color)),
+            Span::styled(type_text, Style::default().fg(color)),
+        ]));
+
+        let msg_style = if thread.message_count > 100 {
+            Style::default().fg(Color::Yellow)
+        } else if thread.message_count > 50 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        Row::new([
+            Cell::from(thread.relative_time()),
+            Cell::from(thread.short_id()),
+            type_cell,
+            Cell::from(thread.message_count.to_string()).style(msg_style),
+        ])
+    });
+
+    let widths = [
+        Constraint::Length(12),  // Last Updated
+        Constraint::Length(10),  // Thread ID
+        Constraint::Length(10),  // Type
+        Constraint::Length(6),   // Msgs
+    ];
+
+    let thread_count = app.project_threads.len();
+    let selected = app.project_threads_table_state.selected().map(|i| i + 1).unwrap_or(0);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_PROJECT))
+                .title(format!(" Threads ({}/{}) ", selected, thread_count))
+                .title_style(Style::default().fg(BORDER_PROJECT).bold()),
+        )
+        .row_highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .fg(BORDER_PROJECT),
+        )
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut app.project_threads_table_state);
+}
+
+/// Render the project plans content (table of plans).
+fn render_project_plans_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.project_plans.is_empty() {
+        let empty_msg = Paragraph::new("No plans found for this project")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_PLAN))
+                    .title(" Plans ")
+                    .title_style(Style::default().fg(BORDER_PLAN).bold()),
+            );
+        frame.render_widget(empty_msg, area);
+        return;
+    }
+
+    let header_cells = ["Slug", "Title", "Status", "Modified"]
+        .into_iter()
+        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header = Row::new(header_cells).height(1);
+
+    let rows = app.project_plans.iter().map(|plan| {
+        let slug = &plan.id;
+        let title = plan.title.as_deref().unwrap_or("(untitled)");
+        let status = format_plan_status(&plan.status);
+        let modified = format_relative_time(plan.modified_at);
+
+        Row::new([
+            Cell::from(slug.as_str()),
+            Cell::from(title),
+            Cell::from(status),
+            Cell::from(modified),
+        ])
+    });
+
+    let widths = [
+        Constraint::Length(20),  // Slug
+        Constraint::Fill(1),     // Title (flexible)
+        Constraint::Length(12),  // Status
+        Constraint::Length(12),  // Modified
+    ];
+
+    let plan_count = app.project_plans.len();
+    let selected = app.project_plans_table_state.selected().map(|i| i + 1).unwrap_or(0);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_PLAN))
+                .title(format!(" Plans ({}/{}) ", selected, plan_count))
+                .title_style(Style::default().fg(BORDER_PLAN).bold()),
+        )
+        .row_highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .fg(Color::Magenta),
+        )
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut app.project_plans_table_state);
+}
+
+/// Render the project files content (table of files).
+fn render_project_files_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.project_files.is_empty() {
+        let empty_msg = Paragraph::new("No files modified in this project")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_PROJECT))
+                    .title(" Files ")
+                    .title_style(Style::default().fg(BORDER_PROJECT).bold()),
+            );
+        frame.render_widget(empty_msg, area);
+        return;
+    }
+
+    let header_cells = ["File Path", "Edits"]
+        .into_iter()
+        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header = Row::new(header_cells).height(1);
+
+    let rows = app.project_files.iter().map(|(path, count)| {
+        // Format path: replace home dir and show relative
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path_display = if !home.is_empty() && path.starts_with(&home) {
+            format!("~{}", &path[home.len()..])
+        } else {
+            path.clone()
+        };
+
+        Row::new([
+            Cell::from(path_display),
+            Cell::from(count.to_string()).style(Style::default().fg(WRAPPED_CYAN)),
+        ])
+    });
+
+    let widths = [
+        Constraint::Fill(1),     // File path (flexible)
+        Constraint::Length(8),   // Edits
+    ];
+
+    let file_count = app.project_files.len();
+    let selected = app.project_files_table_state.selected().map(|i| i + 1).unwrap_or(0);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_PROJECT))
+                .title(format!(" Files ({}/{}) ", selected, file_count))
+                .title_style(Style::default().fg(BORDER_PROJECT).bold()),
+        )
+        .row_highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .fg(BORDER_PROJECT),
+        )
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut app.project_files_table_state);
 }
