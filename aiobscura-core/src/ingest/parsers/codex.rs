@@ -240,9 +240,11 @@ impl AssistantParser for CodexParser {
         let mut line_number = 0;
         let mut seq = 0i32;
 
-        // Session state
-        let mut session_id: Option<String> = None;
-        let mut thread_id: Option<String> = None;
+        // Session state - extract from path upfront for incremental parsing
+        // (session_meta event may be skipped when resuming from checkpoint)
+        let mut session_id: Option<String> = self.extract_session_id(ctx.path);
+        let mut thread_id: Option<String> =
+            session_id.as_ref().map(|sid| format!("{}-main", sid));
         let mut model_id: Option<String> = None;
         let mut cwd: Option<String> = None;
         let mut git_info: Option<GitInfo> = None;
@@ -322,12 +324,11 @@ impl AssistantParser for CodexParser {
                     let payload: SessionMetaPayload =
                         serde_json::from_value(event.payload.clone()).unwrap_or_default();
 
-                    // Extract session ID
-                    if session_id.is_none() {
-                        session_id = payload
-                            .id
-                            .clone()
-                            .or_else(|| self.extract_session_id(ctx.path));
+                    // Extract session ID - payload.id takes precedence over filename
+                    if let Some(id) = payload.id.clone() {
+                        session_id = Some(id.clone());
+                        // Update thread_id to match new session_id
+                        thread_id = Some(format!("{}-main", id));
                     }
 
                     // Extract metadata
@@ -338,18 +339,18 @@ impl AssistantParser for CodexParser {
                         git_info = payload.git.clone();
                     }
 
-                    // Create thread on first session_meta
-                    if thread_id.is_none() {
+                    // Create thread on first session_meta (only in initial parse)
+                    if result.threads.is_empty() {
                         let sid = session_id
                             .clone()
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                        let tid = format!("{}-main", sid);
-                        thread_id = Some(tid.clone());
+                        let tid = thread_id
+                            .clone()
+                            .unwrap_or_else(|| format!("{}-main", sid));
 
                         result.threads.push(Thread {
                             id: tid,
-                            session_id: sid.clone(),
+                            session_id: sid,
                             thread_type: ThreadType::Main,
                             parent_thread_id: None,
                             spawned_by_message_id: None,

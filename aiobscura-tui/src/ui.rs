@@ -1,7 +1,7 @@
 //! UI rendering for the TUI.
 
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
-use aiobscura_core::{Message, MessageType, PlanStatus, ThreadType};
+use aiobscura_core::{ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus, ThreadType};
 use chrono::Local;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -82,6 +82,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             render_plan_detail_view(frame, app, plan_title.clone())
         }
         ViewMode::Wrapped => render_wrapped_view(frame, app),
+        ViewMode::Live => render_live_view(frame, app),
         ViewMode::ProjectList => render_project_list_view(frame, app),
         ViewMode::ProjectDetail { project_name, sub_tab, .. } => {
             render_project_detail_view(frame, app, project_name.clone(), *sub_tab)
@@ -136,11 +137,12 @@ fn render_header(frame: &mut Frame, title: &str, area: Rect) {
 /// Which tab is currently active.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ActiveTab {
+    Live,
     Projects,
     Threads,
 }
 
-/// Render the tab bar header with Projects and Threads tabs.
+/// Render the tab bar header with Live, Projects, and Threads tabs.
 fn render_tab_header(frame: &mut Frame, active: ActiveTab, area: Rect) {
     // Layout: app name on left, tabs in center/right
     let chunks = Layout::horizontal([
@@ -155,18 +157,16 @@ fn render_tab_header(frame: &mut Frame, active: ActiveTab, area: Rect) {
     frame.render_widget(app_name, chunks[0]);
 
     // Tab styling
-    let (projects_style, threads_style) = match active {
-        ActiveTab::Projects => (
-            Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED),
-            Style::default().fg(Color::DarkGray),
-        ),
-        ActiveTab::Threads => (
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED),
-        ),
-    };
+    let active_style = Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED);
+    let inactive_style = Style::default().fg(Color::DarkGray);
+
+    let live_style = if active == ActiveTab::Live { active_style } else { inactive_style };
+    let projects_style = if active == ActiveTab::Projects { active_style } else { inactive_style };
+    let threads_style = if active == ActiveTab::Threads { active_style } else { inactive_style };
 
     let tabs = Line::from(vec![
+        Span::styled(" Live ", live_style),
+        Span::styled("  ", Style::default()),
         Span::styled(" Projects ", projects_style),
         Span::styled("  ", Style::default()),
         Span::styled(" Threads ", threads_style),
@@ -2628,4 +2628,362 @@ fn render_project_files_content(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▶ ");
 
     frame.render_stateful_widget(table, area, &mut app.project_files_table_state);
+}
+
+// ========== Live View ==========
+
+/// Live indicator color (pulsing green)
+const LIVE_INDICATOR: Color = Color::Rgb(50, 255, 50);
+/// Live view border color
+const BORDER_LIVE: Color = Color::Rgb(50, 200, 50);
+
+/// Render the live activity view showing recent messages across all sessions.
+fn render_live_view(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Calculate active sessions panel height (show up to 6 sessions, min 3)
+    let active_session_count = app.active_sessions.len();
+    let sessions_height = (active_session_count.clamp(1, 6) + 2) as u16; // +2 for border
+
+    // Layout: tab header, status bar, active sessions, message stream, footer
+    let chunks = Layout::vertical([
+        Constraint::Length(2),               // Tab header
+        Constraint::Length(2),               // Status bar with LIVE indicator
+        Constraint::Length(sessions_height), // Active sessions panel
+        Constraint::Min(5),                  // Message stream
+        Constraint::Length(1),               // Footer
+    ])
+    .split(area);
+
+    // === Tab Header ===
+    render_tab_header(frame, ActiveTab::Live, chunks[0]);
+
+    // === Status Bar ===
+    render_live_status_bar(frame, app, chunks[1]);
+
+    // === Active Sessions ===
+    render_active_sessions_panel(frame, app, chunks[2]);
+
+    // === Message Stream ===
+    render_live_message_stream(frame, app, chunks[3]);
+
+    // === Footer ===
+    render_live_footer(frame, app, chunks[4]);
+}
+
+/// Render the live view status bar with LIVE indicator and stats.
+fn render_live_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let message_count = app.live_messages.len();
+
+    // Pulsing effect for LIVE indicator (blinks every ~1 second)
+    let pulse = (app.animation_frame / 10) % 2 == 0;
+    let live_style = if pulse {
+        Style::default().fg(LIVE_INDICATOR).bold()
+    } else {
+        Style::default().fg(Color::Green).bold()
+    };
+
+    let auto_scroll_indicator = if app.live_auto_scroll {
+        Span::styled(" [AUTO-SCROLL] ", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::styled(" [PAUSED] ", Style::default().fg(Color::Yellow))
+    };
+
+    let status_line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled("● LIVE", live_style),
+        Span::styled(format!("  {} messages", message_count), Style::default().fg(WRAPPED_DIM)),
+        auto_scroll_indicator,
+    ]);
+
+    let status_bar = Paragraph::new(status_line)
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(BORDER_LIVE)));
+
+    frame.render_widget(status_bar, area);
+}
+
+/// Render the active sessions panel showing threads with recent activity.
+fn render_active_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.active_sessions.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  No active sessions", Style::default().fg(Color::DarkGray).italic()),
+        ]));
+    } else {
+        // Group sessions by parent (main threads vs agent threads)
+        // Parent threads have parent_thread_id = None
+        let main_threads: Vec<_> = app.active_sessions.iter()
+            .filter(|s| s.parent_thread_id.is_none())
+            .collect();
+
+        for main_session in main_threads {
+            // Find child agent threads for this main thread
+            let child_agents: Vec<_> = app.active_sessions.iter()
+                .filter(|s| s.parent_thread_id.as_ref() == Some(&main_session.thread_id))
+                .collect();
+
+            // Render main thread line
+            lines.push(format_active_session_line(main_session, false));
+
+            // Render child agents indented
+            for agent_session in child_agents {
+                lines.push(format_active_session_line(agent_session, true));
+            }
+        }
+
+        // Also show any orphan agents (parent not in active list)
+        let orphan_agents: Vec<_> = app.active_sessions.iter()
+            .filter(|s| {
+                if let Some(ref parent_id) = s.parent_thread_id {
+                    // Check if parent is NOT in active sessions
+                    !app.active_sessions.iter().any(|p| p.thread_id == *parent_id)
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        for agent_session in orphan_agents {
+            lines.push(format_active_session_line(agent_session, true));
+        }
+    }
+
+    let content = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_LIVE))
+                .title(" Active Sessions ")
+                .title_style(Style::default().fg(BORDER_LIVE).bold()),
+        );
+
+    frame.render_widget(content, area);
+}
+
+/// Format a single active session line.
+/// `is_child` indicates if this is a child agent (should be indented).
+fn format_active_session_line(session: &ActiveSession, is_child: bool) -> Line<'static> {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(session.last_activity);
+    let is_idle = duration.num_minutes() >= 5;
+
+    // Activity indicator: ▶ active, ⏸ idle (>5 min)
+    let indicator = if is_idle { "⏸" } else { "▶" };
+    let indicator_style = if is_idle {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(LIVE_INDICATOR)
+    };
+
+    // Indent for child agents
+    let prefix = if is_child { "  └─ " } else { " " };
+
+    // Project/thread name
+    let thread_label = match session.thread_type {
+        ThreadType::Main => format!("{} (main)", session.project_name),
+        ThreadType::Agent | ThreadType::Background => {
+            // Show truncated thread_id for agents/background threads
+            let short_id = if session.thread_id.len() > 12 {
+                format!("{}...", &session.thread_id[..12])
+            } else {
+                session.thread_id.clone()
+            };
+            short_id
+        }
+    };
+
+    // Relative time
+    let time_str = format_relative_time(session.last_activity);
+
+    // Assistant badge
+    let assistant_str = match session.assistant {
+        aiobscura_core::Assistant::ClaudeCode => "Claude",
+        aiobscura_core::Assistant::Codex => "Codex",
+        aiobscura_core::Assistant::Aider => "Aider",
+        aiobscura_core::Assistant::Cursor => "Cursor",
+    };
+
+    // Message count
+    let msg_count_str = format!("+{} msgs", session.message_count);
+
+    // Build the line with proper spacing
+    // Format: ▶ project-name (main)    2m ago   Claude    +23 msgs
+    let name_style = if is_idle {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    Line::from(vec![
+        Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+        Span::styled(indicator, indicator_style),
+        Span::styled(" ", Style::default()),
+        Span::styled(format!("{:<24}", thread_label), name_style),
+        Span::styled(format!("{:>8}", time_str), Style::default().fg(Color::DarkGray)),
+        Span::styled("   ", Style::default()),
+        Span::styled(format!("{:<8}", assistant_str), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{:>10}", msg_count_str), Style::default().fg(WRAPPED_DIM)),
+    ])
+}
+
+/// Render the live message stream.
+fn render_live_message_stream(frame: &mut Frame, app: &App, area: Rect) {
+    // Messages are stored newest-first from DB, displayed newest at top
+    let visible_height = area.height.saturating_sub(2) as usize; // Account for borders
+
+    // Calculate which messages to show
+    // scroll_offset=0 means show newest messages at top
+    // scrolling down (increasing offset) shows older messages
+    let total_messages = app.live_messages.len();
+    let scroll_offset = app.live_scroll_offset.min(total_messages.saturating_sub(visible_height));
+
+    // Build lines for display (newest at top)
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Iterate in order (newest to oldest for display)
+    for msg in app.live_messages.iter().skip(scroll_offset).take(visible_height) {
+        lines.push(format_live_message(msg));
+    }
+
+    let content = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_LIVE))
+                .title(" Message Stream ")
+                .title_style(Style::default().fg(BORDER_LIVE).bold()),
+        );
+
+    frame.render_widget(content, area);
+
+    // Scrollbar
+    if total_messages > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        let mut scrollbar_state = ScrollbarState::new(total_messages.saturating_sub(visible_height))
+            .position(scroll_offset);
+
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+/// Format a single message for the live stream.
+fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
+    // Format: HH:MM:SS [CC] [project/thread] role "preview..."
+    let time_str = msg.ts.with_timezone(&Local).format("%H:%M:%S").to_string();
+
+    // Assistant badge with distinct colors
+    let (assistant_badge, assistant_color) = match msg.assistant {
+        Assistant::ClaudeCode => ("CC", Color::Cyan),
+        Assistant::Codex => ("CX", Color::Yellow),
+        Assistant::Aider => ("AI", Color::Magenta),
+        Assistant::Cursor => ("CU", Color::White),
+    };
+
+    let context_str = format!("[{}/{}]", msg.project_name, msg.thread_name);
+
+    // Role styling
+    let (role_str, role_style) = match msg.author_role {
+        AuthorRole::Human => ("human", Style::default().fg(Color::Cyan)),
+        AuthorRole::Assistant => ("assistant", Style::default().fg(Color::Green)),
+        AuthorRole::Tool => ("tool", Style::default().fg(Color::Yellow)),
+        AuthorRole::Agent => ("agent", Style::default().fg(BADGE_AGENT)),
+        AuthorRole::System => ("system", Style::default().fg(Color::DarkGray)),
+    };
+
+    // Preview text
+    let preview = if msg.message_type == MessageType::ToolCall {
+        if let Some(tool_name) = &msg.tool_name {
+            format!("{}: {}", tool_name, truncate_str(&msg.preview, 40))
+        } else {
+            truncate_str(&msg.preview, 50).to_string()
+        }
+    } else {
+        truncate_str(&msg.preview, 50).to_string()
+    };
+
+    Line::from(vec![
+        Span::styled(time_str, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(format!("[{}]", assistant_badge), Style::default().fg(assistant_color).bold()),
+        Span::raw(" "),
+        Span::styled(context_str, Style::default().fg(WRAPPED_DIM)),
+        Span::raw(" "),
+        Span::styled(format!("{:10}", role_str), role_style),
+        Span::raw(" "),
+        Span::styled(format!("\"{}\"", preview), Style::default().fg(Color::White)),
+    ])
+}
+
+/// Truncate a string to a maximum length, adding "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
+    } else if max_len > 3 {
+        &s[..max_len - 3]
+    } else {
+        &s[..max_len]
+    }
+}
+
+/// Render the live view footer with key hints.
+fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let stats = &app.live_stats;
+
+    // Format numbers with appropriate suffixes
+    let msgs = format_stat_number(stats.total_messages);
+    let tokens = format_stat_number(stats.total_tokens);
+    let agents = stats.total_agents.to_string();
+    let tools = format_stat_number(stats.total_tool_calls);
+
+    let label_style = Style::default().fg(Color::DarkGray);
+    let value_style = Style::default().fg(Color::Cyan);
+    let separator_style = Style::default().fg(Color::DarkGray);
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(" 📊 ", Style::default()),
+        Span::styled("Messages: ", label_style),
+        Span::styled(msgs, value_style),
+        Span::styled("   ", separator_style),
+        Span::styled("Tokens: ", label_style),
+        Span::styled(tokens, value_style),
+        Span::styled("   ", separator_style),
+        Span::styled("Agents: ", label_style),
+        Span::styled(agents, value_style),
+        Span::styled("   ", separator_style),
+        Span::styled("Tool calls: ", label_style),
+        Span::styled(tools, value_style),
+    ]));
+
+    frame.render_widget(footer, area);
+}
+
+/// Format a number for display in stats (e.g., 1234 -> "1,234", 45200 -> "45.2k")
+fn format_stat_number(n: i64) -> String {
+    if n >= 100_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else if n >= 1000 {
+        // Add comma separator
+        let s = n.to_string();
+        let mut result = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                result.push(',');
+            }
+            result.push(c);
+        }
+        result.chars().rev().collect()
+    } else {
+        n.to_string()
+    }
 }

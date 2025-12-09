@@ -36,9 +36,9 @@ fn main() -> Result<()> {
     let db = Database::open(&db_path).context("failed to open database")?;
     db.migrate().context("failed to run database migrations")?;
 
-    // Create app and load data (projects is the default view)
+    // Create app and start in Live view (default tab)
     let mut app = App::new(db);
-    app.load_projects().context("failed to load projects")?;
+    app.start_live_view().context("failed to load live messages")?;
 
     // Setup terminal
     enable_raw_mode().context("failed to enable raw mode")?;

@@ -742,6 +742,26 @@ impl Database {
         .map(|opt| opt.flatten())
     }
 
+    /// Get the last message timestamp for a thread.
+    pub fn get_thread_last_activity(&self, thread_id: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT MAX(ts) FROM messages WHERE thread_id = ?",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::from)?
+            .flatten();
+
+        Ok(result.and_then(|ts_str| {
+            DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }))
+    }
+
     /// Get the latest message timestamp in the database.
     /// Used by TUI to detect when new data has been synced.
     pub fn get_latest_message_ts(&self) -> Result<Option<DateTime<Utc>>> {
@@ -2174,6 +2194,174 @@ impl Database {
             peak_hour,
             busiest_day,
         })
+    }
+
+    // ============================================
+    // Live View Queries
+    // ============================================
+
+    /// Get active sessions (threads with recent activity) for the live view.
+    ///
+    /// Returns threads that have had message activity within the last `since_minutes` minutes,
+    /// ordered by last activity descending (most recent first).
+    pub fn get_active_sessions(&self, since_minutes: i64) -> Result<Vec<crate::types::ActiveSession>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                s.id as session_id,
+                t.id as thread_id,
+                COALESCE(p.name, '(no project)') as project_name,
+                t.thread_type,
+                s.assistant,
+                MAX(m.ts) as last_activity,
+                COUNT(m.id) as message_count,
+                t.parent_thread_id
+            FROM threads t
+            JOIN sessions s ON t.session_id = s.id
+            LEFT JOIN projects p ON s.project_id = p.id
+            JOIN messages m ON m.thread_id = t.id
+            WHERE m.ts >= datetime('now', ? || ' minutes')
+            GROUP BY t.id
+            ORDER BY last_activity DESC
+            "#,
+        )?;
+
+        let since_param = format!("-{}", since_minutes);
+        let sessions: Vec<crate::types::ActiveSession> = stmt
+            .query_map([&since_param], |row| {
+                let thread_type_str: String = row.get(3)?;
+                let assistant_str: String = row.get(4)?;
+                let last_activity_str: String = row.get(5)?;
+
+                Ok(crate::types::ActiveSession {
+                    session_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    project_name: row.get(2)?,
+                    thread_type: thread_type_str.parse().unwrap_or(crate::types::ThreadType::Main),
+                    assistant: assistant_str.parse().unwrap_or(crate::types::Assistant::ClaudeCode),
+                    last_activity: chrono::DateTime::parse_from_rfc3339(&last_activity_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    message_count: row.get(6)?,
+                    parent_thread_id: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(sessions)
+    }
+
+    /// Get aggregate statistics for the live view's stats toolbar.
+    ///
+    /// Returns message count, token totals, agent count, and tool call count
+    /// for messages within the specified time window.
+    pub fn get_live_stats(&self, since_minutes: i64) -> Result<crate::types::LiveStats> {
+        let conn = self.conn.lock().unwrap();
+        let since_param = format!("-{}", since_minutes);
+
+        // Get message count, token totals, and tool call count
+        let mut msg_stmt = conn.prepare(
+            r#"
+            SELECT
+                COUNT(*) as total_messages,
+                COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) as total_tokens,
+                COALESCE(SUM(CASE WHEN message_type = 'tool_call' THEN 1 ELSE 0 END), 0) as total_tool_calls
+            FROM messages
+            WHERE ts >= datetime('now', ? || ' minutes')
+            "#,
+        )?;
+
+        let (total_messages, total_tokens, total_tool_calls): (i64, i64, i64) = msg_stmt
+            .query_row([&since_param], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+
+        // Get count of agent threads with activity in the window
+        let mut agent_stmt = conn.prepare(
+            r#"
+            SELECT COUNT(DISTINCT t.id)
+            FROM threads t
+            JOIN messages m ON m.thread_id = t.id
+            WHERE t.thread_type = 'agent'
+              AND m.ts >= datetime('now', ? || ' minutes')
+            "#,
+        )?;
+
+        let total_agents: i64 = agent_stmt.query_row([&since_param], |row| row.get(0))?;
+
+        Ok(crate::types::LiveStats {
+            total_messages,
+            total_tokens,
+            total_agents,
+            total_tool_calls,
+        })
+    }
+
+    /// Get recent messages across all sessions for the live stream view.
+    ///
+    /// Returns messages with project/thread context, ordered by timestamp descending.
+    /// The `limit` parameter controls how many messages to return.
+    pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::types::MessageWithContext>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                m.id,
+                m.ts,
+                s.assistant,
+                COALESCE(p.name, '(no project)') as project_name,
+                CASE
+                    WHEN t.thread_type = 'main' THEN 'main'
+                    ELSE substr(t.id, 1, 8)
+                END as thread_name,
+                m.author_role,
+                m.message_type,
+                COALESCE(
+                    CASE
+                        WHEN m.tool_name IS NOT NULL THEN m.tool_name
+                        ELSE substr(COALESCE(m.content, ''), 1, 60)
+                    END,
+                    ''
+                ) as preview,
+                m.tool_name
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN sessions s ON t.session_id = s.id
+            LEFT JOIN projects p ON s.project_id = p.id
+            ORDER BY m.ts DESC
+            LIMIT ?
+            "#,
+        )?;
+
+        let messages: Vec<crate::types::MessageWithContext> = stmt
+            .query_map([limit as i64], |row| {
+                let ts_str: String = row.get(1)?;
+                let assistant_str: String = row.get(2)?;
+                let author_role_str: String = row.get(5)?;
+                let message_type_str: String = row.get(6)?;
+
+                Ok(crate::types::MessageWithContext {
+                    id: row.get(0)?,
+                    ts: chrono::DateTime::parse_from_rfc3339(&ts_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    assistant: assistant_str.parse().unwrap_or(crate::types::Assistant::ClaudeCode),
+                    project_name: row.get(3)?,
+                    thread_name: row.get(4)?,
+                    author_role: author_role_str.parse().unwrap_or(crate::types::AuthorRole::System),
+                    message_type: message_type_str.parse().unwrap_or(crate::types::MessageType::Response),
+                    preview: row.get(7)?,
+                    tool_name: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(messages)
     }
 }
 

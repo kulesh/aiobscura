@@ -6,7 +6,7 @@ use aiobscura_core::analytics::{
     generate_wrapped, DashboardStats, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
-use aiobscura_core::{Database, Message, Plan, SessionFilter, Thread, ThreadType};
+use aiobscura_core::{ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, SessionFilter, Thread, ThreadType};
 use anyhow::Result;
 use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -54,6 +54,8 @@ pub enum ViewMode {
     },
     /// Wrapped view showing year/month in review
     Wrapped,
+    /// Live activity view showing message stream across all sessions
+    Live,
     /// Project list view (default)
     #[default]
     ProjectList,
@@ -165,6 +167,18 @@ pub struct App {
     pub live_update_tick: Option<u32>,
     /// Current tick count (incremented each render)
     pub tick_count: u32,
+
+    // ========== Live View State ==========
+    /// Messages for the live stream view (newest first from DB, displayed newest at top)
+    pub live_messages: Vec<MessageWithContext>,
+    /// Scroll offset for live view (0 = top/newest, increasing shows older)
+    pub live_scroll_offset: usize,
+    /// Whether auto-scroll is enabled (stays at top showing newest)
+    pub live_auto_scroll: bool,
+    /// Active sessions for the live view (threads with recent activity)
+    pub active_sessions: Vec<ActiveSession>,
+    /// Aggregate stats for the live view's toolbar
+    pub live_stats: LiveStats,
 }
 
 impl App {
@@ -207,6 +221,12 @@ impl App {
             last_known_ts: None,
             live_update_tick: None,
             tick_count: 0,
+            // Live view state
+            live_messages: Vec::new(),
+            live_scroll_offset: 0,
+            live_auto_scroll: true,
+            active_sessions: Vec::new(),
+            live_stats: LiveStats::default(),
         }
     }
 
@@ -357,12 +377,21 @@ impl App {
                     .count_thread_messages(&main_info.thread.id)
                     .unwrap_or(0);
 
+                // Get actual last message timestamp, fall back to thread timestamps
+                let last_activity = self
+                    .db
+                    .get_thread_last_activity(&main_info.thread.id)
+                    .ok()
+                    .flatten()
+                    .or(main_info.thread.ended_at)
+                    .or(Some(main_info.thread.started_at));
+
                 self.threads.push(ThreadRow {
                     id: main_info.thread.id.clone(),
                     session_id: main_info.session_id.clone(),
                     thread_type: main_info.thread.thread_type,
                     parent_thread_id: None,
-                    last_activity: main_info.thread.ended_at.or(Some(main_info.thread.started_at)),
+                    last_activity,
                     project_name: main_info.project_name.clone(),
                     assistant_name: main_info.assistant_name.clone(),
                     message_count,
@@ -386,15 +415,21 @@ impl App {
                             .count_thread_messages(&child_info.thread.id)
                             .unwrap_or(0);
 
+                        // Get actual last message timestamp, fall back to thread timestamps
+                        let last_activity = self
+                            .db
+                            .get_thread_last_activity(&child_info.thread.id)
+                            .ok()
+                            .flatten()
+                            .or(child_info.thread.ended_at)
+                            .or(Some(child_info.thread.started_at));
+
                         self.threads.push(ThreadRow {
                             id: child_info.thread.id.clone(),
                             session_id: child_info.session_id.clone(),
                             thread_type: child_info.thread.thread_type,
                             parent_thread_id: child_info.thread.parent_thread_id.clone(),
-                            last_activity: child_info
-                                .thread
-                                .ended_at
-                                .or(Some(child_info.thread.started_at)),
+                            last_activity,
                             project_name: child_info.project_name.clone(),
                             assistant_name: child_info.assistant_name.clone(),
                             message_count,
@@ -413,15 +448,21 @@ impl App {
                     .count_thread_messages(&orphan_info.thread.id)
                     .unwrap_or(0);
 
+                // Get actual last message timestamp, fall back to thread timestamps
+                let last_activity = self
+                    .db
+                    .get_thread_last_activity(&orphan_info.thread.id)
+                    .ok()
+                    .flatten()
+                    .or(orphan_info.thread.ended_at)
+                    .or(Some(orphan_info.thread.started_at));
+
                 self.threads.push(ThreadRow {
                     id: orphan_info.thread.id.clone(),
                     session_id: orphan_info.session_id.clone(),
                     thread_type: orphan_info.thread.thread_type,
                     parent_thread_id: None,
-                    last_activity: orphan_info
-                        .thread
-                        .ended_at
-                        .or(Some(orphan_info.thread.started_at)),
+                    last_activity,
                     project_name: orphan_info.project_name.clone(),
                     assistant_name: orphan_info.assistant_name.clone(),
                     message_count,
@@ -430,6 +471,13 @@ impl App {
                 });
             }
         }
+
+        // Sort all threads by last_activity descending (most recent first)
+        self.threads.sort_by(|a, b| {
+            let a_time = a.last_activity;
+            let b_time = b.last_activity;
+            b_time.cmp(&a_time)
+        });
 
         // Select first row if we have threads
         if !self.threads.is_empty() && self.table_state.selected().is_none() {
@@ -447,6 +495,7 @@ impl App {
             ViewMode::PlanList { .. } => self.handle_plan_list_key(key),
             ViewMode::PlanDetail { .. } => self.handle_plan_detail_key(key),
             ViewMode::Wrapped => self.handle_wrapped_key(key),
+            ViewMode::Live => self.handle_live_key(key),
             ViewMode::ProjectList => self.handle_project_list_key(key),
             ViewMode::ProjectDetail { .. } => self.handle_project_detail_key(key),
         }
@@ -464,8 +513,9 @@ impl App {
             KeyCode::Char('w') => {
                 self.open_wrapped_view();
             }
-            KeyCode::Tab => {
-                self.open_project_list();
+            KeyCode::Esc | KeyCode::Tab => {
+                // Tab cycles: Threads -> Live
+                self.open_live_view();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.select_next();
@@ -1129,6 +1179,110 @@ impl App {
         }
     }
 
+    // ========== Live View Methods ==========
+
+    /// Handle keyboard input in live view.
+    fn handle_live_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Esc | KeyCode::Tab => {
+                // Tab cycles: Live -> Projects
+                // Always reload for fresh data
+                let _ = self.load_projects();
+                self.dashboard_stats = self.db.get_dashboard_stats().ok();
+                self.view_mode = ViewMode::ProjectList;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                // Scroll down (toward older messages, increase offset)
+                self.live_scroll_offset = self.live_scroll_offset.saturating_add(1);
+                self.live_auto_scroll = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                // Scroll up (toward newer messages at top, decrease offset)
+                if self.live_scroll_offset > 0 {
+                    self.live_scroll_offset -= 1;
+                }
+                // Re-enable auto-scroll when back at top
+                if self.live_scroll_offset == 0 {
+                    self.live_auto_scroll = true;
+                }
+            }
+            KeyCode::Char(' ') => {
+                // Toggle auto-scroll
+                self.live_auto_scroll = !self.live_auto_scroll;
+                if self.live_auto_scroll {
+                    self.live_scroll_offset = 0;
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                // Scroll to newest (top)
+                self.live_scroll_offset = 0;
+                self.live_auto_scroll = true;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                // Scroll to oldest (bottom)
+                self.live_scroll_offset = self.live_messages.len().saturating_sub(1);
+                self.live_auto_scroll = false;
+            }
+            KeyCode::PageUp | KeyCode::Char('u') => {
+                // Scroll up toward newer (decrease offset)
+                self.live_scroll_offset = self.live_scroll_offset.saturating_sub(10);
+                if self.live_scroll_offset == 0 {
+                    self.live_auto_scroll = true;
+                }
+            }
+            KeyCode::PageDown | KeyCode::Char('d') => {
+                // Scroll down toward older (increase offset)
+                self.live_scroll_offset = self.live_scroll_offset.saturating_add(10);
+                self.live_auto_scroll = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the live activity view (called from main for startup).
+    pub fn start_live_view(&mut self) -> Result<()> {
+        self.live_messages = self.db.get_recent_messages(50)?;
+        // Get sessions active in last 30 minutes for the panel
+        self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
+        self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        self.live_scroll_offset = 0;
+        self.live_auto_scroll = true;
+        self.view_mode = ViewMode::Live;
+        Ok(())
+    }
+
+    /// Open the live activity view (internal navigation).
+    fn open_live_view(&mut self) {
+        // Load recent messages (limit to 50 as per plan)
+        if let Ok(messages) = self.db.get_recent_messages(50) {
+            self.live_messages = messages;
+            self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
+            self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+            self.dashboard_stats = self.db.get_dashboard_stats().ok();
+            self.live_scroll_offset = 0;
+            self.live_auto_scroll = true;
+            self.view_mode = ViewMode::Live;
+        }
+    }
+
+    /// Refresh live messages from database.
+    pub fn refresh_live_messages(&mut self) -> Result<()> {
+        if let Ok(messages) = self.db.get_recent_messages(50) {
+            self.live_messages = messages;
+            // If auto-scroll is on, keep at top (showing newest)
+            if self.live_auto_scroll {
+                self.live_scroll_offset = 0;
+            }
+        }
+        // Also refresh active sessions and stats
+        self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
+        self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        Ok(())
+    }
+
     // ========== Project View Methods ==========
 
     /// Handle keyboard input in project list view.
@@ -1138,6 +1292,7 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Esc | KeyCode::Tab => {
+                // Tab cycles: Projects -> Threads
                 self.close_project_list();
             }
             KeyCode::Enter => {
@@ -1208,27 +1363,11 @@ impl App {
         }
     }
 
-    /// Open the project list view.
-    fn open_project_list(&mut self) {
-        // Load projects if not already loaded
-        if self.projects.is_empty() {
-            if let Ok(projects) = self.db.list_projects_with_stats() {
-                self.projects = projects;
-                self.project_table_state = TableState::default();
-                if !self.projects.is_empty() {
-                    self.project_table_state.select(Some(0));
-                }
-            }
-        }
-        self.view_mode = ViewMode::ProjectList;
-    }
-
     /// Close project list and switch to thread list.
     fn close_project_list(&mut self) {
-        // Load threads if not already loaded
-        if self.threads.is_empty() {
-            let _ = self.load_threads();
-        }
+        // Always reload threads and stats for fresh data
+        let _ = self.load_threads();
+        self.dashboard_stats = self.db.get_dashboard_stats().ok();
         self.view_mode = ViewMode::List;
     }
 
@@ -1349,16 +1488,21 @@ impl App {
     pub fn is_list_view(&self) -> bool {
         matches!(
             self.view_mode,
-            ViewMode::ProjectList | ViewMode::List | ViewMode::ProjectDetail { .. }
+            ViewMode::ProjectList | ViewMode::List | ViewMode::ProjectDetail { .. } | ViewMode::Live
         )
     }
 
     /// Refresh data for the current view, preserving selection state.
     pub fn refresh_current_view(&mut self) -> Result<()> {
+        // Always refresh dashboard stats for list views
+        if self.is_list_view() {
+            self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        }
+
         match &self.view_mode {
             ViewMode::ProjectList => {
                 let selected = self.project_table_state.selected();
-                self.load_projects()?;
+                self.projects = self.db.list_projects_with_stats()?;
                 // Restore selection if valid
                 if let Some(idx) = selected {
                     if idx < self.projects.len() {
@@ -1407,6 +1551,9 @@ impl App {
                         // Overview doesn't need frequent refresh
                     }
                 }
+            }
+            ViewMode::Live => {
+                self.refresh_live_messages()?;
             }
             // Detail views and other modes: don't auto-refresh (would disrupt reading)
             ViewMode::Detail { .. }
@@ -1492,13 +1639,22 @@ impl App {
 
         // Build the final list with hierarchy
         for main_info in main_threads {
+            // Get actual last message timestamp, fall back to thread timestamps
+            let last_activity = self
+                .db
+                .get_thread_last_activity(&main_info.thread.id)
+                .ok()
+                .flatten()
+                .or(main_info.thread.ended_at)
+                .or(Some(main_info.thread.started_at));
+
             // Add main thread
             self.project_threads.push(ThreadRow {
                 id: main_info.thread.id.clone(),
                 session_id: main_info.session_id.clone(),
                 thread_type: main_info.thread.thread_type,
                 parent_thread_id: None,
-                last_activity: main_info.thread.ended_at.or(Some(main_info.thread.started_at)),
+                last_activity,
                 project_name: main_info.project_name.clone(),
                 assistant_name: main_info.assistant_name.clone(),
                 message_count: main_info.message_count,
@@ -1517,12 +1673,21 @@ impl App {
 
                 let child_count = children.len();
                 for (child_idx, child_info) in children.into_iter().enumerate() {
+                    // Get actual last message timestamp, fall back to thread timestamps
+                    let last_activity = self
+                        .db
+                        .get_thread_last_activity(&child_info.thread.id)
+                        .ok()
+                        .flatten()
+                        .or(child_info.thread.ended_at)
+                        .or(Some(child_info.thread.started_at));
+
                     self.project_threads.push(ThreadRow {
                         id: child_info.thread.id.clone(),
                         session_id: child_info.session_id.clone(),
                         thread_type: child_info.thread.thread_type,
                         parent_thread_id: child_info.thread.parent_thread_id.clone(),
-                        last_activity: child_info.thread.ended_at.or(Some(child_info.thread.started_at)),
+                        last_activity,
                         project_name: child_info.project_name.clone(),
                         assistant_name: child_info.assistant_name.clone(),
                         message_count: child_info.message_count,

@@ -640,6 +640,103 @@ fn test_codex_session_metadata() {
     );
 }
 
+/// Regression test for incremental Codex parsing bug:
+/// When new messages are appended to a Codex log file after the initial parse,
+/// the session_id must still be available (extracted from filename) even though
+/// the session_meta event at the beginning is skipped.
+#[test]
+fn test_codex_incremental_parsing_with_new_messages() {
+    use std::io::Write;
+
+    // Create a temp file with Codex naming convention (UUID in filename)
+    let temp_dir = TempDir::new().unwrap();
+    let session_uuid = "019b0113-9f8c-7410-af77-c78e77f3128b";
+    let path = temp_dir
+        .path()
+        .join(format!("rollout-2025-12-08T22-07-01-{}.jsonl", session_uuid));
+
+    // Write initial content: session_meta + one assistant message
+    let initial_content = r#"{"timestamp":"2025-12-09T03:07:01.920Z","type":"session_meta","payload":{"id":"019b0113-9f8c-7410-af77-c78e77f3128b","cwd":"/test","git":{"branch":"main"}}}
+{"timestamp":"2025-12-09T03:07:01.921Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}}"#;
+    std::fs::write(&path, initial_content).unwrap();
+
+    // First parse - from beginning
+    let parser = CodexParser::with_root(temp_dir.path().to_path_buf());
+    let metadata = std::fs::metadata(&path).unwrap();
+    let ctx1 = ParseContext {
+        path: &path,
+        checkpoint: &Checkpoint::None,
+        file_size: metadata.len(),
+        modified_at: chrono::Utc::now(),
+    };
+    let result1 = parser.parse(&ctx1).expect("first parse should succeed");
+
+    // Should have 1 message from initial parse
+    assert!(!result1.messages.is_empty(), "should have initial messages");
+
+    // Verify initial messages have correct session_id
+    let first_msg = &result1.messages[0];
+    assert!(
+        !first_msg.session_id.is_empty(),
+        "initial message should have session_id"
+    );
+    assert!(
+        first_msg.session_id.contains(session_uuid),
+        "session_id should contain UUID from filename"
+    );
+
+    // Get checkpoint from first parse
+    let checkpoint = result1.new_checkpoint.clone();
+
+    // Append a new user message to the file (simulating live Codex activity)
+    let new_message = r#"
+{"timestamp":"2025-12-09T03:11:12.760Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Tell me a joke"}]}}"#;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(new_message.as_bytes()).unwrap();
+    drop(file);
+
+    // Incremental parse - from checkpoint (should find the NEW message)
+    let metadata2 = std::fs::metadata(&path).unwrap();
+    let ctx2 = ParseContext {
+        path: &path,
+        checkpoint: &checkpoint,
+        file_size: metadata2.len(),
+        modified_at: chrono::Utc::now(),
+    };
+    let result2 = parser.parse(&ctx2).expect("incremental parse should succeed");
+
+    // Should have found exactly 1 new message
+    assert_eq!(
+        result2.messages.len(),
+        1,
+        "incremental parse should find the appended message"
+    );
+
+    // CRITICAL: The new message must have valid session_id and thread_id
+    // This is the regression test - before the fix, these would be empty strings
+    let new_msg = &result2.messages[0];
+    assert!(
+        !new_msg.session_id.is_empty(),
+        "session_id must NOT be empty on incremental parse (was bug)"
+    );
+    assert!(
+        !new_msg.thread_id.is_empty(),
+        "thread_id must NOT be empty on incremental parse (was bug)"
+    );
+    assert!(
+        new_msg.session_id.contains(session_uuid),
+        "session_id should contain UUID from filename: got '{}'",
+        new_msg.session_id
+    );
+
+    // Verify message content
+    assert_eq!(new_msg.author_role, AuthorRole::Human);
+    assert!(new_msg.content.as_ref().unwrap().contains("joke"));
+}
+
 #[test]
 fn test_codex_project_creation() {
     let path = codex_fixture_path("minimal-session.jsonl");
