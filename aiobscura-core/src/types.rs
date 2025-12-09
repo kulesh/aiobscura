@@ -891,3 +891,70 @@ pub type EventType = MessageType;
 /// Alias for backward compatibility
 #[deprecated(note = "Use DiscoveredAssistant instead")]
 pub type DiscoveredAgent = DiscoveredAssistant;
+
+// ============================================
+// Live View Types
+// ============================================
+
+/// A message with project/thread context for the live stream view.
+///
+/// This is a lightweight representation of a message with enough context
+/// to display in a multi-session live stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageWithContext {
+    /// Database ID
+    pub id: i64,
+    /// Timestamp of this message
+    pub ts: DateTime<Utc>,
+    /// Which assistant produced this message
+    pub assistant: Assistant,
+    /// Project name (or "(no project)")
+    pub project_name: String,
+    /// Thread name ("main" or agent short ID)
+    pub thread_name: String,
+    /// Author role
+    pub author_role: AuthorRole,
+    /// Type of message
+    pub message_type: MessageType,
+    /// Preview text (first ~60 chars of content)
+    pub preview: String,
+    /// Tool name (for tool calls)
+    pub tool_name: Option<String>,
+}
+
+/// An active session/thread for the live view's Active Sessions panel.
+///
+/// Represents a thread that has had recent activity, with enough context
+/// to display in a hierarchical session list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveSession {
+    /// Session ID
+    pub session_id: String,
+    /// Thread ID
+    pub thread_id: String,
+    /// Project name (or "(no project)")
+    pub project_name: String,
+    /// Thread type (Main or Agent)
+    pub thread_type: ThreadType,
+    /// Which AI assistant
+    pub assistant: Assistant,
+    /// Timestamp of last activity
+    pub last_activity: DateTime<Utc>,
+    /// Total message count for this thread
+    pub message_count: i64,
+    /// Parent thread ID (for agent hierarchy)
+    pub parent_thread_id: Option<String>,
+}
+
+/// Aggregate statistics for the live view's stats toolbar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LiveStats {
+    /// Total number of messages in the time window
+    pub total_messages: i64,
+    /// Total tokens (input + output) in the time window
+    pub total_tokens: i64,
+    /// Total number of agent threads spawned in the time window
+    pub total_agents: i64,
+    /// Total number of tool calls in the time window
+    pub total_tool_calls: i64,
+}
