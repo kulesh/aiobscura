@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
+    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{Database, Message, Plan, SessionFilter, Thread, ThreadType};
@@ -136,6 +136,8 @@ pub struct App {
     pub project_table_state: TableState,
     /// Selected project stats (for detail view)
     pub project_stats: Option<ProjectStats>,
+    /// Dashboard stats for the header panel
+    pub dashboard_stats: Option<DashboardStats>,
 
     // ========== Project Sub-Tab State ==========
     /// Threads for current project (filtered)
@@ -183,6 +185,7 @@ impl App {
             projects: Vec::new(),
             project_table_state: TableState::default(),
             project_stats: None,
+            dashboard_stats: None,
             // Project sub-tab state
             project_threads: Vec::new(),
             project_threads_table_state: TableState::default(),
@@ -444,9 +447,6 @@ impl App {
             }
             KeyCode::Enter => {
                 self.open_detail_view();
-            }
-            KeyCode::Char('p') => {
-                self.open_plan_list(false);
             }
             KeyCode::Char('w') => {
                 self.open_wrapped_view();
@@ -1302,15 +1302,30 @@ impl App {
         if !self.projects.is_empty() {
             self.project_table_state.select(Some(0));
         }
+        // Load dashboard stats for the header panel
+        self.dashboard_stats = self.db.get_dashboard_stats().ok();
         Ok(())
     }
 
     // ========== Project Sub-Tab Data Loading ==========
 
-    /// Load threads filtered by project_id.
+    /// Load threads filtered by project_id, grouping agents under their parent main threads.
     fn load_project_threads(&mut self, project_id: &str) -> Result<()> {
+        use std::collections::HashMap;
+
         let sessions = self.db.list_sessions(&SessionFilter::default())?;
         self.project_threads.clear();
+
+        // Collect all threads with their metadata
+        struct ThreadInfo {
+            thread: aiobscura_core::Thread,
+            session_id: String,
+            project_name: String,
+            assistant_name: String,
+            message_count: i64,
+        }
+
+        let mut all_threads: Vec<ThreadInfo> = Vec::new();
 
         for session in sessions {
             // Skip sessions that don't belong to this project
@@ -1332,28 +1347,81 @@ impl App {
             let threads = self.db.get_session_threads(&session.id).unwrap_or_default();
 
             for thread in threads {
-                let message_count = self
-                    .db
-                    .count_thread_messages(&thread.id)
-                    .unwrap_or(0);
+                let message_count = self.db.count_thread_messages(&thread.id).unwrap_or(0);
 
-                self.project_threads.push(ThreadRow {
-                    id: thread.id.clone(),
+                all_threads.push(ThreadInfo {
+                    thread,
                     session_id: session.id.clone(),
-                    thread_type: thread.thread_type,
-                    parent_thread_id: thread.parent_thread_id.clone(),
-                    last_activity: thread.ended_at.or(Some(thread.started_at)),
                     project_name: project_name.clone(),
                     assistant_name: assistant_name.clone(),
                     message_count,
-                    indent_level: if thread.parent_thread_id.is_some() { 1 } else { 0 },
-                    is_last_child: false,
                 });
             }
         }
 
-        // Sort by last activity (most recent first)
-        self.project_threads.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        // Build parent -> children map
+        let mut children_map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, info) in all_threads.iter().enumerate() {
+            if let Some(parent_id) = &info.thread.parent_thread_id {
+                children_map.entry(parent_id.clone()).or_default().push(idx);
+            }
+        }
+
+        // Separate main threads
+        let mut main_threads: Vec<&ThreadInfo> = all_threads
+            .iter()
+            .filter(|t| t.thread.thread_type == aiobscura_core::ThreadType::Main)
+            .collect();
+
+        // Sort main threads by last activity (most recent first)
+        main_threads.sort_by(|a, b| {
+            let a_time = a.thread.ended_at.or(Some(a.thread.started_at));
+            let b_time = b.thread.ended_at.or(Some(b.thread.started_at));
+            b_time.cmp(&a_time)
+        });
+
+        // Build the final list with hierarchy
+        for main_info in main_threads {
+            // Add main thread
+            self.project_threads.push(ThreadRow {
+                id: main_info.thread.id.clone(),
+                session_id: main_info.session_id.clone(),
+                thread_type: main_info.thread.thread_type,
+                parent_thread_id: None,
+                last_activity: main_info.thread.ended_at.or(Some(main_info.thread.started_at)),
+                project_name: main_info.project_name.clone(),
+                assistant_name: main_info.assistant_name.clone(),
+                message_count: main_info.message_count,
+                indent_level: 0,
+                is_last_child: false,
+            });
+
+            // Add child threads (agents spawned by this main thread)
+            if let Some(child_indices) = children_map.get(&main_info.thread.id) {
+                let mut children: Vec<&ThreadInfo> = child_indices
+                    .iter()
+                    .map(|&idx| &all_threads[idx])
+                    .collect();
+                // Sort children by started_at (oldest first, so they appear in chronological order)
+                children.sort_by(|a, b| a.thread.started_at.cmp(&b.thread.started_at));
+
+                let child_count = children.len();
+                for (child_idx, child_info) in children.into_iter().enumerate() {
+                    self.project_threads.push(ThreadRow {
+                        id: child_info.thread.id.clone(),
+                        session_id: child_info.session_id.clone(),
+                        thread_type: child_info.thread.thread_type,
+                        parent_thread_id: child_info.thread.parent_thread_id.clone(),
+                        last_activity: child_info.thread.ended_at.or(Some(child_info.thread.started_at)),
+                        project_name: child_info.project_name.clone(),
+                        assistant_name: child_info.assistant_name.clone(),
+                        message_count: child_info.message_count,
+                        indent_level: 1,
+                        is_last_child: child_idx == child_count - 1,
+                    });
+                }
+            }
+        }
 
         // Select first if any
         self.project_threads_table_state = TableState::default();

@@ -2044,6 +2044,120 @@ impl Database {
             top_project_concentration: top_project_sessions as f64 / sessions_f,
         })
     }
+
+    /// Get dashboard statistics for the Projects view header.
+    ///
+    /// Returns aggregate stats, activity heatmap (last 28 days), streaks, and patterns.
+    pub fn get_dashboard_stats(&self) -> Result<crate::analytics::DashboardStats> {
+        let conn = self.conn.lock().unwrap();
+
+        // 1. Get aggregate totals
+        let (project_count, session_count, total_tokens): (i64, i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM projects),
+                    (SELECT COUNT(*) FROM sessions),
+                    COALESCE((SELECT SUM(tokens_in + tokens_out) FROM messages), 0)
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap_or((0, 0, 0));
+
+        // 2. Get total duration (sum of session durations)
+        // Note: SQLite returns REAL for julianday calculations, so we get as f64 and cast
+        let total_duration_secs: i64 = conn
+            .query_row(
+                r#"
+                SELECT COALESCE(SUM(
+                    CASE WHEN last_activity_at IS NOT NULL AND started_at IS NOT NULL
+                    THEN MAX(0, (julianday(last_activity_at) - julianday(started_at)) * 86400)
+                    ELSE 0 END
+                ), 0) as duration
+                FROM sessions
+                "#,
+                [],
+                |row| row.get::<_, f64>(0),
+            )
+            .map(|f| f as i64)
+            .unwrap_or(0);
+
+        // 3. Get daily activity for last 28 days
+        // Use localtime to match user's timezone for "today"
+        let mut daily_activity = [0i64; 28];
+        {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT
+                    CAST(julianday(date('now', 'localtime')) - julianday(DATE(ts)) AS INTEGER) as days_ago,
+                    COUNT(*) as count
+                FROM messages
+                WHERE ts >= datetime('now', '-28 days')
+                GROUP BY DATE(ts)
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows.flatten() {
+                let (days_ago, count) = row;
+                if days_ago >= 0 && days_ago < 28 {
+                    // Index 27 = today (0 days ago), index 0 = 27 days ago
+                    let idx = 27 - days_ago as usize;
+                    daily_activity[idx] = count;
+                }
+            }
+        }
+
+        // 4. Calculate streaks
+        let (current_streak, longest_streak) =
+            crate::analytics::DashboardStats::calculate_streaks(&daily_activity);
+
+        // 5. Get peak hour (most active hour of day)
+        let peak_hour: u8 = conn
+            .query_row(
+                r#"
+                SELECT CAST(strftime('%H', ts) AS INTEGER) as hour
+                FROM messages
+                GROUP BY hour
+                ORDER BY COUNT(*) DESC
+                LIMIT 1
+                "#,
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|h| h as u8)
+            .unwrap_or(12);
+
+        // 6. Get busiest day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+        let busiest_day: u8 = conn
+            .query_row(
+                r#"
+                SELECT CAST(strftime('%w', ts) AS INTEGER) as dow
+                FROM messages
+                GROUP BY dow
+                ORDER BY COUNT(*) DESC
+                LIMIT 1
+                "#,
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|d| d as u8)
+            .unwrap_or(1);
+
+        Ok(crate::analytics::DashboardStats {
+            project_count,
+            session_count,
+            total_tokens,
+            total_duration_secs,
+            daily_activity,
+            current_streak,
+            longest_streak,
+            peak_hour,
+            busiest_day,
+        })
+    }
 }
 
 /// Filter for listing sessions
