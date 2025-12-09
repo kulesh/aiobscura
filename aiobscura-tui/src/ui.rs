@@ -2162,6 +2162,8 @@ fn render_project_detail_footer(frame: &mut Frame, sub_tab: ProjectSubTab, area:
     }
 
     // Tab navigation hints
+    spans.push(Span::styled("Tab", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw("/"));
     spans.push(Span::styled("1-4", Style::default().fg(Color::Yellow)));
     spans.push(Span::raw(" tabs  "));
     spans.push(Span::styled("q", Style::default().fg(Color::Yellow)));

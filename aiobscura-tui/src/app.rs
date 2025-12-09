@@ -1132,6 +1132,13 @@ impl App {
             KeyCode::Esc => {
                 self.close_project_detail();
             }
+            // Sub-tab navigation by Tab key
+            KeyCode::Tab => {
+                self.cycle_project_sub_tab(true);
+            }
+            KeyCode::BackTab => {
+                self.cycle_project_sub_tab(false);
+            }
             // Sub-tab navigation by number
             KeyCode::Char('1') | KeyCode::Char('o') => {
                 self.set_project_sub_tab(ProjectSubTab::Overview);
@@ -1376,6 +1383,28 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Cycle to the next/previous project sub-tab.
+    fn cycle_project_sub_tab(&mut self, forward: bool) {
+        if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
+            let next_tab = if forward {
+                match sub_tab {
+                    ProjectSubTab::Overview => ProjectSubTab::Threads,
+                    ProjectSubTab::Threads => ProjectSubTab::Plans,
+                    ProjectSubTab::Plans => ProjectSubTab::Files,
+                    ProjectSubTab::Files => ProjectSubTab::Overview,
+                }
+            } else {
+                match sub_tab {
+                    ProjectSubTab::Overview => ProjectSubTab::Files,
+                    ProjectSubTab::Threads => ProjectSubTab::Overview,
+                    ProjectSubTab::Plans => ProjectSubTab::Threads,
+                    ProjectSubTab::Files => ProjectSubTab::Plans,
+                }
+            };
+            self.set_project_sub_tab(next_tab);
+        }
     }
 
     /// Set the project sub-tab and load data if needed.
