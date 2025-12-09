@@ -1,12 +1,12 @@
 [package]
-name = "aiobscura-tui"
+name = "aiobscura"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage = "https://github.com/kulesh/aiobscura"
-description = "AI Agent Activity Monitor - Terminal UI"
+description = "AI Agent Activity Monitor"
 
 [[bin]]
 name = "aiobscura"

@@ -24,8 +24,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiobscura"
+version = "0.1.1"
+dependencies = [
+ "aiobscura-core",
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "ctrlc",
+ "indicatif",
+ "notify",
+ "notify-debouncer-mini",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "aiobscura-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -41,25 +60,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "aiobscura-tui"
-version = "0.1.0"
-dependencies = [
- "aiobscura-core",
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "ctrlc",
- "indicatif",
- "notify",
- "notify-debouncer-mini",
- "ratatui",
- "serde",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
