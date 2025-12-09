@@ -1117,6 +1117,7 @@ impl Database {
     }
 
     /// Get session timestamps for duration calculation
+    #[allow(clippy::type_complexity)]
     pub fn get_session_timestamps(
         &self,
         session_id: &str,
@@ -1138,12 +1139,11 @@ impl Database {
                         agent: "session".to_string(),
                         message: format!("Invalid timestamp: {}", e),
                     })?;
-                let last = last_str
-                    .and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .ok()
-                    });
+                let last = last_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .ok()
+                });
                 Ok(Some((started, last)))
             }
             None => Ok(None),

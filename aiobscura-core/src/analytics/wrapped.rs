@@ -243,8 +243,7 @@ impl ToolRankings {
 }
 
 /// Time-based usage patterns.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TimePatterns {
     /// Activity count by hour (0-23)
     pub hourly_distribution: [i64; 24],
@@ -259,7 +258,6 @@ pub struct TimePatterns {
     /// Longest single session
     pub marathon_session: Option<MarathonSession>,
 }
-
 
 impl TimePatterns {
     /// Get day name from index.
