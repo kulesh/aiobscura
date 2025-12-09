@@ -63,7 +63,22 @@ fn main() -> Result<()> {
 
 /// Run the main application loop.
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    // Poll counter for DB change detection (every 10 ticks = ~1 second)
+    let mut poll_counter = 0u32;
+
     loop {
+        // Every 10 ticks (~1 second), check for DB updates
+        poll_counter += 1;
+        if poll_counter >= 10 {
+            poll_counter = 0;
+            // Only check and refresh if in a list view
+            if app.is_list_view() {
+                if let Ok(true) = app.check_for_updates() {
+                    let _ = app.refresh_current_view();
+                }
+            }
+        }
+
         // Update animations
         let size = terminal.size()?;
         app.tick_animation(size.width, size.height);

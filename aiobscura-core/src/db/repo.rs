@@ -742,6 +742,23 @@ impl Database {
         .map(|opt| opt.flatten())
     }
 
+    /// Get the latest message timestamp in the database.
+    /// Used by TUI to detect when new data has been synced.
+    pub fn get_latest_message_ts(&self) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<String> = conn
+            .query_row("SELECT MAX(ts) FROM messages", [], |row| row.get(0))
+            .optional()
+            .map_err(Error::from)?
+            .flatten();
+
+        Ok(result.and_then(|ts_str| {
+            DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }))
+    }
+
     fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         let author_role_str: String = row.get("author_role")?;
         let message_type_str: String = row.get("message_type")?;

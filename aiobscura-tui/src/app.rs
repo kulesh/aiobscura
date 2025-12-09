@@ -157,6 +157,14 @@ pub struct App {
     /// Return destination when exiting Detail/PlanDetail views
     /// (project_id, project_name, sub_tab) - if set, return to project sub-tab
     pub return_to_project: Option<(String, String, ProjectSubTab)>,
+
+    // ========== Live Refresh State ==========
+    /// Last known latest message timestamp (for change detection)
+    last_known_ts: Option<chrono::DateTime<chrono::Utc>>,
+    /// Tick count when last update was detected (for live indicator flash)
+    pub live_update_tick: Option<u32>,
+    /// Current tick count (incremented each render)
+    pub tick_count: u32,
 }
 
 impl App {
@@ -195,12 +203,17 @@ impl App {
             project_files_table_state: TableState::default(),
             // Navigation return state
             return_to_project: None,
+            // Live refresh state
+            last_known_ts: None,
+            live_update_tick: None,
+            tick_count: 0,
         }
     }
 
     /// Tick the animation state (call each frame).
     pub fn tick_animation(&mut self, width: u16, height: u16) {
         self.animation_frame = self.animation_frame.wrapping_add(1);
+        self.tick_count = self.tick_count.wrapping_add(1);
 
         // Initialize snowflakes if empty and in wrapped view
         if matches!(self.view_mode, ViewMode::Wrapped) {
@@ -1304,6 +1317,103 @@ impl App {
         }
         // Load dashboard stats for the header panel
         self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        Ok(())
+    }
+
+    // ========== Live Refresh ==========
+
+    /// Check if database has new data since last check.
+    /// Returns true if data changed and view should be refreshed.
+    pub fn check_for_updates(&mut self) -> Result<bool> {
+        let latest = self.db.get_latest_message_ts()?;
+        if latest != self.last_known_ts {
+            self.last_known_ts = latest;
+            // Record tick when update was detected (for live indicator flash)
+            self.live_update_tick = Some(self.tick_count);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Returns true if the live indicator should be shown (within ~2 seconds of last update).
+    pub fn should_show_live_indicator(&self) -> bool {
+        if let Some(update_tick) = self.live_update_tick {
+            // Show for ~20 ticks (about 2 seconds at 100ms per tick)
+            self.tick_count.wrapping_sub(update_tick) < 20
+        } else {
+            false
+        }
+    }
+
+    /// Check if the current view is a list view that should auto-refresh.
+    pub fn is_list_view(&self) -> bool {
+        matches!(
+            self.view_mode,
+            ViewMode::ProjectList | ViewMode::List | ViewMode::ProjectDetail { .. }
+        )
+    }
+
+    /// Refresh data for the current view, preserving selection state.
+    pub fn refresh_current_view(&mut self) -> Result<()> {
+        match &self.view_mode {
+            ViewMode::ProjectList => {
+                let selected = self.project_table_state.selected();
+                self.load_projects()?;
+                // Restore selection if valid
+                if let Some(idx) = selected {
+                    if idx < self.projects.len() {
+                        self.project_table_state.select(Some(idx));
+                    }
+                }
+            }
+            ViewMode::List => {
+                let selected = self.table_state.selected();
+                self.load_threads()?;
+                if let Some(idx) = selected {
+                    if idx < self.threads.len() {
+                        self.table_state.select(Some(idx));
+                    }
+                }
+            }
+            ViewMode::ProjectDetail {
+                project_id,
+                project_name: _,
+                sub_tab,
+            } => {
+                let project_id = project_id.clone();
+                match sub_tab {
+                    ProjectSubTab::Threads => {
+                        let selected = self.project_threads_table_state.selected();
+                        self.load_project_threads(&project_id)?;
+                        if let Some(idx) = selected {
+                            if idx < self.project_threads.len() {
+                                self.project_threads_table_state.select(Some(idx));
+                            }
+                        }
+                    }
+                    ProjectSubTab::Plans => {
+                        let selected = self.project_plans_table_state.selected();
+                        self.load_project_plans(&project_id)?;
+                        if let Some(idx) = selected {
+                            if idx < self.project_plans.len() {
+                                self.project_plans_table_state.select(Some(idx));
+                            }
+                        }
+                    }
+                    ProjectSubTab::Files => {
+                        // Files don't need refresh as frequently
+                    }
+                    ProjectSubTab::Overview => {
+                        // Overview doesn't need frequent refresh
+                    }
+                }
+            }
+            // Detail views and other modes: don't auto-refresh (would disrupt reading)
+            ViewMode::Detail { .. }
+            | ViewMode::PlanDetail { .. }
+            | ViewMode::PlanList { .. }
+            | ViewMode::Wrapped => {}
+        }
         Ok(())
     }
 
