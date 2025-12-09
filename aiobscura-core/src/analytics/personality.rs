@@ -123,7 +123,10 @@ impl UsageProfile {
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Return highest scoring personality
-        scores.first().map(|(p, _)| *p).unwrap_or(Personality::Explorer)
+        scores
+            .first()
+            .map(|(p, _)| *p)
+            .unwrap_or(Personality::Explorer)
     }
 
     fn archaeologist_score(&self) -> f64 {

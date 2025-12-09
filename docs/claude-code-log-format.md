@@ -30,7 +30,7 @@ Project paths are encoded by replacing `/` with `-`:
 
 | Original Path | Encoded Folder Name |
 |---------------|---------------------|
-| `/Users/kulesh/dev/aiobscura` | `-Users-kulesh-dev-aiobscura` |
+| `/home/user/dev/myproject` | `-home-user-dev-myproject` |
 | `/home/user/projects/myapp` | `-home-user-projects-myapp` |
 
 ### File Naming
@@ -53,7 +53,7 @@ Every record contains these fields:
   "sessionId": "session-uuid",
   "type": "assistant|user",
   "timestamp": "2025-12-06T18:04:55.986Z",
-  "cwd": "/Users/kulesh/dev/aiobscura",
+  "cwd": "/home/user/dev/myproject",
   "version": "2.0.59",
   "gitBranch": "main",
   "isSidechain": false,
@@ -178,7 +178,7 @@ The `message.content` field can be:
   "id": "toolu_01XYZ",
   "name": "Read",
   "input": {
-    "file_path": "/Users/kulesh/dev/aiobscura/src/main.rs"
+    "file_path": "/home/user/dev/myproject/src/main.rs"
   }
 }
 ```

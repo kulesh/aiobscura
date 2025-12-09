@@ -201,7 +201,10 @@ fn print_terminal(stats: &WrappedStats, fun_mode: bool) {
         }
     );
     if stats.streaks.longest_streak_days > 0 {
-        let streak_dates = match (&stats.streaks.longest_streak_start, &stats.streaks.longest_streak_end) {
+        let streak_dates = match (
+            &stats.streaks.longest_streak_start,
+            &stats.streaks.longest_streak_end,
+        ) {
             (Some(start), Some(end)) => {
                 format!(
                     " ({} - {})",
@@ -268,10 +271,7 @@ fn print_terminal(stats: &WrappedStats, fun_mode: bool) {
 
     // Personality (fun mode only)
     if let Some(personality) = &stats.personality {
-        println!(
-            "🎭 YOUR PERSONALITY: {}",
-            personality.name()
-        );
+        println!("🎭 YOUR PERSONALITY: {}", personality.name());
         println!("   \"{}\"", personality.tagline());
         println!();
     }
@@ -320,7 +320,10 @@ fn print_markdown(stats: &WrappedStats, fun_mode: bool) -> Result<()> {
             };
             if fun_mode {
                 if let Some(description) = desc {
-                    println!("{} **{}** - {} calls - *\"{}\"*", emoji, name, count, description);
+                    println!(
+                        "{} **{}** - {} calls - *\"{}\"*",
+                        emoji, name, count, description
+                    );
                 } else {
                     println!("{} **{}** - {} calls", emoji, name, count);
                 }
@@ -334,8 +337,14 @@ fn print_markdown(stats: &WrappedStats, fun_mode: bool) -> Result<()> {
     // Time Patterns
     println!("## Time Patterns");
     println!();
-    println!("- **Peak hour:** {}", TimePatterns::hour_display(stats.time_patterns.peak_hour));
-    println!("- **Busiest day:** {}", TimePatterns::day_name(stats.time_patterns.busiest_day));
+    println!(
+        "- **Peak hour:** {}",
+        TimePatterns::hour_display(stats.time_patterns.peak_hour)
+    );
+    println!(
+        "- **Busiest day:** {}",
+        TimePatterns::day_name(stats.time_patterns.busiest_day)
+    );
     if let Some(marathon) = &stats.time_patterns.marathon_session {
         let project = marathon.project_name.as_deref().unwrap_or("unknown");
         println!(
@@ -350,8 +359,14 @@ fn print_markdown(stats: &WrappedStats, fun_mode: bool) -> Result<()> {
     // Streaks
     println!("## Streaks");
     println!();
-    println!("- **Current streak:** {} days", stats.streaks.current_streak_days);
-    println!("- **Longest streak:** {} days", stats.streaks.longest_streak_days);
+    println!(
+        "- **Current streak:** {} days",
+        stats.streaks.current_streak_days
+    );
+    println!(
+        "- **Longest streak:** {} days",
+        stats.streaks.longest_streak_days
+    );
     println!(
         "- **Active days:** {} of {} ({:.0}%)",
         stats.streaks.active_days,
@@ -364,13 +379,24 @@ fn print_markdown(stats: &WrappedStats, fun_mode: bool) -> Result<()> {
     if let Some(trends) = &stats.trends {
         println!("## Trends vs Previous Period");
         println!();
-        println!(
-            "| Metric | Change |");
+        println!("| Metric | Change |");
         println!("|--------|--------|");
-        println!("| Sessions | {} |", TrendComparison::format_delta(trends.sessions_delta_pct));
-        println!("| Tokens | {} |", TrendComparison::format_delta(trends.tokens_delta_pct));
-        println!("| Tools | {} |", TrendComparison::format_delta(trends.tools_delta_pct));
-        println!("| Duration | {} |", TrendComparison::format_delta(trends.duration_delta_pct));
+        println!(
+            "| Sessions | {} |",
+            TrendComparison::format_delta(trends.sessions_delta_pct)
+        );
+        println!(
+            "| Tokens | {} |",
+            TrendComparison::format_delta(trends.tokens_delta_pct)
+        );
+        println!(
+            "| Tools | {} |",
+            TrendComparison::format_delta(trends.tools_delta_pct)
+        );
+        println!(
+            "| Duration | {} |",
+            TrendComparison::format_delta(trends.duration_delta_pct)
+        );
         println!();
     }
 
@@ -378,11 +404,7 @@ fn print_markdown(stats: &WrappedStats, fun_mode: bool) -> Result<()> {
     if let Some(personality) = &stats.personality {
         println!("## Your Coding Personality");
         println!();
-        println!(
-            "{} **{}**",
-            personality.emoji(),
-            personality.name()
-        );
+        println!("{} **{}**", personality.emoji(), personality.name());
         println!();
         println!("*\"{}\"*", personality.tagline());
         println!();

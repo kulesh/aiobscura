@@ -513,11 +513,11 @@ impl AssistantParser for ClaudeCodeParser {
     }
 
     fn extract_project_path(&self, file_path: &Path) -> Option<PathBuf> {
-        // Path format: ~/.claude/projects/-Users-kulesh-dev-aiobscura/session.jsonl
+        // Path format: ~/.claude/projects/-home-user-dev-myproject/session.jsonl
         // Project folder name is the encoded path with dashes
         let folder_name = file_path.parent()?.file_name()?.to_str()?;
 
-        // Convert "-Users-kulesh-dev-aiobscura" back to "/Users/kulesh/dev/aiobscura"
+        // Convert "-home-user-dev-myproject" back to "/home/user/dev/myproject"
         // The encoding replaces "/" with "-", so we need to reverse that
         // Note: This assumes paths don't contain literal dashes (which is not always true)
         // A more robust solution would need the original encoding scheme

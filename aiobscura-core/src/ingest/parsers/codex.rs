@@ -243,8 +243,7 @@ impl AssistantParser for CodexParser {
         // Session state - extract from path upfront for incremental parsing
         // (session_meta event may be skipped when resuming from checkpoint)
         let mut session_id: Option<String> = self.extract_session_id(ctx.path);
-        let mut thread_id: Option<String> =
-            session_id.as_ref().map(|sid| format!("{}-main", sid));
+        let mut thread_id: Option<String> = session_id.as_ref().map(|sid| format!("{}-main", sid));
         let mut model_id: Option<String> = None;
         let mut cwd: Option<String> = None;
         let mut git_info: Option<GitInfo> = None;
@@ -344,9 +343,7 @@ impl AssistantParser for CodexParser {
                         let sid = session_id
                             .clone()
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                        let tid = thread_id
-                            .clone()
-                            .unwrap_or_else(|| format!("{}-main", sid));
+                        let tid = thread_id.clone().unwrap_or_else(|| format!("{}-main", sid));
 
                         result.threads.push(Thread {
                             id: tid,

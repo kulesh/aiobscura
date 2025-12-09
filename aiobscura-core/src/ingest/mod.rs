@@ -102,7 +102,10 @@ pub struct MessageSummary {
 #[derive(Debug, Clone)]
 pub enum SkipReason {
     /// File was already fully parsed (checkpoint matches or exceeds file size)
-    AlreadyParsed { checkpoint_offset: u64, file_size: u64 },
+    AlreadyParsed {
+        checkpoint_offset: u64,
+        file_size: u64,
+    },
     /// File is empty
     EmptyFile,
     /// No new content since last parse

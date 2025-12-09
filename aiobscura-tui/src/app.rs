@@ -3,10 +3,14 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod, WrappedStats,
+    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod,
+    WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
-use aiobscura_core::{ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, SessionFilter, Thread, ThreadType};
+use aiobscura_core::{
+    ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, SessionFilter, Thread,
+    ThreadType,
+};
 use anyhow::Result;
 use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -269,12 +273,12 @@ impl App {
     fn update_snowflakes(&mut self, height: u16) {
         for (x, y, speed) in &mut self.snowflakes {
             // Only update every few frames based on speed
-            if self.animation_frame % (*speed as u64 * 2) == 0 {
+            if self.animation_frame.is_multiple_of(*speed as u64 * 2) {
                 *y = (*y + 1) % height;
 
                 // Add slight horizontal drift
-                if self.animation_frame % 7 == 0 {
-                    if *x > 0 && self.animation_frame % 2 == 0 {
+                if self.animation_frame.is_multiple_of(7) {
+                    if *x > 0 && self.animation_frame.is_multiple_of(2) {
                         *x -= 1;
                     } else if *x < 200 {
                         *x += 1;
@@ -327,10 +331,7 @@ impl App {
         let mut children_map: HashMap<String, Vec<usize>> = HashMap::new();
         for (idx, info) in all_threads.iter().enumerate() {
             if let Some(parent_id) = &info.thread.parent_thread_id {
-                children_map
-                    .entry(parent_id.clone())
-                    .or_default()
-                    .push(idx);
+                children_map.entry(parent_id.clone()).or_default().push(idx);
             }
         }
 
@@ -401,10 +402,8 @@ impl App {
 
                 // Add child threads (agents spawned by this main thread)
                 if let Some(child_indices) = children_map.get(&main_info.thread.id) {
-                    let mut children: Vec<&ThreadInfo> = child_indices
-                        .iter()
-                        .map(|&idx| &all_threads[idx])
-                        .collect();
+                    let mut children: Vec<&ThreadInfo> =
+                        child_indices.iter().map(|&idx| &all_threads[idx]).collect();
                     // Sort children by started_at
                     children.sort_by(|a, b| a.thread.started_at.cmp(&b.thread.started_at));
 
@@ -794,7 +793,11 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => {
                 // Will be clamped during rendering
                 if let Some(plan) = &self.selected_plan {
-                    let lines = plan.content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
+                    let lines = plan
+                        .content
+                        .as_ref()
+                        .map(|c| c.lines().count())
+                        .unwrap_or(0);
                     self.plan_scroll_offset = lines.saturating_sub(1);
                 }
             }
@@ -813,7 +816,11 @@ impl App {
         // Get the selected thread (from list or current detail view)
         let thread = if from_detail {
             // We're in detail view - find the thread by matching view state
-            if let ViewMode::Detail { thread_id, thread_name } = &self.view_mode {
+            if let ViewMode::Detail {
+                thread_id,
+                thread_name,
+            } = &self.view_mode
+            {
                 Some((thread_id.clone(), thread_name.clone()))
             } else {
                 None
@@ -822,7 +829,10 @@ impl App {
             // We're in list view - get selected thread
             self.table_state.selected().and_then(|idx| {
                 self.threads.get(idx).map(|t| {
-                    (t.id.clone(), format!("{} - {}", t.project_name, t.short_id()))
+                    (
+                        t.id.clone(),
+                        format!("{} - {}", t.project_name, t.short_id()),
+                    )
                 })
             })
         };
@@ -831,7 +841,11 @@ impl App {
             // Find the thread to get session_id
             if let Some(thread_row) = self.threads.iter().find(|t| t.id == thread_id) {
                 let session_id = thread_row.session_id.clone();
-                let session_name = format!("{} - {}", thread_row.project_name, &session_id[..8.min(session_id.len())]);
+                let session_name = format!(
+                    "{} - {}",
+                    thread_row.project_name,
+                    &session_id[..8.min(session_id.len())]
+                );
 
                 // Load plans for this session
                 if let Ok(plans) = self.db.get_plans_for_session(&session_id) {
@@ -863,7 +877,9 @@ impl App {
         } = &self.view_mode
         {
             if *came_from_detail {
-                if let (Some(thread_id), Some(thread_name)) = (return_thread_id.clone(), return_thread_name.clone()) {
+                if let (Some(thread_id), Some(thread_name)) =
+                    (return_thread_id.clone(), return_thread_name.clone())
+                {
                     // Reload messages and return to detail view
                     if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
                         self.messages = messages;
@@ -922,7 +938,11 @@ impl App {
             let session_id = plan.session_id.clone();
             // Find a thread with this session to get session name
             if let Some(thread) = self.threads.iter().find(|t| t.session_id == session_id) {
-                let session_name = format!("{} - {}", thread.project_name, &session_id[..8.min(session_id.len())]);
+                let session_name = format!(
+                    "{} - {}",
+                    thread.project_name,
+                    &session_id[..8.min(session_id.len())]
+                );
                 self.view_mode = ViewMode::PlanList {
                     session_id,
                     session_name,
@@ -1037,7 +1057,8 @@ impl App {
         let config = WrappedConfig::default();
         match generate_wrapped(&self.db, self.wrapped_period, &config) {
             Ok(stats) => {
-                self.wrapped_cache.insert(self.wrapped_period, stats.clone());
+                self.wrapped_cache
+                    .insert(self.wrapped_period, stats.clone());
                 self.wrapped_stats = Some(stats);
                 self.wrapped_card_index = 0;
                 self.view_mode = ViewMode::Wrapped;
@@ -1115,7 +1136,8 @@ impl App {
         // Cache miss - generate and store
         let config = WrappedConfig::default();
         if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
-            self.wrapped_cache.insert(self.wrapped_period, stats.clone());
+            self.wrapped_cache
+                .insert(self.wrapped_period, stats.clone());
             self.wrapped_stats = Some(stats);
             self.wrapped_card_index = 0;
         }
@@ -1173,7 +1195,8 @@ impl App {
         // Cache miss - generate and store
         let config = WrappedConfig::default();
         if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
-            self.wrapped_cache.insert(self.wrapped_period, stats.clone());
+            self.wrapped_cache
+                .insert(self.wrapped_period, stats.clone());
             self.wrapped_stats = Some(stats);
             self.wrapped_card_index = 0;
         }
@@ -1443,7 +1466,8 @@ impl App {
     /// Select the last project.
     fn select_last_project(&mut self) {
         if !self.projects.is_empty() {
-            self.project_table_state.select(Some(self.projects.len() - 1));
+            self.project_table_state
+                .select(Some(self.projects.len() - 1));
         }
     }
 
@@ -1488,7 +1512,10 @@ impl App {
     pub fn is_list_view(&self) -> bool {
         matches!(
             self.view_mode,
-            ViewMode::ProjectList | ViewMode::List | ViewMode::ProjectDetail { .. } | ViewMode::Live
+            ViewMode::ProjectList
+                | ViewMode::List
+                | ViewMode::ProjectDetail { .. }
+                | ViewMode::Live
         )
     }
 
@@ -1664,10 +1691,8 @@ impl App {
 
             // Add child threads (agents spawned by this main thread)
             if let Some(child_indices) = children_map.get(&main_info.thread.id) {
-                let mut children: Vec<&ThreadInfo> = child_indices
-                    .iter()
-                    .map(|&idx| &all_threads[idx])
-                    .collect();
+                let mut children: Vec<&ThreadInfo> =
+                    child_indices.iter().map(|&idx| &all_threads[idx]).collect();
                 // Sort children by started_at (oldest first, so they appear in chronological order)
                 children.sort_by(|a, b| a.thread.started_at.cmp(&b.thread.started_at));
 
@@ -1725,7 +1750,8 @@ impl App {
         }
 
         // Sort by modified_at (most recent first)
-        self.project_plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        self.project_plans
+            .sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
 
         // Select first if any
         self.project_plans_table_state = TableState::default();
@@ -1780,7 +1806,12 @@ impl App {
 
     /// Set the project sub-tab and load data if needed.
     fn set_project_sub_tab(&mut self, sub_tab: ProjectSubTab) {
-        if let ViewMode::ProjectDetail { project_id, project_name, sub_tab: current_tab } = &self.view_mode {
+        if let ViewMode::ProjectDetail {
+            project_id,
+            project_name,
+            sub_tab: current_tab,
+        } = &self.view_mode
+        {
             // Skip if already on this tab
             if *current_tab == sub_tab {
                 return;
@@ -1899,7 +1930,12 @@ impl App {
 
     /// Open the selected item in a project sub-tab.
     fn open_project_item(&mut self) {
-        if let ViewMode::ProjectDetail { sub_tab, project_id, project_name } = self.view_mode.clone() {
+        if let ViewMode::ProjectDetail {
+            sub_tab,
+            project_id,
+            project_name,
+        } = self.view_mode.clone()
+        {
             match sub_tab {
                 ProjectSubTab::Threads => {
                     // Open the selected thread in detail view
@@ -1907,7 +1943,8 @@ impl App {
                         if let Some(thread) = self.project_threads.get(idx) {
                             let thread_id = thread.id.clone();
                             let session_id = thread.session_id.clone();
-                            let thread_name = format!("{} - {}", thread.project_name, thread.short_id());
+                            let thread_name =
+                                format!("{} - {}", thread.project_name, thread.short_id());
 
                             // Load messages for this thread
                             if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
@@ -1915,7 +1952,8 @@ impl App {
                                 self.return_to_project = Some((project_id, project_name, sub_tab));
                                 self.messages = messages;
                                 self.scroll_offset = 0;
-                                self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
+                                self.thread_metadata =
+                                    self.load_thread_metadata(&thread_id, &session_id);
                                 self.view_mode = ViewMode::Detail {
                                     thread_id,
                                     thread_name,
@@ -1929,7 +1967,8 @@ impl App {
                     if let Some(idx) = self.project_plans_table_state.selected() {
                         if let Some(plan) = self.project_plans.get(idx) {
                             let plan_slug = plan.id.clone();
-                            let plan_title = plan.title.clone().unwrap_or_else(|| plan_slug.clone());
+                            let plan_title =
+                                plan.title.clone().unwrap_or_else(|| plan_slug.clone());
 
                             // Save return destination
                             self.return_to_project = Some((project_id, project_name, sub_tab));

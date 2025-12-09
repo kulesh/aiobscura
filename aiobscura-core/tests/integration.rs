@@ -651,9 +651,10 @@ fn test_codex_incremental_parsing_with_new_messages() {
     // Create a temp file with Codex naming convention (UUID in filename)
     let temp_dir = TempDir::new().unwrap();
     let session_uuid = "019b0113-9f8c-7410-af77-c78e77f3128b";
-    let path = temp_dir
-        .path()
-        .join(format!("rollout-2025-12-08T22-07-01-{}.jsonl", session_uuid));
+    let path = temp_dir.path().join(format!(
+        "rollout-2025-12-08T22-07-01-{}.jsonl",
+        session_uuid
+    ));
 
     // Write initial content: session_meta + one assistant message
     let initial_content = r#"{"timestamp":"2025-12-09T03:07:01.920Z","type":"session_meta","payload":{"id":"019b0113-9f8c-7410-af77-c78e77f3128b","cwd":"/test","git":{"branch":"main"}}}
@@ -706,7 +707,9 @@ fn test_codex_incremental_parsing_with_new_messages() {
         file_size: metadata2.len(),
         modified_at: chrono::Utc::now(),
     };
-    let result2 = parser.parse(&ctx2).expect("incremental parse should succeed");
+    let result2 = parser
+        .parse(&ctx2)
+        .expect("incremental parse should succeed");
 
     // Should have found exactly 1 new message
     assert_eq!(

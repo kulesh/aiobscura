@@ -38,7 +38,8 @@ fn main() -> Result<()> {
 
     // Create app and start in Live view (default tab)
     let mut app = App::new(db);
-    app.start_live_view().context("failed to load live messages")?;
+    app.start_live_view()
+        .context("failed to load live messages")?;
 
     // Setup terminal
     enable_raw_mode().context("failed to enable raw mode")?;

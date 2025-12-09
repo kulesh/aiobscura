@@ -195,7 +195,10 @@ fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
 
     let poll_duration = Duration::from_millis(args.poll);
 
-    println!("Watch mode active (poll every {}ms). Press Ctrl+C to stop.", args.poll);
+    println!(
+        "Watch mode active (poll every {}ms). Press Ctrl+C to stop.",
+        args.poll
+    );
     println!();
 
     let mut iteration = 0u64;
@@ -313,7 +316,7 @@ fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: u8) {
 
 /// Shorten a path for display by abbreviating the home directory
 fn shorten_path(path: &std::path::Path) -> String {
-    if let Some(home) = std::env::var("HOME").ok() {
+    if let Ok(home) = std::env::var("HOME") {
         if let Ok(suffix) = path.strip_prefix(&home) {
             return format!("~/{}", suffix.display());
         }

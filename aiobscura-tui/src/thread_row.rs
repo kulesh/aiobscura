@@ -63,5 +63,4 @@ impl ThreadRow {
             None => "—".to_string(),
         }
     }
-
 }

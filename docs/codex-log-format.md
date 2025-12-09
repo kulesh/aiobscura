@@ -69,7 +69,7 @@ First record in the file, contains session initialization data:
   "payload": {
     "id": "019ab86e-1e83-75b0-b2d7-d335492e7026",
     "timestamp": "2025-11-25T00:33:35.875Z",
-    "cwd": "/Users/kulesh/dev/project",
+    "cwd": "/home/user/dev/project",
     "originator": "codex_cli_rs",
     "cli_version": "0.63.0",
     "instructions": "# Agent Guidelines\n...",
@@ -334,7 +334,7 @@ Environment snapshot at each conversation turn:
   "timestamp": "2025-11-25T00:35:56.773Z",
   "type": "turn_context",
   "payload": {
-    "cwd": "/Users/kulesh/dev/project",
+    "cwd": "/home/user/dev/project",
     "approval_policy": "on-request",
     "sandbox_policy": {
       "type": "workspace-write",
@@ -495,9 +495,9 @@ pub enum Checkpoint {
 A minimal session with user prompt and tool call:
 
 ```jsonl
-{"timestamp":"2025-11-25T00:33:35.897Z","type":"session_meta","payload":{"id":"019ab86e-1e83-75b0-b2d7-d335492e7026","cwd":"/Users/kulesh/dev/project","originator":"codex_cli_rs","cli_version":"0.63.0","source":"cli","model_provider":"openai","git":{"branch":"main"}}}
+{"timestamp":"2025-11-25T00:33:35.897Z","type":"session_meta","payload":{"id":"019ab86e-1e83-75b0-b2d7-d335492e7026","cwd":"/home/user/dev/project","originator":"codex_cli_rs","cli_version":"0.63.0","source":"cli","model_provider":"openai","git":{"branch":"main"}}}
 {"timestamp":"2025-11-25T00:35:56.773Z","type":"event_msg","payload":{"type":"user_message","message":"List the files","images":[]}}
-{"timestamp":"2025-11-25T00:35:56.773Z","type":"turn_context","payload":{"cwd":"/Users/kulesh/dev/project","model":"gpt-5.1-codex-max"}}
+{"timestamp":"2025-11-25T00:35:56.773Z","type":"turn_context","payload":{"cwd":"/home/user/dev/project","model":"gpt-5.1-codex-max"}}
 {"timestamp":"2025-11-25T00:36:05.711Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"ls -la\"}","call_id":"call_abc123"}}
 {"timestamp":"2025-11-25T00:36:05.711Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_abc123","output":"Exit code: 0\nOutput:\ntotal 8\ndrwxr-xr-x 3 user staff 96 Nov 25 00:33 ."}}
 ```

@@ -1,7 +1,10 @@
 //! UI rendering for the TUI.
 
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
-use aiobscura_core::{ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus, ThreadType};
+use aiobscura_core::{
+    ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus,
+    ThreadType,
+};
 use chrono::Local;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -9,8 +12,8 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Sparkline, Table, Wrap,
+        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Sparkline, Table, Wrap,
     },
     Frame,
 };
@@ -72,9 +75,7 @@ const BORDER_PROJECT: Color = Color::Rgb(100, 180, 100);
 pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.view_mode {
         ViewMode::List => render_list_view(frame, app),
-        ViewMode::Detail { thread_name, .. } => {
-            render_detail_view(frame, app, thread_name.clone())
-        }
+        ViewMode::Detail { thread_name, .. } => render_detail_view(frame, app, thread_name.clone()),
         ViewMode::PlanList { session_name, .. } => {
             render_plan_list_view(frame, app, session_name.clone())
         }
@@ -84,9 +85,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ViewMode::Wrapped => render_wrapped_view(frame, app),
         ViewMode::Live => render_live_view(frame, app),
         ViewMode::ProjectList => render_project_list_view(frame, app),
-        ViewMode::ProjectDetail { project_name, sub_tab, .. } => {
-            render_project_detail_view(frame, app, project_name.clone(), *sub_tab)
-        }
+        ViewMode::ProjectDetail {
+            project_name,
+            sub_tab,
+            ..
+        } => render_project_detail_view(frame, app, project_name.clone(), *sub_tab),
     }
 }
 
@@ -152,17 +155,31 @@ fn render_tab_header(frame: &mut Frame, active: ActiveTab, area: Rect) {
     .split(area);
 
     // App name
-    let app_name = Paragraph::new(" aiobscura")
-        .style(Style::default().fg(Color::Cyan).bold());
+    let app_name = Paragraph::new(" aiobscura").style(Style::default().fg(Color::Cyan).bold());
     frame.render_widget(app_name, chunks[0]);
 
     // Tab styling
-    let active_style = Style::default().fg(Color::Cyan).bold().add_modifier(Modifier::UNDERLINED);
+    let active_style = Style::default()
+        .fg(Color::Cyan)
+        .bold()
+        .add_modifier(Modifier::UNDERLINED);
     let inactive_style = Style::default().fg(Color::DarkGray);
 
-    let live_style = if active == ActiveTab::Live { active_style } else { inactive_style };
-    let projects_style = if active == ActiveTab::Projects { active_style } else { inactive_style };
-    let threads_style = if active == ActiveTab::Threads { active_style } else { inactive_style };
+    let live_style = if active == ActiveTab::Live {
+        active_style
+    } else {
+        inactive_style
+    };
+    let projects_style = if active == ActiveTab::Projects {
+        active_style
+    } else {
+        inactive_style
+    };
+    let threads_style = if active == ActiveTab::Threads {
+        active_style
+    } else {
+        inactive_style
+    };
 
     let tabs = Line::from(vec![
         Span::styled(" Live ", live_style),
@@ -172,8 +189,7 @@ fn render_tab_header(frame: &mut Frame, active: ActiveTab, area: Rect) {
         Span::styled(" Threads ", threads_style),
     ]);
 
-    let tabs_para = Paragraph::new(tabs)
-        .block(Block::default().borders(Borders::BOTTOM));
+    let tabs_para = Paragraph::new(tabs).block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(tabs_para, chunks[1]);
 }
 
@@ -209,7 +225,10 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
         row2_spans.push(Span::styled("CWD: ", Style::default().fg(LABEL_COLOR)));
         row2_spans.push(Span::styled(cwd_display, Style::default().fg(Color::White)));
         if let Some(branch) = &meta.git_branch {
-            row2_spans.push(Span::styled(format!(" ({})", branch), Style::default().fg(Color::Yellow)));
+            row2_spans.push(Span::styled(
+                format!(" ({})", branch),
+                Style::default().fg(Color::Yellow),
+            ));
         }
         row2_spans.push(Span::raw("  "));
     }
@@ -217,14 +236,20 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     // Model
     if let Some(model) = &meta.model_name {
         row2_spans.push(Span::styled("Model: ", Style::default().fg(LABEL_COLOR)));
-        row2_spans.push(Span::styled(model.clone(), Style::default().fg(Color::Cyan)));
+        row2_spans.push(Span::styled(
+            model.clone(),
+            Style::default().fg(Color::Cyan),
+        ));
         row2_spans.push(Span::raw("  "));
     }
 
     // Duration
     let duration_display = format_duration(meta.duration_secs);
     row2_spans.push(Span::styled("Duration: ", Style::default().fg(LABEL_COLOR)));
-    row2_spans.push(Span::styled(duration_display, Style::default().fg(Color::White)));
+    row2_spans.push(Span::styled(
+        duration_display,
+        Style::default().fg(Color::White),
+    ));
 
     lines.push(Line::from(row2_spans));
 
@@ -232,16 +257,25 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     let tools_display = format_tool_stats(&meta.tool_stats);
     lines.push(Line::from(vec![
         Span::styled("Msgs: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(meta.message_count.to_string(), Style::default().fg(Color::White)),
+        Span::styled(
+            meta.message_count.to_string(),
+            Style::default().fg(Color::White),
+        ),
         Span::raw("  "),
         Span::styled("Agents: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(meta.agent_count.to_string(), Style::default().fg(Color::White)),
+        Span::styled(
+            meta.agent_count.to_string(),
+            Style::default().fg(Color::White),
+        ),
         Span::raw("  "),
         Span::styled("Tools: ", Style::default().fg(LABEL_COLOR)),
         Span::styled(tools_display, Style::default().fg(Color::White)),
         Span::raw("  "),
         Span::styled("Plans: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(meta.plan_count.to_string(), Style::default().fg(Color::Magenta)),
+        Span::styled(
+            meta.plan_count.to_string(),
+            Style::default().fg(Color::Magenta),
+        ),
         Span::styled(" (p)", Style::default().fg(Color::DarkGray)),
     ]));
 
@@ -279,7 +313,7 @@ fn format_path(path: &Option<String>) -> String {
             if display.len() > 60 {
                 let parts: Vec<&str> = display.split('/').collect();
                 if parts.len() > 3 {
-                    format!(".../{}", parts[parts.len()-3..].join("/"))
+                    format!(".../{}", parts[parts.len() - 3..].join("/"))
                 } else {
                     display
                 }
@@ -332,7 +366,8 @@ fn format_tool_stats(stats: &aiobscura_core::db::ToolStats) -> String {
         return "0".to_string();
     }
 
-    let top_tools: Vec<String> = stats.breakdown
+    let top_tools: Vec<String> = stats
+        .breakdown
         .iter()
         .take(3)
         .map(|(name, count)| format!("{}:{}", name, count))
@@ -357,7 +392,8 @@ fn format_file_stats(stats: &aiobscura_core::db::FileStats) -> String {
     }
 
     // Get basenames and top 2-3 files
-    let top_files: Vec<String> = stats.breakdown
+    let top_files: Vec<String> = stats
+        .breakdown
         .iter()
         .take(3)
         .map(|(path, count)| {
@@ -372,16 +408,32 @@ fn format_file_stats(stats: &aiobscura_core::db::FileStats) -> String {
     if top_files.is_empty() {
         format!("{} modified", stats.total_files)
     } else {
-        let extra = if stats.breakdown.len() > 3 { " ..." } else { "" };
-        format!("{} modified ({}{})", stats.total_files, top_files.join(", "), extra)
+        let extra = if stats.breakdown.len() > 3 {
+            " ..."
+        } else {
+            ""
+        };
+        format!(
+            "{} modified ({}{})",
+            stats.total_files,
+            top_files.join(", "),
+            extra
+        )
     }
 }
 
 /// Render the threads table.
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let header_cells = ["Last Updated", "Thread ID", "Project", "Assistant", "Type", "Msgs"]
-        .into_iter()
-        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header_cells = [
+        "Last Updated",
+        "Thread ID",
+        "Project",
+        "Assistant",
+        "Type",
+        "Msgs",
+    ]
+    .into_iter()
+    .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
     let header = Row::new(header_cells).height(1);
 
     let rows = app.threads.iter().map(|thread| {
@@ -429,12 +481,12 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     });
 
     let widths = [
-        Constraint::Length(12),  // Last Updated
-        Constraint::Length(10),  // Thread ID
-        Constraint::Fill(1),     // Project (flexible)
-        Constraint::Length(12),  // Assistant
-        Constraint::Length(10),  // Type (with indent space)
-        Constraint::Length(6),   // Msgs
+        Constraint::Length(12), // Last Updated
+        Constraint::Length(10), // Thread ID
+        Constraint::Fill(1),    // Project (flexible)
+        Constraint::Length(12), // Assistant
+        Constraint::Length(10), // Type (with indent space)
+        Constraint::Length(6),  // Msgs
     ];
 
     let table = Table::new(rows, widths)
@@ -500,8 +552,7 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         .begin_symbol(Some("↑"))
         .end_symbol(Some("↓"));
 
-    let mut scrollbar_state =
-        ScrollbarState::new(lines.len()).position(app.scroll_offset);
+    let mut scrollbar_state = ScrollbarState::new(lines.len()).position(app.scroll_offset);
 
     frame.render_stateful_widget(
         scrollbar,
@@ -536,7 +587,10 @@ fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static
     lines.push(Line::from(vec![
         Span::raw(format!("{} ", icon)),
         Span::styled(label, style),
-        Span::styled(format!(" {}", counter), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" {}", counter),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     // Content
@@ -571,8 +625,14 @@ fn format_tool_message(
     lines.push(Line::from(vec![
         Span::raw("🔧 "),
         Span::styled("Tool: ", Style::default().fg(Color::Yellow)),
-        Span::styled(tool_name.to_string(), Style::default().fg(Color::Yellow).bold()),
-        Span::styled(format!(" {}", counter), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            tool_name.to_string(),
+            Style::default().fg(Color::Yellow).bold(),
+        ),
+        Span::styled(
+            format!(" {}", counter),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     // Content
@@ -616,11 +676,7 @@ fn get_message_content(msg: &Message) -> String {
 /// Render the footer for list view.
 fn render_list_footer(frame: &mut Frame, app: &App, area: Rect) {
     let thread_count = app.threads.len();
-    let selected = app
-        .table_state
-        .selected()
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let selected = app.table_state.selected().map(|i| i + 1).unwrap_or(0);
 
     let mut footer_spans = vec![
         Span::styled(" Tab", Style::default().fg(Color::Yellow)),
@@ -643,7 +699,12 @@ fn render_list_footer(frame: &mut Frame, app: &App, area: Rect) {
     // Show live indicator when new data was recently detected
     if app.should_show_live_indicator() {
         footer_spans.push(Span::raw(" │ "));
-        footer_spans.push(Span::styled("● LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+        footer_spans.push(Span::styled(
+            "● LIVE",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
 
     let footer = Line::from(footer_spans);
@@ -748,10 +809,10 @@ fn render_plan_table(frame: &mut Frame, app: &mut App, area: Rect) {
     });
 
     let widths = [
-        Constraint::Length(20),  // Slug
-        Constraint::Fill(1),     // Title (flexible)
-        Constraint::Length(12),  // Status
-        Constraint::Length(12),  // Modified
+        Constraint::Length(20), // Slug
+        Constraint::Fill(1),    // Title (flexible)
+        Constraint::Length(12), // Status
+        Constraint::Length(12), // Modified
     ];
 
     let table = Table::new(rows, widths)
@@ -830,7 +891,9 @@ fn render_plan_content(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Clamp scroll offset
-    let max_scroll = lines.len().saturating_sub(area.height.saturating_sub(2) as usize);
+    let max_scroll = lines
+        .len()
+        .saturating_sub(area.height.saturating_sub(2) as usize);
     if app.plan_scroll_offset > max_scroll {
         app.plan_scroll_offset = max_scroll;
     }
@@ -854,8 +917,7 @@ fn render_plan_content(frame: &mut Frame, app: &mut App, area: Rect) {
         .begin_symbol(Some("↑"))
         .end_symbol(Some("↓"));
 
-    let mut scrollbar_state =
-        ScrollbarState::new(lines.len()).position(app.plan_scroll_offset);
+    let mut scrollbar_state = ScrollbarState::new(lines.len()).position(app.plan_scroll_offset);
 
     frame.render_stateful_widget(
         scrollbar,
@@ -870,11 +932,7 @@ fn render_plan_content(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Render the footer for plan list view.
 fn render_plan_list_footer(frame: &mut Frame, app: &App, area: Rect) {
     let plan_count = app.plans.len();
-    let selected = app
-        .plan_table_state
-        .selected()
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let selected = app.plan_table_state.selected().map(|i| i + 1).unwrap_or(0);
 
     let footer = Line::from(vec![
         Span::styled(" Esc", Style::default().fg(Color::Yellow)),
@@ -1010,7 +1068,7 @@ fn render_snowflakes(frame: &mut Frame, app: &App, area: Rect) {
 
         // Twinkle effect - some snowflakes blink
         let visible = if i % 5 == 0 {
-            app.animation_frame % 4 != 0
+            !app.animation_frame.is_multiple_of(4)
         } else {
             true
         };
@@ -1112,7 +1170,10 @@ fn render_wrapped_title_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
     lines.push(Line::from(vec![
         Span::styled("        ✨ ", Style::default().fg(WRAPPED_GOLD)),
         Span::styled(
-            format!("YOUR {} AI WRAPPED", stats.period.display_name().to_uppercase()),
+            format!(
+                "YOUR {} AI WRAPPED",
+                stats.period.display_name().to_uppercase()
+            ),
             Style::default().fg(WRAPPED_CYAN).bold(),
         ),
         Span::styled(" ✨", Style::default().fg(WRAPPED_GOLD)),
@@ -1183,7 +1244,10 @@ fn render_wrapped_title_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_CYAN))
-        .title(Span::styled(" ★ The Numbers ★ ", Style::default().fg(WRAPPED_GOLD).bold()));
+        .title(Span::styled(
+            " ★ The Numbers ★ ",
+            Style::default().fg(WRAPPED_GOLD).bold(),
+        ));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -1203,7 +1267,13 @@ fn render_wrapped_tools_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
         ));
     } else {
         // Find max count for bar scaling
-        let max_count = stats.tools.top_tools.iter().map(|(_, c, _)| *c).max().unwrap_or(1);
+        let max_count = stats
+            .tools
+            .top_tools
+            .iter()
+            .map(|(_, c, _)| *c)
+            .max()
+            .unwrap_or(1);
 
         for (i, (name, count, desc)) in stats.tools.top_tools.iter().enumerate() {
             // Medal emoji for top 3
@@ -1223,8 +1293,14 @@ fn render_wrapped_tools_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
 
             let spans = vec![
                 Span::styled(medal, Style::default().fg(rank_color)),
-                Span::styled(format!("{:<10}", name), Style::default().fg(WRAPPED_WHITE).bold()),
-                Span::styled(format!("{:>6} ", count), Style::default().fg(rank_color).bold()),
+                Span::styled(
+                    format!("{:<10}", name),
+                    Style::default().fg(WRAPPED_WHITE).bold(),
+                ),
+                Span::styled(
+                    format!("{:>6} ", count),
+                    Style::default().fg(rank_color).bold(),
+                ),
                 Span::styled(bar, Style::default().fg(rank_color)),
             ];
 
@@ -1249,7 +1325,10 @@ fn render_wrapped_tools_card(frame: &mut Frame, stats: &WrappedStats, area: Rect
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_GOLD))
-        .title(Span::styled(" 🏆 Top Tools ", Style::default().fg(WRAPPED_GOLD).bold()));
+        .title(Span::styled(
+            " 🏆 Top Tools ",
+            Style::default().fg(WRAPPED_GOLD).bold(),
+        ));
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
@@ -1262,7 +1341,10 @@ fn render_wrapped_time_card(frame: &mut Frame, stats: &WrappedStats, area: Rect)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_PURPLE))
-        .title(Span::styled(" ⏰ Time Patterns ", Style::default().fg(WRAPPED_PURPLE).bold()));
+        .title(Span::styled(
+            " ⏰ Time Patterns ",
+            Style::default().fg(WRAPPED_PURPLE).bold(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1330,7 +1412,9 @@ fn render_wrapped_time_card(frame: &mut Frame, stats: &WrappedStats, area: Rect)
     frame.render_widget(text, chunks[0]);
 
     // Sparkline section
-    let sparkline_data: Vec<u64> = stats.time_patterns.hourly_distribution
+    let sparkline_data: Vec<u64> = stats
+        .time_patterns
+        .hourly_distribution
         .iter()
         .map(|&x| x as u64)
         .collect();
@@ -1342,9 +1426,10 @@ fn render_wrapped_time_card(frame: &mut Frame, stats: &WrappedStats, area: Rect)
     ])
     .split(chunks[1]);
 
-    let label = Paragraph::new(Line::from(vec![
-        Span::styled("   Activity by hour: ", Style::default().fg(WRAPPED_DIM)),
-    ]));
+    let label = Paragraph::new(Line::from(vec![Span::styled(
+        "   Activity by hour: ",
+        Style::default().fg(WRAPPED_DIM),
+    )]));
     frame.render_widget(label, sparkline_chunks[0]);
 
     // Use Sparkline widget
@@ -1362,9 +1447,10 @@ fn render_wrapped_time_card(frame: &mut Frame, stats: &WrappedStats, area: Rect)
     };
     frame.render_widget(sparkline, sparkline_area);
 
-    let time_labels = Paragraph::new(Line::from(vec![
-        Span::styled("   0h        6h        12h       18h       23h", Style::default().fg(WRAPPED_DIM)),
-    ]));
+    let time_labels = Paragraph::new(Line::from(vec![Span::styled(
+        "   0h        6h        12h       18h       23h",
+        Style::default().fg(WRAPPED_DIM),
+    )]));
     frame.render_widget(time_labels, sparkline_chunks[2]);
 }
 
@@ -1375,7 +1461,10 @@ fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Re
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_CORAL))
-        .title(Span::styled(" 🔥 Streaks ", Style::default().fg(WRAPPED_CORAL).bold()));
+        .title(Span::styled(
+            " 🔥 Streaks ",
+            Style::default().fg(WRAPPED_CORAL).bold(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1408,7 +1497,14 @@ fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Re
             Style::default().fg(WRAPPED_GOLD).bold(),
         ),
         Span::styled(
-            format!(" day{}", if stats.streaks.current_streak_days == 1 { "" } else { "s" }),
+            format!(
+                " day{}",
+                if stats.streaks.current_streak_days == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ),
             Style::default().fg(WRAPPED_WHITE),
         ),
         Span::styled(fire_emoji, Style::default()),
@@ -1416,7 +1512,10 @@ fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Re
 
     // Longest streak with celebration
     if stats.streaks.longest_streak_days > 0 {
-        let streak_dates = match (&stats.streaks.longest_streak_start, &stats.streaks.longest_streak_end) {
+        let streak_dates = match (
+            &stats.streaks.longest_streak_start,
+            &stats.streaks.longest_streak_end,
+        ) {
             (Some(start), Some(end)) => {
                 format!(
                     " ({} – {})",
@@ -1433,7 +1532,14 @@ fn render_wrapped_streaks_card(frame: &mut Frame, stats: &WrappedStats, area: Re
                 Style::default().fg(WRAPPED_CYAN).bold(),
             ),
             Span::styled(
-                format!(" day{}", if stats.streaks.longest_streak_days == 1 { "" } else { "s" }),
+                format!(
+                    " day{}",
+                    if stats.streaks.longest_streak_days == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
                 Style::default().fg(WRAPPED_WHITE),
             ),
             Span::styled(streak_dates, Style::default().fg(WRAPPED_DIM)),
@@ -1503,7 +1609,8 @@ fn render_wrapped_projects_card(frame: &mut Frame, stats: &WrappedStats, area: R
         for (i, project) in stats.projects.iter().take(5).enumerate() {
             // Visual bar showing relative activity
             let bar_width = 15;
-            let filled = (((project.tokens as f64 / max_tokens as f64) * bar_width as f64) as usize).max(1);
+            let filled =
+                (((project.tokens as f64 / max_tokens as f64) * bar_width as f64) as usize).max(1);
             let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
 
             // Rank indicator with special treatment for #1
@@ -1511,7 +1618,11 @@ fn render_wrapped_projects_card(frame: &mut Frame, stats: &WrappedStats, area: R
                 0 => ("  🏆 ", WRAPPED_GOLD, WRAPPED_GOLD),
                 1 => ("   2 ", WRAPPED_SILVER, WRAPPED_SILVER),
                 2 => ("   3 ", WRAPPED_BRONZE, WRAPPED_BRONZE),
-                _ => (if i == 3 { "   4 " } else { "   5 " }, WRAPPED_DIM, WRAPPED_DIM),
+                _ => (
+                    if i == 3 { "   4 " } else { "   5 " },
+                    WRAPPED_DIM,
+                    WRAPPED_DIM,
+                ),
             };
 
             lines.push(Line::from(vec![
@@ -1542,7 +1653,10 @@ fn render_wrapped_projects_card(frame: &mut Frame, stats: &WrappedStats, area: R
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_LIME))
-        .title(Span::styled(" 📁 Top Projects ", Style::default().fg(WRAPPED_LIME).bold()));
+        .title(Span::styled(
+            " 📁 Top Projects ",
+            Style::default().fg(WRAPPED_LIME).bold(),
+        ));
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
@@ -1554,9 +1668,10 @@ fn render_wrapped_trends_card(frame: &mut Frame, stats: &WrappedStats, area: Rec
     lines.push(Line::raw(""));
 
     if let Some(trends) = &stats.trends {
-        lines.push(Line::from(vec![
-            Span::styled("   Compared to previous period:", Style::default().fg(WRAPPED_DIM)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "   Compared to previous period:",
+            Style::default().fg(WRAPPED_DIM),
+        )]));
         lines.push(Line::raw(""));
 
         // Helper function to format trend with arrow
@@ -1596,9 +1711,10 @@ fn render_wrapped_trends_card(frame: &mut Frame, stats: &WrappedStats, area: Rec
         } else {
             ("💤 Taking it easy", WRAPPED_DIM)
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("   {}", message.0), Style::default().fg(message.1)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("   {}", message.0),
+            Style::default().fg(message.1),
+        )]));
     } else {
         lines.push(Line::styled(
             "     No previous period data available.",
@@ -1610,7 +1726,10 @@ fn render_wrapped_trends_card(frame: &mut Frame, stats: &WrappedStats, area: Rec
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(WRAPPED_CYAN))
-        .title(Span::styled(" 📈 vs Previous Period ", Style::default().fg(WRAPPED_CYAN).bold()));
+        .title(Span::styled(
+            " 📈 vs Previous Period ",
+            Style::default().fg(WRAPPED_CYAN).bold(),
+        ));
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
@@ -1692,12 +1811,10 @@ fn render_wrapped_personality_card(frame: &mut Frame, stats: &WrappedStats, area
         frame.render_widget(name_para, chunks[5]);
 
         // Tagline in styled italic
-        let tagline = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("\"{}\"", personality.tagline()),
-                Style::default().fg(WRAPPED_WHITE).italic(),
-            ),
-        ]))
+        let tagline = Paragraph::new(Line::from(vec![Span::styled(
+            format!("\"{}\"", personality.tagline()),
+            Style::default().fg(WRAPPED_WHITE).italic(),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(tagline, chunks[7]);
     } else {
@@ -1749,7 +1866,10 @@ fn render_wrapped_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("j/k", Style::default().fg(WRAPPED_GOLD)),
         Span::styled(" months  ", Style::default().fg(WRAPPED_DIM)),
         Span::styled("m", Style::default().fg(WRAPPED_GOLD)),
-        Span::styled(format!(" {} ", period_hint), Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format!(" {} ", period_hint),
+            Style::default().fg(WRAPPED_DIM),
+        ),
         Span::styled("│ ", Style::default().fg(WRAPPED_DIM)),
     ];
     footer_spans.extend(dots);
@@ -1817,8 +1937,8 @@ fn render_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(paragraph, inner);
     } else {
         // No stats available
-        let placeholder = Paragraph::new("Loading activity data...")
-            .style(Style::default().fg(WRAPPED_DIM));
+        let placeholder =
+            Paragraph::new("Loading activity data...").style(Style::default().fg(WRAPPED_DIM));
         frame.render_widget(placeholder, inner);
     }
 }
@@ -1832,9 +1952,9 @@ fn render_heatmap_spans(daily_activity: &[i64; 28]) -> Vec<Span<'static>> {
     for (i, &count) in daily_activity.iter().enumerate() {
         let (ch, color) = match count {
             0 => ('░', WRAPPED_DIM),
-            1..=5 => ('▒', Color::Rgb(0, 100, 0)),   // Dark green
-            6..=15 => ('▓', Color::Rgb(0, 180, 0)),  // Medium green
-            _ => ('█', WRAPPED_LIME),                // Bright green
+            1..=5 => ('▒', Color::Rgb(0, 100, 0)), // Dark green
+            6..=15 => ('▓', Color::Rgb(0, 180, 0)), // Medium green
+            _ => ('█', WRAPPED_LIME),              // Bright green
         };
 
         spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
@@ -1892,10 +2012,7 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
             // Row 3: Peak patterns
             Line::from(vec![
                 Span::raw("Peak: "),
-                Span::styled(
-                    stats.format_peak_hour(),
-                    Style::default().fg(WRAPPED_CORAL),
-                ),
+                Span::styled(stats.format_peak_hour(), Style::default().fg(WRAPPED_CORAL)),
                 Span::raw("  Busiest: "),
                 Span::styled(
                     stats.format_busiest_day(),
@@ -1908,8 +2025,8 @@ fn render_stats_panel(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(paragraph, inner);
     } else {
         // No stats available
-        let placeholder = Paragraph::new("Loading stats...")
-            .style(Style::default().fg(WRAPPED_DIM));
+        let placeholder =
+            Paragraph::new("Loading stats...").style(Style::default().fg(WRAPPED_DIM));
         frame.render_widget(placeholder, inner);
     }
 }
@@ -1945,15 +2062,20 @@ fn render_project_list_view(frame: &mut Frame, app: &mut App) {
 }
 
 /// Render the project detail view.
-fn render_project_detail_view(frame: &mut Frame, app: &mut App, project_name: String, sub_tab: ProjectSubTab) {
+fn render_project_detail_view(
+    frame: &mut Frame,
+    app: &mut App,
+    project_name: String,
+    sub_tab: ProjectSubTab,
+) {
     let area = frame.area();
 
     // Layout: header, sub-tabs, content, footer
     let chunks = Layout::vertical([
-        Constraint::Length(3),  // Header
-        Constraint::Length(2),  // Sub-tab bar
-        Constraint::Min(10),    // Content
-        Constraint::Length(1),  // Footer
+        Constraint::Length(3), // Header
+        Constraint::Length(2), // Sub-tab bar
+        Constraint::Min(10),   // Content
+        Constraint::Length(1), // Footer
     ])
     .split(area);
 
@@ -2022,7 +2144,7 @@ fn render_project_table(frame: &mut Frame, app: &mut App, area: Rect) {
         // Format last activity
         let active_display = project
             .last_activity
-            .map(|ts| format_relative_time(ts))
+            .map(format_relative_time)
             .unwrap_or_else(|| "—".to_string());
 
         Row::new([
@@ -2035,11 +2157,11 @@ fn render_project_table(frame: &mut Frame, app: &mut App, area: Rect) {
     });
 
     let widths = [
-        Constraint::Fill(1),     // Project name (flexible)
-        Constraint::Length(32),  // Path
-        Constraint::Length(10),  // Sessions
-        Constraint::Length(10),  // Tokens
-        Constraint::Length(12),  // Active
+        Constraint::Fill(1),    // Project name (flexible)
+        Constraint::Length(32), // Path
+        Constraint::Length(10), // Sessions
+        Constraint::Length(10), // Tokens
+        Constraint::Length(12), // Active
     ];
 
     let table = Table::new(rows, widths)
@@ -2063,7 +2185,11 @@ fn render_project_table(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Render the project overview section.
-fn render_project_overview(frame: &mut Frame, stats: &aiobscura_core::analytics::ProjectStats, area: Rect) {
+fn render_project_overview(
+    frame: &mut Frame,
+    stats: &aiobscura_core::analytics::ProjectStats,
+    area: Rect,
+) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Row 1: Path
@@ -2081,11 +2207,15 @@ fn render_project_overview(frame: &mut Frame, stats: &aiobscura_core::analytics:
     // Row 2: First Session | Last Active
     let first_session = stats
         .first_session
-        .map(|ts| ts.with_timezone(&chrono::Local).format("%b %d, %Y").to_string())
+        .map(|ts| {
+            ts.with_timezone(&chrono::Local)
+                .format("%b %d, %Y")
+                .to_string()
+        })
         .unwrap_or_else(|| "—".to_string());
     let last_active = stats
         .last_activity
-        .map(|ts| format_relative_time(ts))
+        .map(format_relative_time)
         .unwrap_or_else(|| "—".to_string());
 
     lines.push(Line::from(vec![
@@ -2102,7 +2232,10 @@ fn render_project_overview(frame: &mut Frame, stats: &aiobscura_core::analytics:
         Span::styled(stats.formatted_duration(), Style::default().fg(Color::Cyan)),
         Span::raw("    "),
         Span::styled("Sessions: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(stats.session_count.to_string(), Style::default().fg(Color::White)),
+        Span::styled(
+            stats.session_count.to_string(),
+            Style::default().fg(Color::White),
+        ),
     ]));
 
     // Row 4: Tokens | Agents | Plans
@@ -2116,10 +2249,16 @@ fn render_project_overview(frame: &mut Frame, stats: &aiobscura_core::analytics:
         Span::styled(tokens_display, Style::default().fg(WRAPPED_CYAN)),
         Span::raw("    "),
         Span::styled("Agents: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(stats.agents_spawned.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            stats.agents_spawned.to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("    "),
         Span::styled("Plans: ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(stats.plans_created.to_string(), Style::default().fg(Color::Magenta)),
+        Span::styled(
+            stats.plans_created.to_string(),
+            Style::default().fg(Color::Magenta),
+        ),
     ]));
 
     let paragraph = Paragraph::new(lines).block(
@@ -2134,7 +2273,11 @@ fn render_project_overview(frame: &mut Frame, stats: &aiobscura_core::analytics:
 }
 
 /// Render the project activity section with sparkline.
-fn render_project_activity(frame: &mut Frame, stats: &aiobscura_core::analytics::ProjectStats, area: Rect) {
+fn render_project_activity(
+    frame: &mut Frame,
+    stats: &aiobscura_core::analytics::ProjectStats,
+    area: Rect,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2154,16 +2297,24 @@ fn render_project_activity(frame: &mut Frame, stats: &aiobscura_core::analytics:
     .split(inner);
 
     // Hourly sparkline
-    let sparkline_data: Vec<u64> = stats.hourly_distribution.iter().map(|&x| x as u64).collect();
+    let sparkline_data: Vec<u64> = stats
+        .hourly_distribution
+        .iter()
+        .map(|&x| x as u64)
+        .collect();
     let sparkline = Sparkline::default()
         .data(&sparkline_data)
         .style(Style::default().fg(WRAPPED_CYAN))
         .bar_set(symbols::bar::NINE_LEVELS);
 
-    let sparkline_label = Paragraph::new(Line::from(vec![
-        Span::styled("By Hour: ", Style::default().fg(LABEL_COLOR)),
-    ]));
-    let label_area = Rect { height: 1, ..chunks[0] };
+    let sparkline_label = Paragraph::new(Line::from(vec![Span::styled(
+        "By Hour: ",
+        Style::default().fg(LABEL_COLOR),
+    )]));
+    let label_area = Rect {
+        height: 1,
+        ..chunks[0]
+    };
     let sparkline_area = Rect {
         y: chunks[0].y + 1,
         height: 2,
@@ -2206,17 +2357,24 @@ fn render_project_activity(frame: &mut Frame, stats: &aiobscura_core::analytics:
 }
 
 /// Render the project tools and files section.
-fn render_project_tools_files(frame: &mut Frame, stats: &aiobscura_core::analytics::ProjectStats, area: Rect) {
+fn render_project_tools_files(
+    frame: &mut Frame,
+    stats: &aiobscura_core::analytics::ProjectStats,
+    area: Rect,
+) {
     // Split into tools and files
-    let chunks = Layout::vertical([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(area);
+    let chunks =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
 
     // Top Tools
     let mut tool_lines: Vec<Line> = Vec::new();
-    let max_tool_count = stats.tool_stats.breakdown.iter().map(|(_, c)| *c).max().unwrap_or(1);
+    let max_tool_count = stats
+        .tool_stats
+        .breakdown
+        .iter()
+        .map(|(_, c)| *c)
+        .max()
+        .unwrap_or(1);
 
     for (name, count) in stats.tool_stats.breakdown.iter().take(4) {
         let bar_width = 10;
@@ -2226,7 +2384,10 @@ fn render_project_tools_files(frame: &mut Frame, stats: &aiobscura_core::analyti
         tool_lines.push(Line::from(vec![
             Span::styled(format!("{:<8}", name), Style::default().fg(Color::White)),
             Span::styled(bar, Style::default().fg(WRAPPED_GOLD)),
-            Span::styled(format!(" {:>5}", count), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {:>5}", count),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
     }
 
@@ -2242,7 +2403,13 @@ fn render_project_tools_files(frame: &mut Frame, stats: &aiobscura_core::analyti
 
     // Top Files
     let mut file_lines: Vec<Line> = Vec::new();
-    let max_file_count = stats.file_stats.breakdown.iter().map(|(_, c)| *c).max().unwrap_or(1);
+    let max_file_count = stats
+        .file_stats
+        .breakdown
+        .iter()
+        .map(|(_, c)| *c)
+        .max()
+        .unwrap_or(1);
 
     for (path, count) in stats.file_stats.breakdown.iter().take(4) {
         let basename = std::path::Path::new(path)
@@ -2262,9 +2429,15 @@ fn render_project_tools_files(frame: &mut Frame, stats: &aiobscura_core::analyti
         };
 
         file_lines.push(Line::from(vec![
-            Span::styled(format!("{:<20}", name_display), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:<20}", name_display),
+                Style::default().fg(Color::White),
+            ),
             Span::styled(bar, Style::default().fg(BORDER_PROJECT)),
-            Span::styled(format!(" {:>3}", count), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {:>3}", count),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
     }
 
@@ -2309,7 +2482,12 @@ fn render_project_list_footer(frame: &mut Frame, app: &App, area: Rect) {
     // Show live indicator when new data was recently detected
     if app.should_show_live_indicator() {
         footer_spans.push(Span::raw(" │ "));
-        footer_spans.push(Span::styled("● LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+        footer_spans.push(Span::styled(
+            "● LIVE",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
 
     let footer = Line::from(footer_spans);
@@ -2355,7 +2533,10 @@ fn render_project_detail_footer(frame: &mut Frame, sub_tab: ProjectSubTab, area:
 fn render_project_sub_tabs(frame: &mut Frame, active: ProjectSubTab, area: Rect) {
     let make_tab = |label: &str, key: &str, is_active: bool| -> Vec<Span<'static>> {
         let style = if is_active {
-            Style::default().fg(BORDER_PROJECT).bold().add_modifier(Modifier::UNDERLINED)
+            Style::default()
+                .fg(BORDER_PROJECT)
+                .bold()
+                .add_modifier(Modifier::UNDERLINED)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -2373,8 +2554,7 @@ fn render_project_sub_tabs(frame: &mut Frame, active: ProjectSubTab, area: Rect)
     spans.extend(make_tab("Plans", "3", active == ProjectSubTab::Plans));
     spans.extend(make_tab("Files", "4", active == ProjectSubTab::Files));
 
-    let tabs = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::BOTTOM));
+    let tabs = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(tabs, area);
 }
 
@@ -2383,19 +2563,17 @@ fn render_project_overview_content(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(stats) = &app.project_stats {
         // Split into overview section and activity/tools section
         let chunks = Layout::vertical([
-            Constraint::Length(6),  // Overview
-            Constraint::Min(5),     // Activity & Tools
+            Constraint::Length(6), // Overview
+            Constraint::Min(5),    // Activity & Tools
         ])
         .split(area);
 
         render_project_overview(frame, stats, chunks[0]);
 
         // Split the lower section into activity and tools/files
-        let middle_chunks = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(chunks[1]);
+        let middle_chunks =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[1]);
 
         render_project_activity(frame, stats, middle_chunks[0]);
         render_project_tools_files(frame, stats, middle_chunks[1]);
@@ -2470,14 +2648,18 @@ fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) 
     });
 
     let widths = [
-        Constraint::Length(12),  // Last Updated
-        Constraint::Length(10),  // Thread ID
-        Constraint::Length(10),  // Type
-        Constraint::Length(6),   // Msgs
+        Constraint::Length(12), // Last Updated
+        Constraint::Length(10), // Thread ID
+        Constraint::Length(10), // Type
+        Constraint::Length(6),  // Msgs
     ];
 
     let thread_count = app.project_threads.len();
-    let selected = app.project_threads_table_state.selected().map(|i| i + 1).unwrap_or(0);
+    let selected = app
+        .project_threads_table_state
+        .selected()
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -2536,14 +2718,18 @@ fn render_project_plans_content(frame: &mut Frame, app: &mut App, area: Rect) {
     });
 
     let widths = [
-        Constraint::Length(20),  // Slug
-        Constraint::Fill(1),     // Title (flexible)
-        Constraint::Length(12),  // Status
-        Constraint::Length(12),  // Modified
+        Constraint::Length(20), // Slug
+        Constraint::Fill(1),    // Title (flexible)
+        Constraint::Length(12), // Status
+        Constraint::Length(12), // Modified
     ];
 
     let plan_count = app.project_plans.len();
-    let selected = app.project_plans_table_state.selected().map(|i| i + 1).unwrap_or(0);
+    let selected = app
+        .project_plans_table_state
+        .selected()
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -2603,12 +2789,16 @@ fn render_project_files_content(frame: &mut Frame, app: &mut App, area: Rect) {
     });
 
     let widths = [
-        Constraint::Fill(1),     // File path (flexible)
-        Constraint::Length(8),   // Edits
+        Constraint::Fill(1),   // File path (flexible)
+        Constraint::Length(8), // Edits
     ];
 
     let file_count = app.project_files.len();
-    let selected = app.project_files_table_state.selected().map(|i| i + 1).unwrap_or(0);
+    let selected = app
+        .project_files_table_state
+        .selected()
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -2676,7 +2866,7 @@ fn render_live_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let message_count = app.live_messages.len();
 
     // Pulsing effect for LIVE indicator (blinks every ~1 second)
-    let pulse = (app.animation_frame / 10) % 2 == 0;
+    let pulse = (app.animation_frame / 10).is_multiple_of(2);
     let live_style = if pulse {
         Style::default().fg(LIVE_INDICATOR).bold()
     } else {
@@ -2692,12 +2882,18 @@ fn render_live_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let status_line = Line::from(vec![
         Span::styled(" ", Style::default()),
         Span::styled("● LIVE", live_style),
-        Span::styled(format!("  {} messages", message_count), Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format!("  {} messages", message_count),
+            Style::default().fg(WRAPPED_DIM),
+        ),
         auto_scroll_indicator,
     ]);
 
-    let status_bar = Paragraph::new(status_line)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(BORDER_LIVE)));
+    let status_bar = Paragraph::new(status_line).block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(BORDER_LIVE)),
+    );
 
     frame.render_widget(status_bar, area);
 }
@@ -2707,19 +2903,24 @@ fn render_active_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     if app.active_sessions.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("  No active sessions", Style::default().fg(Color::DarkGray).italic()),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "  No active sessions",
+            Style::default().fg(Color::DarkGray).italic(),
+        )]));
     } else {
         // Group sessions by parent (main threads vs agent threads)
         // Parent threads have parent_thread_id = None
-        let main_threads: Vec<_> = app.active_sessions.iter()
+        let main_threads: Vec<_> = app
+            .active_sessions
+            .iter()
             .filter(|s| s.parent_thread_id.is_none())
             .collect();
 
         for main_session in main_threads {
             // Find child agent threads for this main thread
-            let child_agents: Vec<_> = app.active_sessions.iter()
+            let child_agents: Vec<_> = app
+                .active_sessions
+                .iter()
                 .filter(|s| s.parent_thread_id.as_ref() == Some(&main_session.thread_id))
                 .collect();
 
@@ -2733,11 +2934,15 @@ fn render_active_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
         }
 
         // Also show any orphan agents (parent not in active list)
-        let orphan_agents: Vec<_> = app.active_sessions.iter()
+        let orphan_agents: Vec<_> = app
+            .active_sessions
+            .iter()
             .filter(|s| {
                 if let Some(ref parent_id) = s.parent_thread_id {
                     // Check if parent is NOT in active sessions
-                    !app.active_sessions.iter().any(|p| p.thread_id == *parent_id)
+                    !app.active_sessions
+                        .iter()
+                        .any(|p| p.thread_id == *parent_id)
                 } else {
                     false
                 }
@@ -2749,15 +2954,14 @@ fn render_active_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let content = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(BORDER_LIVE))
-                .title(" Active Sessions ")
-                .title_style(Style::default().fg(BORDER_LIVE).bold()),
-        );
+    let content = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_LIVE))
+            .title(" Active Sessions ")
+            .title_style(Style::default().fg(BORDER_LIVE).bold()),
+    );
 
     frame.render_widget(content, area);
 }
@@ -2821,10 +3025,19 @@ fn format_active_session_line(session: &ActiveSession, is_child: bool) -> Line<'
         Span::styled(indicator, indicator_style),
         Span::styled(" ", Style::default()),
         Span::styled(format!("{:<24}", thread_label), name_style),
-        Span::styled(format!("{:>8}", time_str), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:>8}", time_str),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled("   ", Style::default()),
-        Span::styled(format!("{:<8}", assistant_str), Style::default().fg(Color::Cyan)),
-        Span::styled(format!("{:>10}", msg_count_str), Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format!("{:<8}", assistant_str),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:>10}", msg_count_str),
+            Style::default().fg(WRAPPED_DIM),
+        ),
     ])
 }
 
@@ -2837,25 +3050,31 @@ fn render_live_message_stream(frame: &mut Frame, app: &App, area: Rect) {
     // scroll_offset=0 means show newest messages at top
     // scrolling down (increasing offset) shows older messages
     let total_messages = app.live_messages.len();
-    let scroll_offset = app.live_scroll_offset.min(total_messages.saturating_sub(visible_height));
+    let scroll_offset = app
+        .live_scroll_offset
+        .min(total_messages.saturating_sub(visible_height));
 
     // Build lines for display (newest at top)
     let mut lines: Vec<Line> = Vec::new();
 
     // Iterate in order (newest to oldest for display)
-    for msg in app.live_messages.iter().skip(scroll_offset).take(visible_height) {
+    for msg in app
+        .live_messages
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_height)
+    {
         lines.push(format_live_message(msg));
     }
 
-    let content = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(BORDER_LIVE))
-                .title(" Message Stream ")
-                .title_style(Style::default().fg(BORDER_LIVE).bold()),
-        );
+    let content = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_LIVE))
+            .title(" Message Stream ")
+            .title_style(Style::default().fg(BORDER_LIVE).bold()),
+    );
 
     frame.render_widget(content, area);
 
@@ -2864,12 +3083,16 @@ fn render_live_message_stream(frame: &mut Frame, app: &App, area: Rect) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None);
-        let mut scrollbar_state = ScrollbarState::new(total_messages.saturating_sub(visible_height))
-            .position(scroll_offset);
+        let mut scrollbar_state =
+            ScrollbarState::new(total_messages.saturating_sub(visible_height))
+                .position(scroll_offset);
 
         frame.render_stateful_widget(
             scrollbar,
-            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -2913,13 +3136,19 @@ fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     Line::from(vec![
         Span::styled(time_str, Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
-        Span::styled(format!("[{}]", assistant_badge), Style::default().fg(assistant_color).bold()),
+        Span::styled(
+            format!("[{}]", assistant_badge),
+            Style::default().fg(assistant_color).bold(),
+        ),
         Span::raw(" "),
         Span::styled(context_str, Style::default().fg(WRAPPED_DIM)),
         Span::raw(" "),
         Span::styled(format!("{:10}", role_str), role_style),
         Span::raw(" "),
-        Span::styled(format!("\"{}\"", preview), Style::default().fg(Color::White)),
+        Span::styled(
+            format!("\"{}\"", preview),
+            Style::default().fg(Color::White),
+        ),
     ])
 }
 
@@ -2969,7 +3198,7 @@ fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
 /// Format a number for display in stats (e.g., 1234 -> "1,234", 45200 -> "45.2k")
 fn format_stat_number(n: i64) -> String {
     if n >= 100_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
+        format!("{:.0}k", n as f64 / 1000.0)
     } else if n >= 10_000 {
         format!("{:.1}k", n as f64 / 1000.0)
     } else if n >= 1000 {

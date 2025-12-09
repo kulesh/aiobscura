@@ -19,33 +19,27 @@ impl WrappedPeriod {
     /// Get the start datetime for this period.
     pub fn start(&self) -> DateTime<Utc> {
         match self {
-            WrappedPeriod::Year(year) => {
-                chrono::NaiveDate::from_ymd_opt(*year, 1, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_utc()
-            }
-            WrappedPeriod::Month(year, month) => {
-                chrono::NaiveDate::from_ymd_opt(*year, *month, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_utc()
-            }
+            WrappedPeriod::Year(year) => chrono::NaiveDate::from_ymd_opt(*year, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
+            WrappedPeriod::Month(year, month) => chrono::NaiveDate::from_ymd_opt(*year, *month, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
         }
     }
 
     /// Get the end datetime for this period (exclusive).
     pub fn end(&self) -> DateTime<Utc> {
         match self {
-            WrappedPeriod::Year(year) => {
-                chrono::NaiveDate::from_ymd_opt(*year + 1, 1, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_utc()
-            }
+            WrappedPeriod::Year(year) => chrono::NaiveDate::from_ymd_opt(*year + 1, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
             WrappedPeriod::Month(year, month) => {
                 let (next_year, next_month) = if *month == 12 {
                     (*year + 1, 1)
@@ -250,6 +244,7 @@ impl ToolRankings {
 
 /// Time-based usage patterns.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct TimePatterns {
     /// Activity count by hour (0-23)
     pub hourly_distribution: [i64; 24],
@@ -265,18 +260,6 @@ pub struct TimePatterns {
     pub marathon_session: Option<MarathonSession>,
 }
 
-impl Default for TimePatterns {
-    fn default() -> Self {
-        Self {
-            hourly_distribution: [0; 24],
-            daily_distribution: [0; 7],
-            peak_hour: 0,
-            busiest_day: 0,
-            quietest_day: 0,
-            marathon_session: None,
-        }
-    }
-}
 
 impl TimePatterns {
     /// Get day name from index.
@@ -359,10 +342,7 @@ impl MarathonSession {
 
     /// Format date for display in local timezone.
     pub fn date_display(&self) -> String {
-        self.date
-            .with_timezone(&Local)
-            .format("%b %d")
-            .to_string()
+        self.date.with_timezone(&Local).format("%b %d").to_string()
     }
 }
 

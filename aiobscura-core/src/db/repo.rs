@@ -1139,12 +1139,11 @@ impl Database {
                         message: format!("Invalid timestamp: {}", e),
                     })?;
                 let last = last_str
-                    .map(|s| {
+                    .and_then(|s| {
                         DateTime::parse_from_rfc3339(&s)
                             .map(|dt| dt.with_timezone(&Utc))
                             .ok()
-                    })
-                    .flatten();
+                    });
                 Ok(Some((started, last)))
             }
             None => Ok(None),
@@ -1341,7 +1340,7 @@ impl Database {
 
         for row in rows.flatten() {
             let (hour, count) = row;
-            if hour >= 0 && hour < 24 {
+            if (0..24).contains(&hour) {
                 distribution[hour as usize] = count;
             }
         }
@@ -1378,7 +1377,7 @@ impl Database {
 
         for row in rows.flatten() {
             let (dow, count) = row;
-            if dow >= 0 && dow < 7 {
+            if (0..7).contains(&dow) {
                 distribution[dow as usize] = count;
             }
         }
@@ -1572,12 +1571,10 @@ impl Database {
                         // New streak
                         if current_streak > longest_streak {
                             longest_streak = current_streak;
-                            longest_start = current_start.map(|d| {
-                                d.and_hms_opt(0, 0, 0).unwrap().and_utc()
-                            });
-                            longest_end = prev_date.map(|d| {
-                                d.and_hms_opt(23, 59, 59).unwrap().and_utc()
-                            });
+                            longest_start =
+                                current_start.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc());
+                            longest_end =
+                                prev_date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc());
                         }
                         current_streak = 1;
                         current_start = Some(date);
@@ -1590,12 +1587,8 @@ impl Database {
         // Check final streak
         if current_streak > longest_streak {
             longest_streak = current_streak;
-            longest_start = current_start.map(|d| {
-                d.and_hms_opt(0, 0, 0).unwrap().and_utc()
-            });
-            longest_end = prev_date.map(|d| {
-                d.and_hms_opt(23, 59, 59).unwrap().and_utc()
-            });
+            longest_start = current_start.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc());
+            longest_end = prev_date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc());
         }
 
         // Calculate current streak (days from today going backwards)
@@ -1672,7 +1665,10 @@ impl Database {
     }
 
     /// Get detailed stats for a single project.
-    pub fn get_project_stats(&self, project_id: &str) -> Result<Option<crate::analytics::ProjectStats>> {
+    pub fn get_project_stats(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<crate::analytics::ProjectStats>> {
         let conn = self.conn.lock().unwrap();
 
         // First, get the project info
@@ -1871,7 +1867,7 @@ impl Database {
         })?;
         for row in hourly_rows.flatten() {
             let (hour, count) = row;
-            if hour >= 0 && hour < 24 {
+            if (0..24).contains(&hour) {
                 hourly[hour as usize] = count;
             }
         }
@@ -1893,7 +1889,7 @@ impl Database {
         })?;
         for row in daily_rows.flatten() {
             let (dow, count) = row;
-            if dow >= 0 && dow < 7 {
+            if (0..7).contains(&dow) {
                 daily[dow as usize] = count;
             }
         }
@@ -2030,7 +2026,7 @@ impl Database {
             })?;
             for row in rows.flatten() {
                 let (hour, count) = row;
-                if hour >= 0 && hour < 24 {
+                if (0..24).contains(&hour) {
                     hourly[hour as usize] = count;
                 }
             }
@@ -2134,12 +2130,11 @@ impl Database {
                 GROUP BY DATE(ts)
                 "#,
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
             for row in rows.flatten() {
                 let (days_ago, count) = row;
-                if days_ago >= 0 && days_ago < 28 {
+                if (0..28).contains(&days_ago) {
                     // Index 27 = today (0 days ago), index 0 = 27 days ago
                     let idx = 27 - days_ago as usize;
                     daily_activity[idx] = count;
@@ -2204,7 +2199,10 @@ impl Database {
     ///
     /// Returns threads that have had message activity within the last `since_minutes` minutes,
     /// ordered by last activity descending (most recent first).
-    pub fn get_active_sessions(&self, since_minutes: i64) -> Result<Vec<crate::types::ActiveSession>> {
+    pub fn get_active_sessions(
+        &self,
+        since_minutes: i64,
+    ) -> Result<Vec<crate::types::ActiveSession>> {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
@@ -2239,8 +2237,12 @@ impl Database {
                     session_id: row.get(0)?,
                     thread_id: row.get(1)?,
                     project_name: row.get(2)?,
-                    thread_type: thread_type_str.parse().unwrap_or(crate::types::ThreadType::Main),
-                    assistant: assistant_str.parse().unwrap_or(crate::types::Assistant::ClaudeCode),
+                    thread_type: thread_type_str
+                        .parse()
+                        .unwrap_or(crate::types::ThreadType::Main),
+                    assistant: assistant_str
+                        .parse()
+                        .unwrap_or(crate::types::Assistant::ClaudeCode),
                     last_activity: chrono::DateTime::parse_from_rfc3339(&last_activity_str)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now()),
@@ -2304,7 +2306,10 @@ impl Database {
     ///
     /// Returns messages with project/thread context, ordered by timestamp descending.
     /// The `limit` parameter controls how many messages to return.
-    pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::types::MessageWithContext>> {
+    pub fn get_recent_messages(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::types::MessageWithContext>> {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
@@ -2349,11 +2354,17 @@ impl Database {
                     ts: chrono::DateTime::parse_from_rfc3339(&ts_str)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now()),
-                    assistant: assistant_str.parse().unwrap_or(crate::types::Assistant::ClaudeCode),
+                    assistant: assistant_str
+                        .parse()
+                        .unwrap_or(crate::types::Assistant::ClaudeCode),
                     project_name: row.get(3)?,
                     thread_name: row.get(4)?,
-                    author_role: author_role_str.parse().unwrap_or(crate::types::AuthorRole::System),
-                    message_type: message_type_str.parse().unwrap_or(crate::types::MessageType::Response),
+                    author_role: author_role_str
+                        .parse()
+                        .unwrap_or(crate::types::AuthorRole::System),
+                    message_type: message_type_str
+                        .parse()
+                        .unwrap_or(crate::types::MessageType::Response),
                     preview: row.get(7)?,
                     tool_name: row.get(8)?,
                 })
