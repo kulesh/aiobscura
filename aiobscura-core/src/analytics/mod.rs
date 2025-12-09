@@ -5,11 +5,14 @@
 //! - Personality classification
 //! - Usage trends
 //! - Project-level analytics
+//! - Dashboard statistics
 
+pub mod dashboard;
 pub mod personality;
 pub mod project;
 pub mod wrapped;
 
+pub use dashboard::DashboardStats;
 pub use personality::Personality;
 pub use project::{ProjectRow, ProjectStats};
 pub use wrapped::{
