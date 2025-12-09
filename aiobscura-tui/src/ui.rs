@@ -622,7 +622,7 @@ fn render_list_footer(frame: &mut Frame, app: &App, area: Rect) {
         .map(|i| i + 1)
         .unwrap_or(0);
 
-    let footer = Line::from(vec![
+    let mut footer_spans = vec![
         Span::styled(" Tab", Style::default().fg(Color::Yellow)),
         Span::raw(" projects  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
@@ -638,8 +638,15 @@ fn render_list_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!("{}/{} threads", selected, thread_count),
             Style::default().fg(Color::DarkGray),
         ),
-    ]);
+    ];
 
+    // Show live indicator when new data was recently detected
+    if app.should_show_live_indicator() {
+        footer_spans.push(Span::raw(" │ "));
+        footer_spans.push(Span::styled("● LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+    }
+
+    let footer = Line::from(footer_spans);
     frame.render_widget(Paragraph::new(footer), area);
 }
 
@@ -2281,7 +2288,7 @@ fn render_project_list_footer(frame: &mut Frame, app: &App, area: Rect) {
         .map(|i| i + 1)
         .unwrap_or(0);
 
-    let footer = Line::from(vec![
+    let mut footer_spans = vec![
         Span::styled(" Tab", Style::default().fg(Color::Yellow)),
         Span::raw(" threads  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
@@ -2297,8 +2304,15 @@ fn render_project_list_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!("{}/{} projects", selected, project_count),
             Style::default().fg(Color::DarkGray),
         ),
-    ]);
+    ];
 
+    // Show live indicator when new data was recently detected
+    if app.should_show_live_indicator() {
+        footer_spans.push(Span::raw(" │ "));
+        footer_spans.push(Span::styled("● LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+    }
+
+    let footer = Line::from(footer_spans);
     frame.render_widget(Paragraph::new(footer), area);
 }
 

@@ -42,5 +42,6 @@ notify-debouncer-mini = "0.4"
 indicatif = "0.17"
 ratatui = "0.29"
 crossterm = "0.28"
+ctrlc = "3.4"
 
 [dev-dependencies]

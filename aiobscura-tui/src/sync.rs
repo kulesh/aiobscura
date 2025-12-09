@@ -14,6 +14,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "aiobscura-sync")]
@@ -27,6 +31,14 @@ struct Args {
     /// Dry run - discover files but don't sync
     #[arg(long)]
     dry_run: bool,
+
+    /// Watch mode - continuously sync instead of one-shot
+    #[arg(short, long)]
+    watch: bool,
+
+    /// Poll interval in milliseconds (only with --watch)
+    #[arg(long, default_value = "1000")]
+    poll: u64,
 }
 
 /// Returns $HOME or panics
@@ -122,8 +134,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Run sync with progress bar
-    println!();
+    if args.watch {
+        // Watch mode - continuous polling
+        run_watch_mode(&coordinator, &args)
+    } else {
+        // One-shot sync
+        run_single_sync(&coordinator, &args)
+    }
+}
+
+/// Run a single sync operation with progress bar
+fn run_single_sync(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
     let pb = ProgressBar::new(0);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -149,30 +170,7 @@ fn main() -> Result<()> {
 
     pb.finish_and_clear();
 
-    // Print stats
-    println!("\nSync complete:");
-    println!("  Files processed:  {}", result.files_processed);
-    println!("  Files skipped:    {}", result.files_skipped);
-    println!("  Sessions created: {}", result.sessions_created);
-    println!("  Sessions updated: {}", result.sessions_updated);
-    println!("  Messages inserted: {}", result.messages_inserted);
-    println!("  Threads created:  {}", result.threads_created);
-
-    // Show warnings if verbose
-    if args.verbose && !result.warnings.is_empty() {
-        println!("\nWarnings ({}):", result.warnings.len());
-        for warning in &result.warnings {
-            println!("  {}", warning);
-        }
-    }
-
-    // Show errors
-    if !result.errors.is_empty() {
-        println!("\nErrors ({}):", result.errors.len());
-        for (path, err) in &result.errors {
-            println!("  {}: {}", path.display(), err);
-        }
-    }
+    print_sync_result(&result, args.verbose);
 
     tracing::info!(
         files_processed = result.files_processed,
@@ -181,4 +179,93 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Run continuous watch mode
+fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
+    // Set up signal handler for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        eprintln!("\nShutting down...");
+        r.store(false, Ordering::SeqCst);
+    })
+    .context("failed to set Ctrl+C handler")?;
+
+    let poll_duration = Duration::from_millis(args.poll);
+
+    println!("Watch mode active (poll every {}ms). Press Ctrl+C to stop.", args.poll);
+    println!();
+
+    let mut iteration = 0u64;
+
+    while running.load(Ordering::SeqCst) {
+        iteration += 1;
+
+        // Run sync (checkpoints ensure incremental parsing)
+        let result = coordinator
+            .sync_all_with_progress(|_current, _total, _path| {
+                // Silent progress in watch mode
+            })
+            .context("sync failed")?;
+
+        // Only print if there were changes
+        if result.messages_inserted > 0 {
+            let timestamp = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "[{}] Synced: {} files, {} messages, {} sessions",
+                timestamp,
+                result.files_processed,
+                result.messages_inserted,
+                result.sessions_created + result.sessions_updated
+            );
+
+            if args.verbose && !result.warnings.is_empty() {
+                for warning in &result.warnings {
+                    println!("  Warning: {}", warning);
+                }
+            }
+
+            tracing::info!(
+                iteration,
+                files_processed = result.files_processed,
+                messages_inserted = result.messages_inserted,
+                "watch sync iteration"
+            );
+        }
+
+        // Sleep until next poll
+        thread::sleep(poll_duration);
+    }
+
+    println!("Watch mode stopped.");
+    tracing::info!("aiobscura-sync watch mode stopped");
+
+    Ok(())
+}
+
+/// Print sync result summary
+fn print_sync_result(result: &aiobscura_core::ingest::SyncResult, verbose: bool) {
+    println!("\nSync complete:");
+    println!("  Files processed:  {}", result.files_processed);
+    println!("  Files skipped:    {}", result.files_skipped);
+    println!("  Sessions created: {}", result.sessions_created);
+    println!("  Sessions updated: {}", result.sessions_updated);
+    println!("  Messages inserted: {}", result.messages_inserted);
+    println!("  Threads created:  {}", result.threads_created);
+
+    if verbose && !result.warnings.is_empty() {
+        println!("\nWarnings ({}):", result.warnings.len());
+        for warning in &result.warnings {
+            println!("  {}", warning);
+        }
+    }
+
+    if !result.errors.is_empty() {
+        println!("\nErrors ({}):", result.errors.len());
+        for (path, err) in &result.errors {
+            println!("  {}: {}", path.display(), err);
+        }
+    }
 }
