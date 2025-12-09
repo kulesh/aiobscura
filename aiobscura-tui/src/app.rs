@@ -150,6 +150,11 @@ pub struct App {
     pub project_files: Vec<(String, i64)>,
     /// Project files table selection state
     pub project_files_table_state: TableState,
+
+    // ========== Navigation Return State ==========
+    /// Return destination when exiting Detail/PlanDetail views
+    /// (project_id, project_name, sub_tab) - if set, return to project sub-tab
+    pub return_to_project: Option<(String, String, ProjectSubTab)>,
 }
 
 impl App {
@@ -185,6 +190,8 @@ impl App {
             project_plans_table_state: TableState::default(),
             project_files: Vec::new(),
             project_files_table_state: TableState::default(),
+            // Navigation return state
+            return_to_project: None,
         }
     }
 
@@ -588,7 +595,16 @@ impl App {
 
     /// Close detail view and return to list.
     fn close_detail_view(&mut self) {
-        self.view_mode = ViewMode::List;
+        // Check if we should return to a project sub-tab
+        if let Some((project_id, project_name, sub_tab)) = self.return_to_project.take() {
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+        } else {
+            self.view_mode = ViewMode::List;
+        }
         self.messages.clear();
         self.scroll_offset = 0;
         self.thread_metadata = None;
@@ -825,6 +841,18 @@ impl App {
 
     /// Close plan detail and return to plan list.
     fn close_plan_detail(&mut self) {
+        // Check if we should return to a project sub-tab
+        if let Some((project_id, project_name, sub_tab)) = self.return_to_project.take() {
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+            self.selected_plan = None;
+            self.plan_scroll_offset = 0;
+            return;
+        }
+
         // We need to reconstruct the PlanList state
         // For now, find the session from the selected plan
         if let Some(plan) = &self.selected_plan {
@@ -1528,7 +1556,7 @@ impl App {
 
     /// Open the selected item in a project sub-tab.
     fn open_project_item(&mut self) {
-        if let ViewMode::ProjectDetail { sub_tab, .. } = self.view_mode.clone() {
+        if let ViewMode::ProjectDetail { sub_tab, project_id, project_name } = self.view_mode.clone() {
             match sub_tab {
                 ProjectSubTab::Threads => {
                     // Open the selected thread in detail view
@@ -1540,6 +1568,8 @@ impl App {
 
                             // Load messages for this thread
                             if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
+                                // Save return destination
+                                self.return_to_project = Some((project_id, project_name, sub_tab));
                                 self.messages = messages;
                                 self.scroll_offset = 0;
                                 self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
@@ -1558,6 +1588,8 @@ impl App {
                             let plan_slug = plan.id.clone();
                             let plan_title = plan.title.clone().unwrap_or_else(|| plan_slug.clone());
 
+                            // Save return destination
+                            self.return_to_project = Some((project_id, project_name, sub_tab));
                             self.selected_plan = Some(plan.clone());
                             self.plan_scroll_offset = 0;
                             self.view_mode = ViewMode::PlanDetail {
