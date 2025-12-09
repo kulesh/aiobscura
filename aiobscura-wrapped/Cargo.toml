@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/kulesh/aiobscura"
 description = "AI Agent Wrapped - Year in Review CLI"
 
 [[bin]]
