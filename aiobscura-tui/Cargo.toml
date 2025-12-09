@@ -13,22 +13,6 @@ name = "aiobscura"
 path = "src/main.rs"
 
 [[bin]]
-name = "aiobscura-debug-claude"
-path = "src/debug_claude.rs"
-
-[[bin]]
-name = "aiobscura-debug-codex"
-path = "src/debug_codex.rs"
-
-[[bin]]
-name = "aiobscura-debug-claude-watch"
-path = "src/debug_claude_watch.rs"
-
-[[bin]]
-name = "aiobscura-debug-codex-watch"
-path = "src/debug_codex_watch.rs"
-
-[[bin]]
 name = "aiobscura-sync"
 path = "src/sync.rs"
 
