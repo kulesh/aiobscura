@@ -1,0 +1,17 @@
+#!/bin/bash
+# Pre-push hook: Run CI checks before pushing
+
+set -e
+
+echo "Running pre-push checks..."
+
+echo "  Checking formatting..."
+cargo fmt --all -- --check
+
+echo "  Running clippy..."
+cargo clippy --all-targets -- -D warnings
+
+echo "  Running tests..."
+cargo test --all-targets --quiet
+
+echo "All checks passed!"
