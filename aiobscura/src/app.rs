@@ -273,12 +273,12 @@ impl App {
     fn update_snowflakes(&mut self, height: u16) {
         for (x, y, speed) in &mut self.snowflakes {
             // Only update every few frames based on speed
-            if self.animation_frame % (*speed as u64 * 2) == 0 {
+            if self.animation_frame.is_multiple_of(*speed as u64 * 2) {
                 *y = (*y + 1) % height;
 
                 // Add slight horizontal drift
-                if self.animation_frame % 7 == 0 {
-                    if *x > 0 && self.animation_frame % 2 == 0 {
+                if self.animation_frame.is_multiple_of(7) {
+                    if *x > 0 && self.animation_frame.is_multiple_of(2) {
                         *x -= 1;
                     } else if *x < 200 {
                         *x += 1;
