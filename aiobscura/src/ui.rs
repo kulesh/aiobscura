@@ -1068,7 +1068,7 @@ fn render_snowflakes(frame: &mut Frame, app: &App, area: Rect) {
 
         // Twinkle effect - some snowflakes blink
         let visible = if i % 5 == 0 {
-            !app.animation_frame.is_multiple_of(4)
+            app.animation_frame % 4 != 0
         } else {
             true
         };
@@ -2866,7 +2866,7 @@ fn render_live_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let message_count = app.live_messages.len();
 
     // Pulsing effect for LIVE indicator (blinks every ~1 second)
-    let pulse = (app.animation_frame / 10).is_multiple_of(2);
+    let pulse = (app.animation_frame / 10) % 2 == 0;
     let live_style = if pulse {
         Style::default().fg(LIVE_INDICATOR).bold()
     } else {
