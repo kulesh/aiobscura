@@ -81,7 +81,7 @@ brew install kulesh/tap/aiobscura
 
 ### From source
 
-Requires Rust 1.78 or later.
+Requires Rust 1.82 or later.
 
 ```bash
 git clone https://github.com/kulesh/aiobscura.git
