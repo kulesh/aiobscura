@@ -6,7 +6,7 @@ Thank you for your interest in contributing to aiobscura! This document provides
 
 ### Prerequisites
 
-- Rust toolchain (1.82+) via [rustup](https://rustup.rs/) or [mise](https://mise.jdx.dev/)
+- Rust toolchain (latest stable) via [rustup](https://rustup.rs/) or [mise](https://mise.jdx.dev/)
 - SQLite 3.x
 - Git
 
