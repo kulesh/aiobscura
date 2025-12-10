@@ -14,7 +14,7 @@ See `docs/aiobscura-requirements.md` for full requirements and `docs/aiobscura-a
 
 **Workspace structure:**
 - `aiobscura-core/` - Core library (types, DB, ingestion, analytics, API)
-- `aiobscura-tui/` - Terminal UI using ratatui
+- `aiobscura/` - Terminal UI and sync binaries (using ratatui)
 
 Tooling: mise (Rust toolchain), cargo-nextest (tests), cargo-watch (dev), clippy, rustfmt
 
@@ -55,9 +55,9 @@ aiobscura/
 │   │   └── parsers/      # Agent-specific parsers
 │   ├── analytics/        # Metrics and assessments
 │   └── api/              # Public API for UIs
-├── aiobscura-tui/src/    # Terminal UI
-│   ├── views/            # Live, history, detail, analytics views
-│   └── widgets/          # Reusable UI components
+├── aiobscura/src/        # Terminal UI and sync
+│   ├── main.rs           # TUI entry point
+│   └── sync.rs           # Sync daemon entry point
 ├── tests/                # Integration tests
 ├── examples/             # Usage examples
 └── benches/              # Performance benchmarks

@@ -81,7 +81,7 @@ brew install kulesh/tap/aiobscura
 
 ### From source
 
-Requires Rust 1.70 or later.
+Requires Rust 1.78 or later.
 
 ```bash
 git clone https://github.com/kulesh/aiobscura.git
@@ -126,8 +126,7 @@ The TUI reads from this database to display your activity.
 ```
 aiobscura/
 ├── aiobscura-core/     # Core library (parsing, storage, analytics)
-├── aiobscura-tui/      # Terminal UI binary
-├── aiobscura-wrapped/  # "Year in Review" analytics tool
+├── aiobscura/          # Terminal UI and sync binaries
 ├── docs/               # Architecture and requirements
 └── tests/              # Integration tests
 ```

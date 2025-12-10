@@ -6,7 +6,7 @@ Thank you for your interest in contributing to aiobscura! This document provides
 
 ### Prerequisites
 
-- Rust toolchain (1.70+) via [rustup](https://rustup.rs/) or [mise](https://mise.jdx.dev/)
+- Rust toolchain (1.78+) via [rustup](https://rustup.rs/) or [mise](https://mise.jdx.dev/)
 - SQLite 3.x
 - Git
 
@@ -56,7 +56,7 @@ When reporting bugs, please include:
 ### Error Handling
 
 - Core library (`aiobscura-core`): Use custom `Error` enum with `thiserror`
-- TUI binary (`aiobscura-tui`): Use `anyhow::Result` for ergonomic error propagation
+- TUI binary (`aiobscura`): Use `anyhow::Result` for ergonomic error propagation
 
 ### Testing
 
