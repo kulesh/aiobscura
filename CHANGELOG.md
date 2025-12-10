@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2024-12-10
+
+### Added
+
+- Pre-push git hook for running CI checks locally
+
+### Fixed
+
+- CI now uses stable Rust only (removed MSRV complexity)
+
 ## [0.1.2] - 2024-12-09
 
 ### Changed
