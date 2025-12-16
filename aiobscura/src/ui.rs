@@ -255,6 +255,8 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
             // Determine role style and prefix based on author role AND thread type
             // In main thread, Human is a real human -> [human] (green)
             // In agent/background threads, Human is the caller (parent assistant) -> [caller] (cyan)
+            // System context messages are labeled as [caller] (CLI/system calling the model)
+            // except for snapshots which get [snapshot]
             let (role_style, role_prefix) = match (&msg.author_role, &thread_type) {
                 (AuthorRole::Human, ThreadType::Main) => {
                     (Style::default().fg(Color::Green), "[human]")
@@ -262,7 +264,15 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
                 (AuthorRole::Human, _) => (Style::default().fg(Color::Cyan), "[caller]"),
                 (AuthorRole::Assistant, _) => (Style::default().fg(Color::Blue), "[assistant]"),
                 (AuthorRole::Agent, _) => (Style::default().fg(Color::Cyan), "[agent]"),
-                (AuthorRole::System, _) => (Style::default().fg(Color::Yellow), "[system]"),
+                (AuthorRole::System, _) => {
+                    // Check author_name to distinguish snapshot from other system context
+                    if msg.author_name.as_deref() == Some("snapshot") {
+                        (Style::default().fg(Color::DarkGray), "[snapshot]")
+                    } else {
+                        // System-injected context (environment, instructions) -> [caller]
+                        (Style::default().fg(Color::Cyan), "[caller]")
+                    }
+                }
                 (AuthorRole::Tool, _) => (Style::default().fg(Color::Magenta), "[tool]"),
             };
 
