@@ -47,6 +47,27 @@ pub struct FileStats {
     pub breakdown: Vec<(String, i64)>,
 }
 
+/// Session summary for list views in the TUI.
+///
+/// Contains pre-computed stats to avoid N+1 queries when rendering session lists.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    /// Session ID
+    pub id: String,
+    /// Which assistant this session is from
+    pub assistant: Assistant,
+    /// When the session started
+    pub started_at: DateTime<Utc>,
+    /// Most recent activity timestamp
+    pub last_activity_at: Option<DateTime<Utc>>,
+    /// Number of threads in this session
+    pub thread_count: i64,
+    /// Total message count across all threads
+    pub message_count: i64,
+    /// Model name (if known)
+    pub model_name: Option<String>,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -437,6 +458,59 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(sessions)
+    }
+
+    /// List sessions for a project with summary stats for TUI display.
+    ///
+    /// Returns sessions with pre-computed thread count, message count, and model name
+    /// to avoid N+1 queries when rendering session lists.
+    pub fn list_project_sessions(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Join sessions with aggregated stats from threads and messages
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                s.id,
+                s.assistant,
+                s.started_at,
+                s.last_activity_at,
+                COUNT(DISTINCT t.id) as thread_count,
+                COUNT(m.id) as message_count,
+                bm.display_name as model_name
+            FROM sessions s
+            LEFT JOIN threads t ON t.session_id = s.id
+            LEFT JOIN messages m ON m.session_id = s.id
+            LEFT JOIN backing_models bm ON bm.id = s.backing_model_id
+            WHERE s.project_id = ?
+            GROUP BY s.id
+            ORDER BY s.last_activity_at DESC NULLS LAST
+            "#,
+        )?;
+
+        let summaries = stmt
+            .query_map([project_id], |row| {
+                let assistant_str: String = row.get(1)?;
+                let started_at_str: String = row.get(2)?;
+                let last_activity_str: Option<String> = row.get(3)?;
+
+                Ok(SessionSummary {
+                    id: row.get(0)?,
+                    assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
+                    started_at: DateTime::parse_from_rfc3339(&started_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    last_activity_at: last_activity_str
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    thread_count: row.get(4)?,
+                    message_count: row.get(5)?,
+                    model_name: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(summaries)
     }
 
     fn row_to_session(row: &Row) -> rusqlite::Result<Session> {

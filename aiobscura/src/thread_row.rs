@@ -1,4 +1,4 @@
-//! Thread row data for TUI display.
+//! Row data structs for TUI display.
 
 use aiobscura_core::ThreadType;
 use chrono::{DateTime, Utc};
@@ -61,6 +61,76 @@ impl ThreadRow {
                 }
             }
             None => "—".to_string(),
+        }
+    }
+}
+
+/// A denormalized session row optimized for table display.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    /// Session ID
+    pub id: String,
+    /// When the session was last active
+    pub last_activity: Option<DateTime<Utc>>,
+    /// Session duration in seconds
+    pub duration_secs: i64,
+    /// Number of threads in this session
+    pub thread_count: i64,
+    /// Total message count across all threads
+    pub message_count: i64,
+    /// Model name (if known)
+    pub model_name: Option<String>,
+}
+
+impl SessionRow {
+    /// Returns a truncated session ID (first 8 characters).
+    pub fn short_id(&self) -> &str {
+        if self.id.len() > 8 {
+            &self.id[..8]
+        } else {
+            &self.id
+        }
+    }
+
+    /// Returns relative time since last activity (e.g., "2m ago", "1h ago").
+    pub fn relative_time(&self) -> String {
+        match self.last_activity {
+            Some(ts) => {
+                let now = Utc::now();
+                let duration = now.signed_duration_since(ts);
+
+                if duration.num_seconds() < 0 {
+                    "just now".to_string()
+                } else if duration.num_seconds() < 60 {
+                    format!("{}s ago", duration.num_seconds())
+                } else if duration.num_minutes() < 60 {
+                    format!("{}m ago", duration.num_minutes())
+                } else if duration.num_hours() < 24 {
+                    format!("{}h ago", duration.num_hours())
+                } else if duration.num_days() < 7 {
+                    format!("{}d ago", duration.num_days())
+                } else {
+                    ts.format("%b %d").to_string()
+                }
+            }
+            None => "—".to_string(),
+        }
+    }
+
+    /// Returns formatted duration (e.g., "5m", "1h 30m", "2h").
+    pub fn formatted_duration(&self) -> String {
+        if self.duration_secs < 60 {
+            format!("{}s", self.duration_secs)
+        } else if self.duration_secs < 3600 {
+            format!("{}m", self.duration_secs / 60)
+        } else {
+            let hours = self.duration_secs / 3600;
+            let mins = (self.duration_secs % 3600) / 60;
+            if mins > 0 {
+                format!("{}h {}m", hours, mins)
+            } else {
+                format!("{}h", hours)
+            }
         }
     }
 }

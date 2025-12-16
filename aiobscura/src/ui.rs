@@ -2391,8 +2391,8 @@ fn render_project_detail_view(
         ProjectSubTab::Overview => {
             render_project_overview_content(frame, app, chunks[2]);
         }
-        ProjectSubTab::Threads => {
-            render_project_threads_content(frame, app, chunks[2]);
+        ProjectSubTab::Sessions => {
+            render_project_sessions_content(frame, app, chunks[2]);
         }
         ProjectSubTab::Plans => {
             render_project_plans_content(frame, app, chunks[2]);
@@ -2814,7 +2814,7 @@ fn render_project_detail_footer(frame: &mut Frame, sub_tab: ProjectSubTab, area:
         ProjectSubTab::Overview => {
             // No extra hints for overview
         }
-        ProjectSubTab::Threads | ProjectSubTab::Plans => {
+        ProjectSubTab::Sessions | ProjectSubTab::Plans => {
             spans.push(Span::styled("Enter", Style::default().fg(Color::Yellow)));
             spans.push(Span::raw(" open  "));
             spans.push(Span::styled("j/k", Style::default().fg(Color::Yellow)));
@@ -2858,7 +2858,7 @@ fn render_project_sub_tabs(frame: &mut Frame, active: ProjectSubTab, area: Rect)
     let mut spans = Vec::new();
     spans.push(Span::raw(" "));
     spans.extend(make_tab("Overview", "1", active == ProjectSubTab::Overview));
-    spans.extend(make_tab("Threads", "2", active == ProjectSubTab::Threads));
+    spans.extend(make_tab("Sessions", "2", active == ProjectSubTab::Sessions));
     spans.extend(make_tab("Plans", "3", active == ProjectSubTab::Plans));
     spans.extend(make_tab("Files", "4", active == ProjectSubTab::Files));
 
@@ -2893,78 +2893,73 @@ fn render_project_overview_content(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Render the project threads content (table of threads).
-fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.project_threads.is_empty() {
-        let empty_msg = Paragraph::new("No threads found for this project")
+/// Render the project sessions content (table of sessions).
+fn render_project_sessions_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.project_sessions.is_empty() {
+        let empty_msg = Paragraph::new("No sessions found for this project")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(BORDER_PROJECT))
-                    .title(" Threads ")
+                    .title(" Sessions ")
                     .title_style(Style::default().fg(BORDER_PROJECT).bold()),
             );
         frame.render_widget(empty_msg, area);
         return;
     }
 
-    let header_cells = ["Last Updated", "Thread ID", "Type", "Msgs"]
+    let header_cells = ["Session ID", "Last Updated", "Duration", "Threads", "Msgs", "Model"]
         .into_iter()
         .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
     let header = Row::new(header_cells).height(1);
 
-    let rows = app.project_threads.iter().map(|thread| {
-        let (badge, type_text, color) = match thread.thread_type {
-            aiobscura_core::ThreadType::Main => ("●", "main", BADGE_MAIN),
-            aiobscura_core::ThreadType::Agent => ("◎", "agent", BADGE_AGENT),
-            aiobscura_core::ThreadType::Background => ("◇", "bg", BADGE_BG),
-        };
-
-        // Use tree-drawing characters for hierarchy (like main Threads view)
-        let tree_prefix = if thread.indent_level > 0 {
-            if thread.is_last_child {
-                "└"
-            } else {
-                "├"
-            }
-        } else {
-            ""
-        };
-
-        let type_cell = Cell::from(Line::from(vec![
-            Span::styled(tree_prefix, Style::default().fg(SEPARATOR_COLOR)),
-            Span::styled(format!("{} ", badge), Style::default().fg(color)),
-            Span::styled(type_text, Style::default().fg(color)),
-        ]));
-
-        let msg_style = if thread.message_count > 100 {
+    let rows = app.project_sessions.iter().map(|session| {
+        let msg_style = if session.message_count > 500 {
             Style::default().fg(Color::Yellow)
-        } else if thread.message_count > 50 {
+        } else if session.message_count > 100 {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
+        let thread_style = if session.thread_count > 5 {
+            Style::default().fg(Color::Yellow)
+        } else if session.thread_count > 1 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let model_display = session
+            .model_name
+            .as_ref()
+            .map(|m| truncate_model_name(m))
+            .unwrap_or_else(|| "—".to_string());
+
         Row::new([
-            Cell::from(thread.relative_time()),
-            Cell::from(thread.short_id()),
-            type_cell,
-            Cell::from(thread.message_count.to_string()).style(msg_style),
+            Cell::from(session.short_id()),
+            Cell::from(session.relative_time()),
+            Cell::from(session.formatted_duration()),
+            Cell::from(session.thread_count.to_string()).style(thread_style),
+            Cell::from(session.message_count.to_string()).style(msg_style),
+            Cell::from(model_display).style(Style::default().fg(Color::DarkGray)),
         ])
     });
 
     let widths = [
+        Constraint::Length(10), // Session ID
         Constraint::Length(12), // Last Updated
-        Constraint::Length(10), // Thread ID
-        Constraint::Length(10), // Type
+        Constraint::Length(10), // Duration
+        Constraint::Length(8),  // Threads
         Constraint::Length(6),  // Msgs
+        Constraint::Min(10),    // Model
     ];
 
-    let thread_count = app.project_threads.len();
+    let session_count = app.project_sessions.len();
     let selected = app
-        .project_threads_table_state
+        .project_sessions_table_state
         .selected()
         .map(|i| i + 1)
         .unwrap_or(0);
@@ -2976,7 +2971,7 @@ fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) 
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(BORDER_PROJECT))
-                .title(format!(" Threads ({}/{}) ", selected, thread_count))
+                .title(format!(" Sessions ({}/{}) ", selected, session_count))
                 .title_style(Style::default().fg(BORDER_PROJECT).bold()),
         )
         .row_highlight_style(
@@ -2986,7 +2981,27 @@ fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) 
         )
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut app.project_threads_table_state);
+    frame.render_stateful_widget(table, area, &mut app.project_sessions_table_state);
+}
+
+/// Truncate model name for display (e.g., "claude-3-5-sonnet-20241022" -> "sonnet-20241022")
+fn truncate_model_name(name: &str) -> String {
+    // Try to extract just the model variant and date
+    if let Some(pos) = name.rfind("sonnet") {
+        return name[pos..].to_string();
+    }
+    if let Some(pos) = name.rfind("opus") {
+        return name[pos..].to_string();
+    }
+    if let Some(pos) = name.rfind("haiku") {
+        return name[pos..].to_string();
+    }
+    // Fall back to last 15 chars if name is too long
+    if name.len() > 15 {
+        format!("...{}", &name[name.len() - 12..])
+    } else {
+        name.to_string()
+    }
 }
 
 /// Render the project plans content (table of plans).

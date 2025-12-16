@@ -16,14 +16,14 @@ use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
-use crate::thread_row::ThreadRow;
+use crate::thread_row::{SessionRow, ThreadRow};
 
 /// Sub-tab within Project detail view.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ProjectSubTab {
     #[default]
     Overview,
-    Threads,
+    Sessions,
     Plans,
     Files,
 }
@@ -168,10 +168,10 @@ pub struct App {
     pub dashboard_stats: Option<DashboardStats>,
 
     // ========== Project Sub-Tab State ==========
-    /// Threads for current project (filtered)
-    pub project_threads: Vec<ThreadRow>,
-    /// Project threads table selection state
-    pub project_threads_table_state: TableState,
+    /// Sessions for current project
+    pub project_sessions: Vec<SessionRow>,
+    /// Project sessions table selection state
+    pub project_sessions_table_state: TableState,
     /// Plans for current project
     pub project_plans: Vec<Plan>,
     /// Project plans table selection state
@@ -241,8 +241,8 @@ impl App {
             project_stats: None,
             dashboard_stats: None,
             // Project sub-tab state
-            project_threads: Vec::new(),
-            project_threads_table_state: TableState::default(),
+            project_sessions: Vec::new(),
+            project_sessions_table_state: TableState::default(),
             project_plans: Vec::new(),
             project_plans_table_state: TableState::default(),
             project_files: Vec::new(),
@@ -1453,7 +1453,7 @@ impl App {
                 self.set_project_sub_tab(ProjectSubTab::Overview);
             }
             KeyCode::Char('2') | KeyCode::Char('t') => {
-                self.set_project_sub_tab(ProjectSubTab::Threads);
+                self.set_project_sub_tab(ProjectSubTab::Sessions);
             }
             KeyCode::Char('3') | KeyCode::Char('p') => {
                 self.set_project_sub_tab(ProjectSubTab::Plans);
@@ -1643,12 +1643,12 @@ impl App {
             } => {
                 let project_id = project_id.clone();
                 match sub_tab {
-                    ProjectSubTab::Threads => {
-                        let selected = self.project_threads_table_state.selected();
-                        self.load_project_threads(&project_id)?;
+                    ProjectSubTab::Sessions => {
+                        let selected = self.project_sessions_table_state.selected();
+                        self.load_project_sessions(&project_id)?;
                         if let Some(idx) = selected {
-                            if idx < self.project_threads.len() {
-                                self.project_threads_table_state.select(Some(idx));
+                            if idx < self.project_sessions.len() {
+                                self.project_sessions_table_state.select(Some(idx));
                             }
                         }
                     }
@@ -1683,140 +1683,33 @@ impl App {
 
     // ========== Project Sub-Tab Data Loading ==========
 
-    /// Load threads filtered by project_id, grouping agents under their parent main threads.
-    fn load_project_threads(&mut self, project_id: &str) -> Result<()> {
-        use std::collections::HashMap;
+    /// Load sessions for a project.
+    fn load_project_sessions(&mut self, project_id: &str) -> Result<()> {
+        let summaries = self.db.list_project_sessions(project_id)?;
+        self.project_sessions.clear();
 
-        let sessions = self.db.list_sessions(&SessionFilter::default())?;
-        self.project_threads.clear();
+        for summary in summaries {
+            // Calculate duration from started_at to last_activity_at
+            let duration_secs = summary
+                .last_activity_at
+                .map(|last| last.signed_duration_since(summary.started_at).num_seconds())
+                .unwrap_or(0)
+                .max(0);
 
-        // Collect all threads with their metadata
-        struct ThreadInfo {
-            thread: aiobscura_core::Thread,
-            session_id: String,
-            project_name: String,
-            assistant_name: String,
-            message_count: i64,
-        }
-
-        let mut all_threads: Vec<ThreadInfo> = Vec::new();
-
-        for session in sessions {
-            // Skip sessions that don't belong to this project
-            if session.project_id.as_ref() != Some(&project_id.to_string()) {
-                continue;
-            }
-
-            // Get project name
-            let project_name = session
-                .project_id
-                .as_ref()
-                .and_then(|id| self.db.get_project(id).ok().flatten())
-                .and_then(|p| p.name)
-                .unwrap_or_else(|| "(no project)".to_string());
-
-            let assistant_name = session.assistant.display_name().to_string();
-
-            // Get all threads for this session
-            let threads = self.db.get_session_threads(&session.id).unwrap_or_default();
-
-            for thread in threads {
-                let message_count = self.db.count_thread_messages(&thread.id).unwrap_or(0);
-
-                all_threads.push(ThreadInfo {
-                    thread,
-                    session_id: session.id.clone(),
-                    project_name: project_name.clone(),
-                    assistant_name: assistant_name.clone(),
-                    message_count,
-                });
-            }
-        }
-
-        // Build parent -> children map
-        let mut children_map: HashMap<String, Vec<usize>> = HashMap::new();
-        for (idx, info) in all_threads.iter().enumerate() {
-            if let Some(parent_id) = &info.thread.parent_thread_id {
-                children_map.entry(parent_id.clone()).or_default().push(idx);
-            }
-        }
-
-        // Separate main threads
-        let mut main_threads: Vec<&ThreadInfo> = all_threads
-            .iter()
-            .filter(|t| t.thread.thread_type == aiobscura_core::ThreadType::Main)
-            .collect();
-
-        // Sort main threads by last activity (most recent first)
-        main_threads.sort_by(|a, b| {
-            let a_time = a.thread.ended_at.or(Some(a.thread.started_at));
-            let b_time = b.thread.ended_at.or(Some(b.thread.started_at));
-            b_time.cmp(&a_time)
-        });
-
-        // Build the final list with hierarchy
-        for main_info in main_threads {
-            // Get actual last message timestamp, fall back to thread timestamps
-            let last_activity = self
-                .db
-                .get_thread_last_activity(&main_info.thread.id)
-                .ok()
-                .flatten()
-                .or(main_info.thread.ended_at)
-                .or(Some(main_info.thread.started_at));
-
-            // Add main thread
-            self.project_threads.push(ThreadRow {
-                id: main_info.thread.id.clone(),
-                session_id: main_info.session_id.clone(),
-                thread_type: main_info.thread.thread_type,
-                parent_thread_id: None,
-                last_activity,
-                project_name: main_info.project_name.clone(),
-                assistant_name: main_info.assistant_name.clone(),
-                message_count: main_info.message_count,
-                indent_level: 0,
-                is_last_child: false,
+            self.project_sessions.push(SessionRow {
+                id: summary.id,
+                last_activity: summary.last_activity_at,
+                duration_secs,
+                thread_count: summary.thread_count,
+                message_count: summary.message_count,
+                model_name: summary.model_name,
             });
-
-            // Add child threads (agents spawned by this main thread)
-            if let Some(child_indices) = children_map.get(&main_info.thread.id) {
-                let mut children: Vec<&ThreadInfo> =
-                    child_indices.iter().map(|&idx| &all_threads[idx]).collect();
-                // Sort children by started_at (oldest first, so they appear in chronological order)
-                children.sort_by(|a, b| a.thread.started_at.cmp(&b.thread.started_at));
-
-                let child_count = children.len();
-                for (child_idx, child_info) in children.into_iter().enumerate() {
-                    // Get actual last message timestamp, fall back to thread timestamps
-                    let last_activity = self
-                        .db
-                        .get_thread_last_activity(&child_info.thread.id)
-                        .ok()
-                        .flatten()
-                        .or(child_info.thread.ended_at)
-                        .or(Some(child_info.thread.started_at));
-
-                    self.project_threads.push(ThreadRow {
-                        id: child_info.thread.id.clone(),
-                        session_id: child_info.session_id.clone(),
-                        thread_type: child_info.thread.thread_type,
-                        parent_thread_id: child_info.thread.parent_thread_id.clone(),
-                        last_activity,
-                        project_name: child_info.project_name.clone(),
-                        assistant_name: child_info.assistant_name.clone(),
-                        message_count: child_info.message_count,
-                        indent_level: 1,
-                        is_last_child: child_idx == child_count - 1,
-                    });
-                }
-            }
         }
 
         // Select first if any
-        self.project_threads_table_state = TableState::default();
-        if !self.project_threads.is_empty() {
-            self.project_threads_table_state.select(Some(0));
+        self.project_sessions_table_state = TableState::default();
+        if !self.project_sessions.is_empty() {
+            self.project_sessions_table_state.select(Some(0));
         }
 
         Ok(())
@@ -1877,16 +1770,16 @@ impl App {
         if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
             let next_tab = if forward {
                 match sub_tab {
-                    ProjectSubTab::Overview => ProjectSubTab::Threads,
-                    ProjectSubTab::Threads => ProjectSubTab::Plans,
+                    ProjectSubTab::Overview => ProjectSubTab::Sessions,
+                    ProjectSubTab::Sessions => ProjectSubTab::Plans,
                     ProjectSubTab::Plans => ProjectSubTab::Files,
                     ProjectSubTab::Files => ProjectSubTab::Overview,
                 }
             } else {
                 match sub_tab {
                     ProjectSubTab::Overview => ProjectSubTab::Files,
-                    ProjectSubTab::Threads => ProjectSubTab::Overview,
-                    ProjectSubTab::Plans => ProjectSubTab::Threads,
+                    ProjectSubTab::Sessions => ProjectSubTab::Overview,
+                    ProjectSubTab::Plans => ProjectSubTab::Sessions,
                     ProjectSubTab::Files => ProjectSubTab::Plans,
                 }
             };
@@ -1915,8 +1808,8 @@ impl App {
                 ProjectSubTab::Overview => {
                     // Overview data is already loaded in project_stats
                 }
-                ProjectSubTab::Threads => {
-                    let _ = self.load_project_threads(&project_id);
+                ProjectSubTab::Sessions => {
+                    let _ = self.load_project_sessions(&project_id);
                 }
                 ProjectSubTab::Plans => {
                     let _ = self.load_project_plans(&project_id);
@@ -1938,16 +1831,16 @@ impl App {
     fn project_list_next(&mut self) {
         if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
             match sub_tab {
-                ProjectSubTab::Threads => {
-                    if self.project_threads.is_empty() {
+                ProjectSubTab::Sessions => {
+                    if self.project_sessions.is_empty() {
                         return;
                     }
-                    let i = match self.project_threads_table_state.selected() {
-                        Some(i) if i >= self.project_threads.len() - 1 => 0,
+                    let i = match self.project_sessions_table_state.selected() {
+                        Some(i) if i >= self.project_sessions.len() - 1 => 0,
                         Some(i) => i + 1,
                         None => 0,
                     };
-                    self.project_threads_table_state.select(Some(i));
+                    self.project_sessions_table_state.select(Some(i));
                 }
                 ProjectSubTab::Plans => {
                     if self.project_plans.is_empty() {
@@ -1980,16 +1873,16 @@ impl App {
     fn project_list_previous(&mut self) {
         if let ViewMode::ProjectDetail { sub_tab, .. } = &self.view_mode {
             match sub_tab {
-                ProjectSubTab::Threads => {
-                    if self.project_threads.is_empty() {
+                ProjectSubTab::Sessions => {
+                    if self.project_sessions.is_empty() {
                         return;
                     }
-                    let i = match self.project_threads_table_state.selected() {
-                        Some(0) => self.project_threads.len() - 1,
+                    let i = match self.project_sessions_table_state.selected() {
+                        Some(0) => self.project_sessions.len() - 1,
                         Some(i) => i - 1,
                         None => 0,
                     };
-                    self.project_threads_table_state.select(Some(i));
+                    self.project_sessions_table_state.select(Some(i));
                 }
                 ProjectSubTab::Plans => {
                     if self.project_plans.is_empty() {
@@ -2027,38 +1920,9 @@ impl App {
         } = self.view_mode.clone()
         {
             match sub_tab {
-                ProjectSubTab::Threads => {
-                    // Open the selected thread in detail view
-                    if let Some(idx) = self.project_threads_table_state.selected() {
-                        if let Some(thread) = self.project_threads.get(idx) {
-                            let thread_id = thread.id.clone();
-                            let session_id = thread.session_id.clone();
-                            let thread_name =
-                                format!("{} - {}", thread.project_name, thread.short_id());
-
-                            // Load messages for this thread
-                            if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
-                                // Save return destination
-                                self.return_to_project = Some((project_id, project_name, sub_tab));
-                                self.messages = messages;
-                                self.scroll_offset = 0;
-                                self.thread_metadata =
-                                    self.load_thread_metadata(&thread_id, &session_id);
-                                // Load/compute analytics (both session and thread)
-                                self.load_session_analytics(&session_id);
-                                self.load_thread_analytics(&thread_id);
-
-                                // Reset analytics view mode to session (default)
-                                self.analytics_view_mode = AnalyticsViewMode::Session;
-                                self.analytics_scroll_offset = 0;
-
-                                self.view_mode = ViewMode::Detail {
-                                    thread_id,
-                                    thread_name,
-                                };
-                            }
-                        }
-                    }
+                ProjectSubTab::Sessions => {
+                    // TODO: Waypoint 3 - Open session detail view
+                    // For now, do nothing when pressing Enter on a session
                 }
                 ProjectSubTab::Plans => {
                     // Open the selected plan in detail view
