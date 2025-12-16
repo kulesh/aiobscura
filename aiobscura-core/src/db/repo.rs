@@ -971,6 +971,250 @@ impl Database {
     }
 
     // ============================================
+    // Plugin Metrics operations
+    // ============================================
+
+    /// Insert or update a plugin metric.
+    ///
+    /// Metrics are upserted based on (plugin_name, entity_type, entity_id, metric_name).
+    /// This makes plugin runs idempotent.
+    pub fn insert_plugin_metric(
+        &self,
+        plugin_name: &str,
+        entity_type: &str,
+        entity_id: Option<&str>,
+        metric_name: &str,
+        metric_value: &serde_json::Value,
+        metric_version: i32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO plugin_metrics (plugin_name, entity_type, entity_id, metric_name, metric_value, metric_version, computed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(plugin_name, entity_type, entity_id, metric_name) DO UPDATE SET
+                metric_value = excluded.metric_value,
+                metric_version = excluded.metric_version,
+                computed_at = excluded.computed_at
+            "#,
+            params![
+                plugin_name,
+                entity_type,
+                entity_id,
+                metric_name,
+                // Use serde_json::to_string to ensure valid JSON text representation
+                // This wraps strings in quotes and ensures consistent TEXT storage
+                serde_json::to_string(metric_value).unwrap_or_else(|_| "null".to_string()),
+                metric_version,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all metrics for a specific entity from a plugin.
+    pub fn get_plugin_metrics(
+        &self,
+        plugin_name: &str,
+        entity_type: &str,
+        entity_id: Option<&str>,
+    ) -> Result<Vec<crate::types::PluginMetric>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, plugin_name, entity_type, entity_id, metric_name, metric_value, computed_at
+            FROM plugin_metrics
+            WHERE plugin_name = ?1
+              AND entity_type = ?2
+              AND ((?3 IS NULL AND entity_id IS NULL) OR entity_id = ?3)
+            "#,
+        )?;
+
+        let metrics = stmt
+            .query_map(params![plugin_name, entity_type, entity_id], |row| {
+                let computed_at_str: String = row.get(6)?;
+                // Handle different SQLite storage types for metric_value
+                let metric_value = Self::parse_metric_value(row.get_ref(5)?);
+                Ok(crate::types::PluginMetric {
+                    id: row.get(0)?,
+                    plugin_name: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    metric_name: row.get(4)?,
+                    metric_value,
+                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(metrics)
+    }
+
+    /// Parse a metric value from SQLite's dynamic type into JSON.
+    ///
+    /// SQLite may store JSON values as INTEGER, REAL, or TEXT depending on the value.
+    /// This function handles all cases and returns a serde_json::Value.
+    fn parse_metric_value(value_ref: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+        match value_ref {
+            rusqlite::types::ValueRef::Null => serde_json::json!(null),
+            rusqlite::types::ValueRef::Integer(i) => serde_json::json!(i),
+            rusqlite::types::ValueRef::Real(f) => serde_json::json!(f),
+            rusqlite::types::ValueRef::Text(s) => {
+                let s = std::str::from_utf8(s).unwrap_or("null");
+                serde_json::from_str(s).unwrap_or(serde_json::json!(null))
+            }
+            rusqlite::types::ValueRef::Blob(_) => serde_json::json!(null),
+        }
+    }
+
+    /// Get all metrics for a session across all plugins.
+    pub fn get_session_plugin_metrics(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::types::PluginMetric>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, plugin_name, entity_type, entity_id, metric_name, metric_value, computed_at
+            FROM plugin_metrics
+            WHERE entity_type = 'session' AND entity_id = ?
+            ORDER BY plugin_name, metric_name
+            "#,
+        )?;
+
+        let metrics = stmt
+            .query_map([session_id], |row| {
+                let computed_at_str: String = row.get(6)?;
+                let metric_value = Self::parse_metric_value(row.get_ref(5)?);
+                Ok(crate::types::PluginMetric {
+                    id: row.get(0)?,
+                    plugin_name: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    metric_name: row.get(4)?,
+                    metric_value,
+                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(metrics)
+    }
+
+    /// Insert a plugin run record for observability.
+    ///
+    /// Returns the ID of the inserted record.
+    pub fn insert_plugin_run(&self, run: &crate::analytics::PluginRunResult) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO plugin_runs (plugin_name, session_id, started_at, duration_ms, status, error_message, metrics_produced, input_message_count, input_token_count)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                run.plugin_name,
+                run.session_id,
+                run.started_at.to_rfc3339(),
+                run.duration_ms,
+                run.status.as_str(),
+                run.error_message,
+                run.metrics_produced as i64,
+                run.input_message_count as i64,
+                run.input_token_count,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get recent plugin runs for a specific plugin.
+    pub fn get_plugin_runs(
+        &self,
+        plugin_name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::analytics::PluginRunResult>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT plugin_name, session_id, started_at, duration_ms, status, error_message, metrics_produced, input_message_count, input_token_count
+            FROM plugin_runs
+            WHERE plugin_name = ?
+            ORDER BY started_at DESC
+            LIMIT ?
+            "#,
+        )?;
+
+        let runs = stmt
+            .query_map(params![plugin_name, limit as i64], |row| {
+                let started_at_str: String = row.get(2)?;
+                let status_str: String = row.get(4)?;
+                Ok(crate::analytics::PluginRunResult {
+                    plugin_name: row.get(0)?,
+                    session_id: row.get(1)?,
+                    started_at: DateTime::parse_from_rfc3339(&started_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    duration_ms: row.get(3)?,
+                    status: if status_str == "success" {
+                        crate::analytics::PluginRunStatus::Success
+                    } else {
+                        crate::analytics::PluginRunStatus::Error
+                    },
+                    error_message: row.get(5)?,
+                    metrics_produced: row.get::<_, i64>(6)? as usize,
+                    input_message_count: row.get::<_, i64>(7)? as usize,
+                    input_token_count: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(runs)
+    }
+
+    /// Get plugin run statistics for observability.
+    ///
+    /// Returns (success_count, error_count, avg_duration_ms) for each plugin.
+    pub fn get_plugin_stats(&self) -> Result<Vec<(String, i64, i64, f64)>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                plugin_name,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                AVG(duration_ms) as avg_duration
+            FROM plugin_runs
+            GROUP BY plugin_name
+            ORDER BY plugin_name
+            "#,
+        )?;
+
+        let stats = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(stats)
+    }
+
+    // ============================================
     // Metadata/Stats operations (for TUI)
     // ============================================
 

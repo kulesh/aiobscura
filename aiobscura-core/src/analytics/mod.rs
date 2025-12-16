@@ -1,17 +1,37 @@
 //! Analytics module for aiobscura
 //!
 //! Provides aggregate statistics and insights including:
+//! - Plugin-based analytics framework
 //! - Wrapped (year/month in review)
 //! - Personality classification
 //! - Usage trends
 //! - Project-level analytics
 //! - Dashboard statistics
+//!
+//! ## Plugin Framework
+//!
+//! The analytics system uses a plugin architecture where each plugin:
+//! - Consumes Layer 1 data (sessions, messages)
+//! - Produces Layer 2 metrics stored in `plugin_metrics`
+//! - Can be triggered on-demand (future: event-based, scheduled)
+//!
+//! See [`engine`] module for the core framework and [`plugins`] for built-in plugins.
 
 pub mod dashboard;
+pub mod engine;
 pub mod personality;
+pub mod plugins;
 pub mod project;
 pub mod wrapped;
 
+// Engine exports
+pub use engine::{
+    AnalyticsContext, AnalyticsEngine, AnalyticsPlugin, AnalyticsTrigger, MetricOutput,
+    PluginRunResult, PluginRunStatus, METRIC_VERSION,
+};
+pub use plugins::create_default_engine;
+
+// Existing exports
 pub use dashboard::DashboardStats;
 pub use personality::Personality;
 pub use project::{ProjectRow, ProjectStats};
