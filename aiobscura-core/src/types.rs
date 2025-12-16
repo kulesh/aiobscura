@@ -433,15 +433,18 @@ pub struct Thread {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorRole {
-    /// Real person
+    /// Real person interacting in main conversation
     Human,
-    /// The coding assistant (Claude Code, etc.)
+    /// CLI or parent assistant invoking a session/agent
+    Caller,
+    /// The coding assistant (Claude Code, Codex, etc.)
     Assistant,
     /// Subprocess spawned by assistant (Task agent, etc.)
+    /// Note: Currently unused by parsers; reserved for unified timeline views
     Agent,
     /// Tool execution (Bash, Read, Edit)
     Tool,
-    /// System messages, context injection
+    /// System-level events (snapshots, internal context)
     System,
 }
 
@@ -449,6 +452,7 @@ impl AuthorRole {
     pub fn as_str(&self) -> &'static str {
         match self {
             AuthorRole::Human => "human",
+            AuthorRole::Caller => "caller",
             AuthorRole::Assistant => "assistant",
             AuthorRole::Agent => "agent",
             AuthorRole::Tool => "tool",
@@ -463,6 +467,7 @@ impl std::str::FromStr for AuthorRole {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "human" => Ok(AuthorRole::Human),
+            "caller" => Ok(AuthorRole::Caller),
             "assistant" => Ok(AuthorRole::Assistant),
             "agent" => Ok(AuthorRole::Agent),
             "tool" => Ok(AuthorRole::Tool),
@@ -485,6 +490,13 @@ impl Author {
     pub fn human() -> Self {
         Self {
             role: AuthorRole::Human,
+            name: None,
+        }
+    }
+
+    pub fn caller() -> Self {
+        Self {
+            role: AuthorRole::Caller,
             name: None,
         }
     }
@@ -698,6 +710,78 @@ impl Message {
                 self.message_type,
                 MessageType::Prompt | MessageType::Response
             )
+    }
+
+    /// Get a one-line preview of the message content suitable for display.
+    ///
+    /// For tool calls, shows `<tool_name> argument_preview`.
+    /// For tool results, shows the first line of output.
+    /// For other messages, shows the first line of content.
+    pub fn preview(&self, max_len: usize) -> String {
+        match self.message_type {
+            MessageType::ToolCall => {
+                let tool = self.tool_name.as_deref().unwrap_or("unknown");
+                let arg_preview = self.tool_arg_preview();
+                if arg_preview.is_empty() {
+                    format!("<{}>", tool)
+                } else {
+                    Self::truncate(&format!("<{}> {}", tool, arg_preview), max_len)
+                }
+            }
+            MessageType::ToolResult => self
+                .tool_result
+                .as_ref()
+                .and_then(|r| r.lines().next())
+                .map(|s| Self::truncate(s, max_len))
+                .unwrap_or_else(|| "[result]".to_string()),
+            _ => self
+                .content
+                .as_ref()
+                .and_then(|c| c.lines().next())
+                .map(|s| Self::truncate(s, max_len))
+                .unwrap_or_else(|| {
+                    // Fallback to tool_name for any other message with tool_name
+                    self.tool_name
+                        .as_ref()
+                        .map(|t| format!("<{}>", t))
+                        .unwrap_or_default()
+                }),
+        }
+    }
+
+    /// Extract a meaningful preview from tool_input JSON.
+    /// Tries common field names used by various tools (command, file_path, etc.)
+    fn tool_arg_preview(&self) -> String {
+        self.tool_input
+            .as_ref()
+            .and_then(|v| {
+                v.get("command")
+                    .or_else(|| v.get("file_path"))
+                    .or_else(|| v.get("filePath"))
+                    .or_else(|| v.get("path"))
+                    .or_else(|| v.get("pattern"))
+                    .or_else(|| v.get("query"))
+                    .or_else(|| v.get("content"))
+                    .or_else(|| v.get("description"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Truncate a string to max length with ellipsis.
+    fn truncate(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            // Find a valid char boundary at or before max_len - 3 (for "...")
+            let target = max_len.saturating_sub(3);
+            let mut end = target;
+            while !s.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}...", &s[..end])
+        }
     }
 }
 
