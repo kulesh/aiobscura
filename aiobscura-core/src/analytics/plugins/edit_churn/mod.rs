@@ -1,10 +1,11 @@
 //! Edit Churn Analyzer
 //!
-//! Tracks how many times each file is modified in a session.
-//! High churn (same file edited many times) can indicate:
-//! - Iterative debugging
-//! - Unclear requirements
-//! - AI making incremental mistakes
+//! Tracks file modification patterns in AI coding sessions using a two-pronged approach:
+//!
+//! 1. **Statistical Outliers** - Files with significantly more edits than the session average
+//! 2. **Burst Detection** - Files with rapid consecutive edits (debugging loops)
+//!
+//! See `docs/edit-churn-algorithm.md` for detailed algorithm documentation.
 //!
 //! ## Metrics Produced
 //!
@@ -16,7 +17,10 @@
 //! | `unique_files` | integer | Number of distinct files modified |
 //! | `churn_ratio` | float | `(total_edits - unique_files) / total_edits` |
 //! | `file_edit_counts` | object | Map of file path to edit count |
-//! | `high_churn_files` | array | Files edited 3+ times, sorted by count |
+//! | `high_churn_files` | array | Statistical outliers (dynamic threshold) |
+//! | `high_churn_threshold` | float | Computed threshold for this session |
+//! | `burst_edit_files` | object | Files with burst patterns: {path: count} |
+//! | `burst_edit_count` | integer | Total burst incidents detected |
 //! | `lines_added` | integer | Total lines added across all edits |
 //! | `lines_removed` | integer | Total lines removed across all edits |
 //! | `lines_changed` | integer | Total lines changed (added + removed) |
@@ -24,33 +28,50 @@
 //! | `first_try_files` | integer | Files edited exactly once (no rework) |
 //! | `first_try_rate` | float | Percentage of files edited exactly once |
 //!
-//! ## Churn Ratio Interpretation
+//! ## High Churn Detection
 //!
-//! - `0.0` = Each file edited exactly once (no churn)
-//! - `0.5` = On average, each file edited twice
-//! - `0.67` = On average, each file edited three times
-//! - Higher values indicate more re-editing of the same files
+//! Uses dynamic threshold: `max(3, median + 2*stddev)` to identify statistical outliers.
+//! Falls back to threshold=3 for sessions with fewer than 5 files.
+//!
+//! ## Burst Detection
+//!
+//! A "burst" is 3+ edits to the same file within 2 minutes.
+//! Indicates debugging loops or trial-and-error fixing.
 //!
 //! ## Example
 //!
 //! Session with these edits:
-//! - `src/main.rs` (3 times)
+//! - `src/main.rs` (15 times, 3 bursts)
 //! - `src/lib.rs` (2 times)
 //! - `Cargo.toml` (1 time)
 //!
 //! Results:
-//! - `edit_count`: 6
+//! - `edit_count`: 18
 //! - `unique_files`: 3
-//! - `churn_ratio`: (6 - 3) / 6 = 0.5
-//! - `high_churn_files`: `["src/main.rs"]`
+//! - `high_churn_threshold`: ~10 (computed from session stats)
+//! - `high_churn_files`: `["src/main.rs"]` (15 >= 10)
+//! - `burst_edit_files`: `{"src/main.rs": 3}`
+//! - `burst_edit_count`: 3
 
 use crate::analytics::engine::{AnalyticsContext, AnalyticsPlugin, AnalyticsTrigger, MetricOutput};
 use crate::error::Result;
 use crate::types::{Message, MessageType, Session};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-/// Minimum edit count to be considered "high churn".
+/// Minimum edit count to be considered "high churn" (absolute floor).
 const HIGH_CHURN_THRESHOLD: i64 = 3;
+
+/// Window for burst detection (2 minutes in seconds).
+const BURST_WINDOW_SECONDS: i64 = 120;
+
+/// Minimum files needed for statistical threshold calculation.
+/// Below this, we fall back to the fixed HIGH_CHURN_THRESHOLD.
+const MIN_FILES_FOR_STATS: usize = 5;
+
+/// Standard deviation multiplier for outlier detection.
+/// 2.0 is more conservative than 1.5, reducing false positives.
+const OUTLIER_STDDEV_MULTIPLIER: f64 = 2.0;
 
 /// Paths containing these patterns are excluded from churn analysis.
 /// These are typically AI-generated planning docs, not user code.
@@ -171,6 +192,93 @@ impl EditChurnAnalyzer {
         }
         (total_edits - unique_files) as f64 / total_edits as f64
     }
+
+    /// Compute median of a slice of i64 values.
+    fn compute_median(counts: &[i64]) -> f64 {
+        if counts.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = counts.to_vec();
+        sorted.sort();
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            (sorted[mid - 1] + sorted[mid]) as f64 / 2.0
+        } else {
+            sorted[mid] as f64
+        }
+    }
+
+    /// Compute standard deviation of a slice of i64 values.
+    fn compute_stddev(counts: &[i64], mean: f64) -> f64 {
+        if counts.is_empty() {
+            return 0.0;
+        }
+        let variance: f64 = counts
+            .iter()
+            .map(|&x| {
+                let diff = x as f64 - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / counts.len() as f64;
+        variance.sqrt()
+    }
+
+    /// Compute dynamic threshold for high churn based on session statistics.
+    ///
+    /// Uses median + 2*stddev for sessions with 5+ files, otherwise falls back
+    /// to the fixed HIGH_CHURN_THRESHOLD.
+    fn compute_dynamic_threshold(counts: &[i64]) -> f64 {
+        if counts.len() < MIN_FILES_FOR_STATS {
+            return HIGH_CHURN_THRESHOLD as f64;
+        }
+
+        let median = Self::compute_median(counts);
+        let mean: f64 = counts.iter().sum::<i64>() as f64 / counts.len() as f64;
+        let stddev = Self::compute_stddev(counts, mean);
+
+        // threshold = max(3, median + 2*stddev)
+        (median + OUTLIER_STDDEV_MULTIPLIER * stddev).max(HIGH_CHURN_THRESHOLD as f64)
+    }
+
+    /// Detect burst editing patterns in file timestamps.
+    ///
+    /// A "burst" is 3+ edits to the same file within BURST_WINDOW_SECONDS.
+    /// Returns a map of file path to number of burst incidents detected.
+    fn detect_burst_edits(
+        file_timestamps: &HashMap<String, Vec<DateTime<Utc>>>,
+    ) -> HashMap<String, i64> {
+        let mut burst_files: HashMap<String, i64> = HashMap::new();
+
+        for (file_path, timestamps) in file_timestamps {
+            // Need at least 3 edits to have a burst
+            if timestamps.len() < 3 {
+                continue;
+            }
+
+            // Sort timestamps
+            let mut sorted_ts = timestamps.clone();
+            sorted_ts.sort();
+
+            // Sliding window: check if any 3 consecutive edits are within the burst window
+            let mut burst_count = 0i64;
+            for i in 0..sorted_ts.len() - 2 {
+                let window_start = sorted_ts[i];
+                let window_end = sorted_ts[i + 2]; // Third edit in potential burst
+
+                let duration_secs = (window_end - window_start).num_seconds();
+                if duration_secs <= BURST_WINDOW_SECONDS {
+                    burst_count += 1;
+                }
+            }
+
+            if burst_count > 0 {
+                burst_files.insert(file_path.clone(), burst_count);
+            }
+        }
+
+        burst_files
+    }
 }
 
 impl Default for EditChurnAnalyzer {
@@ -195,6 +303,7 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
         _ctx: &AnalyticsContext,
     ) -> Result<Vec<MetricOutput>> {
         let mut file_counts: HashMap<String, i64> = HashMap::new();
+        let mut file_timestamps: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
         let mut extension_counts: HashMap<String, i64> = HashMap::new();
         let mut total_edits = 0i64;
         let mut total_lines_added = 0i64;
@@ -214,6 +323,12 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                     }
                     total_edits += 1;
                     *file_counts.entry(file_path.clone()).or_insert(0) += 1;
+
+                    // Track timestamps for burst detection
+                    file_timestamps
+                        .entry(file_path.clone())
+                        .or_default()
+                        .push(msg.ts);
 
                     // Track by file extension
                     let ext = Self::extract_extension(&file_path).to_string();
@@ -241,11 +356,25 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
             .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
             .collect();
 
-        // Find high-churn files (edited 3+ times)
+        // Compute dynamic threshold for high churn (statistical outliers)
+        let counts: Vec<i64> = file_counts.values().copied().collect();
+        let high_churn_threshold = Self::compute_dynamic_threshold(&counts);
+
+        // Find high-churn files (statistical outliers)
         let high_churn_files: Vec<&String> = file_edit_list
             .iter()
-            .filter(|(_, count)| **count >= HIGH_CHURN_THRESHOLD)
+            .filter(|(_, count)| **count as f64 >= high_churn_threshold)
             .map(|(path, _)| *path)
+            .collect();
+
+        // Detect burst editing patterns
+        let burst_edit_files = Self::detect_burst_edits(&file_timestamps);
+        let burst_edit_count: i64 = burst_edit_files.values().sum();
+
+        // Build burst_edit_files as JSON object
+        let burst_files_json: serde_json::Value = burst_edit_files
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
             .collect();
 
         // Build extension counts as JSON object (sorted by count)
@@ -277,6 +406,17 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                 &session.id,
                 "high_churn_files",
                 serde_json::json!(high_churn_files),
+            ),
+            MetricOutput::session(
+                &session.id,
+                "high_churn_threshold",
+                serde_json::json!(high_churn_threshold),
+            ),
+            MetricOutput::session(&session.id, "burst_edit_files", burst_files_json),
+            MetricOutput::session(
+                &session.id,
+                "burst_edit_count",
+                serde_json::json!(burst_edit_count),
             ),
             MetricOutput::session(
                 &session.id,
@@ -567,5 +707,131 @@ mod tests {
         let unique_files = 10i64;
         let rate = first_try_files as f64 / unique_files as f64;
         assert!((rate - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_compute_median() {
+        // Odd number of elements
+        assert_eq!(EditChurnAnalyzer::compute_median(&[1, 2, 3, 4, 5]), 3.0);
+
+        // Even number of elements
+        assert_eq!(EditChurnAnalyzer::compute_median(&[1, 2, 3, 4]), 2.5);
+
+        // Single element
+        assert_eq!(EditChurnAnalyzer::compute_median(&[7]), 7.0);
+
+        // Empty
+        assert_eq!(EditChurnAnalyzer::compute_median(&[]), 0.0);
+
+        // Unsorted input (should still work)
+        assert_eq!(EditChurnAnalyzer::compute_median(&[5, 1, 3, 2, 4]), 3.0);
+    }
+
+    #[test]
+    fn test_compute_stddev() {
+        // [1, 2, 3, 4, 5] mean=3, variance=2, stddev=sqrt(2)≈1.414
+        let stddev = EditChurnAnalyzer::compute_stddev(&[1, 2, 3, 4, 5], 3.0);
+        assert!((stddev - 1.414).abs() < 0.01);
+
+        // All same values = 0 stddev
+        let stddev = EditChurnAnalyzer::compute_stddev(&[5, 5, 5, 5], 5.0);
+        assert_eq!(stddev, 0.0);
+
+        // Empty = 0
+        assert_eq!(EditChurnAnalyzer::compute_stddev(&[], 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_compute_dynamic_threshold() {
+        // Small sample (<5 files) falls back to fixed threshold
+        assert_eq!(EditChurnAnalyzer::compute_dynamic_threshold(&[1, 2, 3, 4]), 3.0);
+
+        // Low variance session: [1, 1, 1, 1, 2]
+        // median=1, mean=1.2, stddev≈0.4, threshold=max(3, 1+0.8)=3
+        let threshold = EditChurnAnalyzer::compute_dynamic_threshold(&[1, 1, 1, 1, 2]);
+        assert!((threshold - 3.0).abs() < 0.1);
+
+        // High variance with outlier: [1, 1, 1, 1, 15]
+        // median=1, mean=3.8, stddev≈5.5, threshold=max(3, 1+11)=12
+        let threshold = EditChurnAnalyzer::compute_dynamic_threshold(&[1, 1, 1, 1, 15]);
+        assert!(threshold > 10.0); // Should be high due to outlier
+
+        // Normal distribution: [5, 6, 7, 8, 9]
+        // median=7, mean=7, stddev≈1.4, threshold=max(3, 7+2.8)≈9.8
+        let threshold = EditChurnAnalyzer::compute_dynamic_threshold(&[5, 6, 7, 8, 9]);
+        assert!(threshold > 9.0 && threshold < 11.0);
+    }
+
+    #[test]
+    fn test_detect_burst_edits() {
+        use chrono::Duration;
+
+        let base_time = Utc::now();
+
+        // File with burst: 3 edits within 30 seconds
+        let mut file_timestamps: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+        file_timestamps.insert(
+            "burst_file.rs".to_string(),
+            vec![
+                base_time,
+                base_time + Duration::seconds(10),
+                base_time + Duration::seconds(25), // 25s from start = burst
+            ],
+        );
+
+        let bursts = EditChurnAnalyzer::detect_burst_edits(&file_timestamps);
+        assert_eq!(bursts.get("burst_file.rs"), Some(&1));
+
+        // File without burst: edits spread out
+        let mut file_timestamps2: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+        file_timestamps2.insert(
+            "spread_file.rs".to_string(),
+            vec![
+                base_time,
+                base_time + Duration::minutes(30),
+                base_time + Duration::minutes(60),
+            ],
+        );
+
+        let bursts2 = EditChurnAnalyzer::detect_burst_edits(&file_timestamps2);
+        assert!(bursts2.is_empty());
+
+        // File with only 2 edits: can't have a burst
+        let mut file_timestamps3: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+        file_timestamps3.insert(
+            "two_edits.rs".to_string(),
+            vec![base_time, base_time + Duration::seconds(5)],
+        );
+
+        let bursts3 = EditChurnAnalyzer::detect_burst_edits(&file_timestamps3);
+        assert!(bursts3.is_empty());
+    }
+
+    #[test]
+    fn test_detect_multiple_bursts() {
+        use chrono::Duration;
+
+        let base_time = Utc::now();
+
+        // File with 2 separate burst incidents
+        let mut file_timestamps: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+        file_timestamps.insert(
+            "multi_burst.rs".to_string(),
+            vec![
+                // First burst: edits at 0, 10, 20 seconds
+                base_time,
+                base_time + Duration::seconds(10),
+                base_time + Duration::seconds(20),
+                // Gap
+                base_time + Duration::minutes(30),
+                // Second burst: edits at 30:00, 30:10, 30:20
+                base_time + Duration::minutes(30) + Duration::seconds(10),
+                base_time + Duration::minutes(30) + Duration::seconds(20),
+            ],
+        );
+
+        let bursts = EditChurnAnalyzer::detect_burst_edits(&file_timestamps);
+        // Should detect 2 burst incidents (sliding window finds overlapping bursts)
+        assert!(bursts.get("multi_burst.rs").unwrap() >= &2);
     }
 }
