@@ -54,6 +54,34 @@ pub struct SessionAnalytics {
     pub computed_at: DateTime<Utc>,
 }
 
+/// Pre-computed analytics for a thread.
+///
+/// Contains the same metrics as SessionAnalytics but scoped to a single thread.
+/// Includes additional fields for more detailed thread-level analysis.
+#[derive(Debug, Clone)]
+pub struct ThreadAnalytics {
+    /// Total number of Edit/Write tool calls in this thread
+    pub edit_count: i64,
+    /// Number of unique files modified in this thread
+    pub unique_files: i64,
+    /// Churn ratio: (edits - unique_files) / edits
+    pub churn_ratio: f64,
+    /// Files with edit counts above the statistical threshold
+    pub high_churn_files: Vec<String>,
+    /// Statistical threshold for high churn (median + 2*stddev)
+    pub high_churn_threshold: f64,
+    /// Files with burst edits (3+ edits within 2 minutes) and their burst counts
+    pub burst_edit_files: std::collections::HashMap<String, i64>,
+    /// Total number of burst edit incidents
+    pub burst_edit_count: i64,
+    /// Total lines changed (added + removed)
+    pub lines_changed: i64,
+    /// Percentage of files that required only one edit (first-try success rate)
+    pub first_try_rate: f64,
+    /// When these metrics were computed
+    pub computed_at: DateTime<Utc>,
+}
+
 // Existing exports
 pub use dashboard::DashboardStats;
 pub use personality::Personality;

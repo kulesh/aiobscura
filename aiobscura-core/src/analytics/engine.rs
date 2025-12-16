@@ -45,7 +45,7 @@
 
 use crate::db::Database;
 use crate::error::{Error, Result};
-use crate::types::{Message, Session};
+use crate::types::{Message, Session, Thread};
 use chrono::{DateTime, Utc};
 use std::time::Instant;
 
@@ -246,6 +246,31 @@ pub trait AnalyticsPlugin: Send + Sync {
         messages: &[Message],
         ctx: &AnalyticsContext,
     ) -> Result<Vec<MetricOutput>>;
+
+    /// Whether this plugin supports thread-level analysis.
+    ///
+    /// Plugins that return `true` must implement `analyze_thread()`.
+    /// Default implementation returns `false`.
+    fn supports_thread_analysis(&self) -> bool {
+        false
+    }
+
+    /// Analyze a single thread and produce metrics.
+    ///
+    /// This is called for each thread when thread-level analytics are requested.
+    /// - `thread`: The thread being analyzed
+    /// - `messages`: All messages in this thread
+    /// - `ctx`: Context for querying additional data if needed
+    ///
+    /// Default implementation returns empty (not supported).
+    fn analyze_thread(
+        &self,
+        _thread: &Thread,
+        _messages: &[Message],
+        _ctx: &AnalyticsContext,
+    ) -> Result<Vec<MetricOutput>> {
+        Ok(vec![])
+    }
 }
 
 // ============================================
@@ -316,9 +341,7 @@ impl AnalyticsEngine {
         // Calculate input token count for observability
         let input_token_count: i64 = messages
             .iter()
-            .map(|m| {
-                m.tokens_in.unwrap_or(0) as i64 + m.tokens_out.unwrap_or(0) as i64
-            })
+            .map(|m| m.tokens_in.unwrap_or(0) as i64 + m.tokens_out.unwrap_or(0) as i64)
             .sum();
 
         tracing::debug!(
@@ -496,15 +519,174 @@ impl AnalyticsEngine {
                 if let Some(error) = result.error_message {
                     errors.push(format!(
                         "{} on {}: {}",
-                        result.plugin_name,
-                        session.id,
-                        error
+                        result.plugin_name, session.id, error
                     ));
                 }
             }
         }
 
         Ok((total_runs, errors))
+    }
+
+    /// Run a specific plugin on a thread.
+    ///
+    /// Similar to `run_plugin`, but calls `analyze_thread` instead.
+    /// Only works for plugins that support thread-level analysis.
+    pub fn run_thread_plugin(
+        &self,
+        plugin_name: &str,
+        thread: &Thread,
+        messages: &[Message],
+        db: &Database,
+    ) -> Result<PluginRunResult> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|p| p.name() == plugin_name)
+            .ok_or_else(|| Error::Config(format!("Plugin not found: {}", plugin_name)))?;
+
+        if !plugin.supports_thread_analysis() {
+            return Err(Error::Config(format!(
+                "Plugin {} does not support thread analysis",
+                plugin_name
+            )));
+        }
+
+        let ctx = AnalyticsContext { db };
+        let started_at = Utc::now();
+        let start = Instant::now();
+
+        // Calculate input token count for observability
+        let input_token_count: i64 = messages
+            .iter()
+            .map(|m| m.tokens_in.unwrap_or(0) as i64 + m.tokens_out.unwrap_or(0) as i64)
+            .sum();
+
+        tracing::debug!(
+            plugin = plugin.name(),
+            thread_id = thread.id,
+            message_count = messages.len(),
+            "Running analytics plugin on thread"
+        );
+
+        match plugin.analyze_thread(thread, messages, &ctx) {
+            Ok(metrics) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+
+                // Store metrics in database
+                for metric in &metrics {
+                    db.insert_plugin_metric(
+                        plugin.name(),
+                        &metric.entity_type,
+                        metric.entity_id.as_deref(),
+                        &metric.metric_name,
+                        &metric.metric_value,
+                        METRIC_VERSION,
+                    )?;
+                }
+
+                let result = PluginRunResult {
+                    plugin_name: plugin.name().to_string(),
+                    session_id: Some(thread.session_id.clone()),
+                    started_at,
+                    duration_ms,
+                    status: PluginRunStatus::Success,
+                    error_message: None,
+                    metrics_produced: metrics.len(),
+                    input_message_count: messages.len(),
+                    input_token_count,
+                };
+
+                tracing::info!(
+                    plugin = plugin.name(),
+                    thread_id = thread.id,
+                    metrics = metrics.len(),
+                    duration_ms = duration_ms,
+                    "Plugin completed successfully on thread"
+                );
+
+                Ok(result)
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                let error_msg = e.to_string();
+
+                tracing::error!(
+                    plugin = plugin.name(),
+                    thread_id = thread.id,
+                    error = %e,
+                    "Plugin failed on thread"
+                );
+
+                Ok(PluginRunResult {
+                    plugin_name: plugin.name().to_string(),
+                    session_id: Some(thread.session_id.clone()),
+                    started_at,
+                    duration_ms,
+                    status: PluginRunStatus::Error,
+                    error_message: Some(error_msg),
+                    metrics_produced: 0,
+                    input_message_count: messages.len(),
+                    input_token_count,
+                })
+            }
+        }
+    }
+
+    /// Ensure thread analytics are computed and up-to-date.
+    ///
+    /// This method:
+    /// 1. Checks if analytics exist for the thread
+    /// 2. Checks if they're still fresh (computed after last message)
+    /// 3. Recomputes if stale or missing
+    /// 4. Returns the analytics
+    ///
+    /// Used by the TUI to show thread-level analytics.
+    pub fn ensure_thread_analytics(
+        &self,
+        thread_id: &str,
+        db: &Database,
+    ) -> Result<crate::analytics::ThreadAnalytics> {
+        // Check if we have existing analytics
+        if let Some(existing) = db.get_thread_analytics(thread_id)? {
+            // Check freshness: is computed_at >= last message timestamp?
+            if let Some(last_msg_ts) = db.get_thread_last_activity(thread_id)? {
+                if existing.computed_at >= last_msg_ts {
+                    // Analytics are fresh, return cached
+                    tracing::debug!(
+                        thread_id,
+                        computed_at = %existing.computed_at,
+                        "Using cached thread analytics"
+                    );
+                    return Ok(existing);
+                }
+                tracing::debug!(
+                    thread_id,
+                    computed_at = %existing.computed_at,
+                    last_msg_ts = %last_msg_ts,
+                    "Thread analytics are stale, recomputing"
+                );
+            } else {
+                // No messages in thread, return existing analytics
+                return Ok(existing);
+            }
+        }
+
+        // Need to compute analytics
+        tracing::info!(thread_id, "Computing thread analytics");
+
+        let thread = db
+            .get_thread(thread_id)?
+            .ok_or_else(|| Error::Config(format!("Thread not found: {}", thread_id)))?;
+
+        let messages = db.get_thread_messages(thread_id, 100_000)?;
+
+        // Run the edit_churn plugin on the thread
+        self.run_thread_plugin("core.edit_churn", &thread, &messages, db)?;
+
+        // Fetch the newly computed analytics
+        db.get_thread_analytics(thread_id)?
+            .ok_or_else(|| Error::Config("Failed to compute thread analytics".to_string()))
     }
 }
 

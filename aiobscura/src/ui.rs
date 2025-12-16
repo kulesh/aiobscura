@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ProjectSubTab, ViewMode};
+use crate::app::{AnalyticsViewMode, App, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -118,7 +118,7 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
         Constraint::Length(5), // Metadata summary (4 rows + border)
-        Constraint::Length(3), // Analytics (1 row + border)
+        Constraint::Length(6), // Analytics panel (4 lines + 2 border)
         Constraint::Min(5),    // Messages
         Constraint::Length(1), // Footer
     ])
@@ -126,7 +126,7 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
 
     render_header(frame, &format!("Thread: {}", thread_name), chunks[0]);
     render_thread_metadata(frame, app, chunks[1]);
-    render_session_analytics(frame, app, chunks[2]);
+    render_analytics_panel(frame, app, chunks[2]);
     render_messages(frame, app, chunks[3]);
     render_detail_footer(frame, app, chunks[4]);
 }
@@ -299,10 +299,36 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the session analytics summary section.
-fn render_session_analytics(frame: &mut Frame, app: &App, area: Rect) {
+/// Render the analytics panel with session/thread toggle.
+fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
+    // Determine which analytics to show based on view mode
+    let (is_thread_mode, error, analytics_available) = match app.analytics_view_mode {
+        AnalyticsViewMode::Session => (
+            false,
+            app.session_analytics_error.as_ref(),
+            app.session_analytics.is_some(),
+        ),
+        AnalyticsViewMode::Thread => (
+            true,
+            app.thread_analytics_error.as_ref(),
+            app.thread_analytics.is_some(),
+        ),
+    };
+
+    // Build the title with toggle hint
+    let toggle_hint = if is_thread_mode {
+        "[a: Session]"
+    } else {
+        "[a: Thread]"
+    };
+    let title_text = if is_thread_mode {
+        " Analytics (Thread) "
+    } else {
+        " Analytics (Session) "
+    };
+
     // Check for error state
-    if let Some(ref error) = app.session_analytics_error {
+    if let Some(error) = error {
         let error_line = Line::from(vec![
             Span::styled("Error: ", Style::default().fg(Color::Red)),
             Span::styled(
@@ -315,98 +341,232 @@ fn render_session_analytics(frame: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Red))
-                .title(" Analytics ")
-                .title_style(Style::default().fg(Color::Red)),
+                .title(title_text)
+                .title_style(Style::default().fg(Color::Red))
+                .title_bottom(Line::from(toggle_hint).right_aligned()),
         );
         frame.render_widget(paragraph, area);
         return;
     }
 
     // Check if we have analytics
-    let analytics = match &app.session_analytics {
-        Some(a) => a,
-        None => {
-            // No analytics yet - could be loading or no data
-            let placeholder = Paragraph::new("No analytics computed")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(BORDER_INFO))
-                        .title(" Analytics ")
-                        .title_style(Style::default().fg(BORDER_INFO)),
-                );
-            frame.render_widget(placeholder, area);
-            return;
-        }
+    if !analytics_available {
+        let placeholder = Paragraph::new("No analytics computed")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_INFO))
+                    .title(title_text)
+                    .title_style(Style::default().fg(BORDER_INFO))
+                    .title_bottom(Line::from(toggle_hint).right_aligned()),
+            );
+        frame.render_widget(placeholder, area);
+        return;
+    }
+
+    // Build the analytics lines based on mode
+    let lines = if is_thread_mode {
+        build_thread_analytics_lines(app)
+    } else {
+        build_session_analytics_lines(app)
     };
 
-    // Build the analytics line
-    let mut spans: Vec<Span> = Vec::new();
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(title_text)
+            .title_style(Style::default().fg(BORDER_INFO).bold())
+            .title_bottom(Line::from(toggle_hint).right_aligned()),
+    );
+    frame.render_widget(paragraph, area);
+}
 
-    // Edits: N (M files)
-    spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
-    spans.push(Span::styled(
+/// Build lines for session analytics display.
+fn build_session_analytics_lines(app: &App) -> Vec<Line<'static>> {
+    let analytics = match &app.session_analytics {
+        Some(a) => a,
+        None => return vec![Line::from("No data")],
+    };
+
+    let mut lines = Vec::new();
+
+    // Line 1: Edits, files, churn
+    let mut line1_spans: Vec<Span> = Vec::new();
+    line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
         format!("{}", analytics.edit_count),
         Style::default().fg(Color::White),
     ));
-    spans.push(Span::styled(
+    line1_spans.push(Span::styled(
         format!(" ({} files)", analytics.unique_files),
         Style::default().fg(Color::DarkGray),
     ));
+    line1_spans.push(Span::raw("  "));
 
-    spans.push(Span::raw("  "));
-
-    // Churn: XX% [LEVEL]
     let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
     let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
-    spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
-    spans.push(Span::styled(
+    line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
         format!("{}%", churn_pct),
         Style::default().fg(churn_color),
     ));
-    spans.push(Span::styled(
+    line1_spans.push(Span::styled(
         format!(" [{}]", churn_label),
-        Style::default().fg(churn_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(churn_color)
+            .add_modifier(Modifier::BOLD),
     ));
+    lines.push(Line::from(line1_spans));
 
-    // Hot files: file1, file2, +N
+    // Line 2: Hot files
+    let mut line2_spans: Vec<Span> = Vec::new();
     if !analytics.high_churn_files.is_empty() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled("Hot: ", Style::default().fg(LABEL_COLOR)));
-
-        let max_files = 3;
+        line2_spans.push(Span::styled(
+            "Hot files: ",
+            Style::default().fg(LABEL_COLOR),
+        ));
+        let max_files = 4;
         let files_to_show: Vec<&str> = analytics
             .high_churn_files
             .iter()
             .take(max_files)
             .map(|p| extract_basename(p))
             .collect();
-
-        spans.push(Span::styled(
+        line2_spans.push(Span::styled(
             files_to_show.join(", "),
             Style::default().fg(Color::Yellow),
         ));
-
         let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
         if remaining > 0 {
-            spans.push(Span::styled(
+            line2_spans.push(Span::styled(
                 format!(" +{}", remaining),
                 Style::default().fg(Color::DarkGray),
             ));
         }
+    } else {
+        line2_spans.push(Span::styled(
+            "No hot files detected",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
+    lines.push(Line::from(line2_spans));
 
-    let paragraph = Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(BORDER_INFO))
-            .title(" Analytics ")
-            .title_style(Style::default().fg(BORDER_INFO).bold()),
-    );
-    frame.render_widget(paragraph, area);
+    // Line 3: Placeholder for future metrics (e.g., lines changed, first-try rate)
+    let line3_spans = vec![Span::styled(
+        "Press 'a' to view thread-level analytics",
+        Style::default().fg(Color::DarkGray).italic(),
+    )];
+    lines.push(Line::from(line3_spans));
+
+    lines
+}
+
+/// Build lines for thread analytics display.
+fn build_thread_analytics_lines(app: &App) -> Vec<Line<'static>> {
+    let analytics = match &app.thread_analytics {
+        Some(a) => a,
+        None => return vec![Line::from("No data")],
+    };
+
+    let mut lines = Vec::new();
+
+    // Line 1: Edits, files, churn
+    let mut line1_spans: Vec<Span> = Vec::new();
+    line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}", analytics.edit_count),
+        Style::default().fg(Color::White),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" ({} files)", analytics.unique_files),
+        Style::default().fg(Color::DarkGray),
+    ));
+    line1_spans.push(Span::raw("  "));
+
+    let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
+    let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
+    line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}%", churn_pct),
+        Style::default().fg(churn_color),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" [{}]", churn_label),
+        Style::default()
+            .fg(churn_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(line1_spans));
+
+    // Line 2: Lines changed and first-try rate
+    let mut line2_spans: Vec<Span> = Vec::new();
+    line2_spans.push(Span::styled("Lines: ", Style::default().fg(LABEL_COLOR)));
+    line2_spans.push(Span::styled(
+        format!("{}", analytics.lines_changed),
+        Style::default().fg(Color::White),
+    ));
+    line2_spans.push(Span::raw("  "));
+    line2_spans.push(Span::styled(
+        "First-try: ",
+        Style::default().fg(LABEL_COLOR),
+    ));
+    let first_try_pct = (analytics.first_try_rate * 100.0).round() as i64;
+    let first_try_color = if first_try_pct >= 70 {
+        Color::Green
+    } else if first_try_pct >= 40 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    line2_spans.push(Span::styled(
+        format!("{}%", first_try_pct),
+        Style::default().fg(first_try_color),
+    ));
+    if analytics.burst_edit_count > 0 {
+        line2_spans.push(Span::raw("  "));
+        line2_spans.push(Span::styled("Bursts: ", Style::default().fg(LABEL_COLOR)));
+        line2_spans.push(Span::styled(
+            format!("{}", analytics.burst_edit_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines.push(Line::from(line2_spans));
+
+    // Line 3: Hot files for this thread
+    let mut line3_spans: Vec<Span> = Vec::new();
+    if !analytics.high_churn_files.is_empty() {
+        line3_spans.push(Span::styled("Hot: ", Style::default().fg(LABEL_COLOR)));
+        let max_files = 5;
+        let files_to_show: Vec<&str> = analytics
+            .high_churn_files
+            .iter()
+            .take(max_files)
+            .map(|p| extract_basename(p))
+            .collect();
+        line3_spans.push(Span::styled(
+            files_to_show.join(", "),
+            Style::default().fg(Color::Yellow),
+        ));
+        let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
+        if remaining > 0 {
+            line3_spans.push(Span::styled(
+                format!(" +{}", remaining),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    } else {
+        line3_spans.push(Span::styled(
+            "No hot files in this thread",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::from(line3_spans));
+
+    lines
 }
 
 /// Get color and label for churn ratio.

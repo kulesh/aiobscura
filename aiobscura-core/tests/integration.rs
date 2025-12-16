@@ -827,14 +827,54 @@ fn test_analytics_plugin_framework() {
 
     // Insert synthetic Edit messages for testing the edit_churn plugin
     // This creates: src/main.rs (3 edits), src/lib.rs (2 edits), Cargo.toml (1 edit) = 6 total
-    let thread_id = result.threads.first().map(|t| t.id.as_str()).unwrap_or("test-main");
+    let thread_id = result
+        .threads
+        .first()
+        .map(|t| t.id.as_str())
+        .unwrap_or("test-main");
     let edit_messages = vec![
-        make_edit_msg(&session.id, thread_id, 100, "src/main.rs", &session_source_path),
-        make_edit_msg(&session.id, thread_id, 101, "src/main.rs", &session_source_path),
-        make_edit_msg(&session.id, thread_id, 102, "src/main.rs", &session_source_path),
-        make_edit_msg(&session.id, thread_id, 103, "src/lib.rs", &session_source_path),
-        make_edit_msg(&session.id, thread_id, 104, "src/lib.rs", &session_source_path),
-        make_edit_msg(&session.id, thread_id, 105, "Cargo.toml", &session_source_path),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            100,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            101,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            102,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            103,
+            "src/lib.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            104,
+            "src/lib.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            105,
+            "Cargo.toml",
+            &session_source_path,
+        ),
     ];
     db.insert_messages(&edit_messages).unwrap();
 
@@ -843,7 +883,10 @@ fn test_analytics_plugin_framework() {
 
     // Verify plugins are registered
     let plugin_names = engine.plugin_names();
-    assert!(plugin_names.contains(&"core.edit_churn"), "edit_churn plugin should be registered");
+    assert!(
+        plugin_names.contains(&"core.edit_churn"),
+        "edit_churn plugin should be registered"
+    );
 
     // Load session and messages from database
     let stored_session = db.get_session(&session.id).unwrap().unwrap();
@@ -851,33 +894,65 @@ fn test_analytics_plugin_framework() {
 
     // Run all plugins
     let results = engine.run_all(&stored_session, &stored_messages, &db);
-    let result = results.iter().find(|r| r.plugin_name == "core.edit_churn").unwrap();
+    let result = results
+        .iter()
+        .find(|r| r.plugin_name == "core.edit_churn")
+        .unwrap();
     assert_eq!(result.status, PluginRunStatus::Success);
-    assert!(result.metrics_produced > 0, "Plugin should produce metrics, got {}", result.metrics_produced);
+    assert!(
+        result.metrics_produced > 0,
+        "Plugin should produce metrics, got {}",
+        result.metrics_produced
+    );
 
     // Verify metrics stored in database
     let metrics = db.get_session_plugin_metrics(&session.id).unwrap();
-    assert!(!metrics.is_empty(), "Should have metrics in database for session {}", session.id);
+    assert!(
+        !metrics.is_empty(),
+        "Should have metrics in database for session {}",
+        session.id
+    );
 
-    let edit_count = metrics.iter().find(|m| m.metric_name == "edit_count")
+    let edit_count = metrics
+        .iter()
+        .find(|m| m.metric_name == "edit_count")
         .expect("should have edit_count metric");
     assert_eq!(edit_count.metric_value.as_i64().unwrap(), 6);
 
-    let unique_files = metrics.iter().find(|m| m.metric_name == "unique_files").unwrap();
+    let unique_files = metrics
+        .iter()
+        .find(|m| m.metric_name == "unique_files")
+        .unwrap();
     assert_eq!(unique_files.metric_value.as_i64().unwrap(), 3);
 
-    let churn_ratio = metrics.iter().find(|m| m.metric_name == "churn_ratio").unwrap();
+    let churn_ratio = metrics
+        .iter()
+        .find(|m| m.metric_name == "churn_ratio")
+        .unwrap();
     let ratio = churn_ratio.metric_value.as_f64().unwrap();
-    assert!((ratio - 0.5).abs() < 0.001, "churn_ratio should be ~0.5, got {}", ratio);
+    assert!(
+        (ratio - 0.5).abs() < 0.001,
+        "churn_ratio should be ~0.5, got {}",
+        ratio
+    );
 
-    let high_churn = metrics.iter().find(|m| m.metric_name == "high_churn_files").unwrap();
+    let high_churn = metrics
+        .iter()
+        .find(|m| m.metric_name == "high_churn_files")
+        .unwrap();
     let high_churn_arr = high_churn.metric_value.as_array().unwrap();
     assert_eq!(high_churn_arr.len(), 1, "only src/main.rs has 3+ edits");
     assert_eq!(high_churn_arr[0].as_str().unwrap(), "src/main.rs");
 }
 
 /// Helper to create an Edit tool message
-fn make_edit_msg(session_id: &str, thread_id: &str, seq: i32, file_path: &str, source_file_path: &str) -> Message {
+fn make_edit_msg(
+    session_id: &str,
+    thread_id: &str,
+    seq: i32,
+    file_path: &str,
+    source_file_path: &str,
+) -> Message {
     Message {
         id: seq as i64,
         session_id: session_id.to_string(),

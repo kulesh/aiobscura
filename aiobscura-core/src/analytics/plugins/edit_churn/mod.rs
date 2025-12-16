@@ -55,7 +55,7 @@
 
 use crate::analytics::engine::{AnalyticsContext, AnalyticsPlugin, AnalyticsTrigger, MetricOutput};
 use crate::error::Result;
-use crate::types::{Message, MessageType, Session};
+use crate::types::{Message, MessageType, Session, Thread};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -76,13 +76,34 @@ const OUTLIER_STDDEV_MULTIPLIER: f64 = 2.0;
 /// Paths containing these patterns are excluded from churn analysis.
 /// These are typically AI-generated planning docs, not user code.
 const EXCLUDED_PATH_PATTERNS: &[&str] = &[
-    "/.claude/plans/",   // Claude Code planning documents
-    "/.claude/todos/",   // Claude Code todo files
-    "/PLAN.md",          // Common AI planning file
+    "/.claude/plans/", // Claude Code planning documents
+    "/.claude/todos/", // Claude Code todo files
+    "/PLAN.md",        // Common AI planning file
     "/IMPLEMENTATION.md",
     "/DESIGN.md",
     "/ARCHITECTURE.md",
 ];
+
+/// Computed churn metrics for a set of messages.
+///
+/// This intermediate struct holds all the computed values before they're
+/// converted to MetricOutput. Used by both session and thread analysis.
+#[derive(Debug)]
+struct ChurnMetrics {
+    total_edits: i64,
+    unique_files: i64,
+    churn_ratio: f64,
+    file_counts: HashMap<String, i64>,
+    high_churn_files: Vec<String>,
+    high_churn_threshold: f64,
+    burst_edit_files: HashMap<String, i64>,
+    burst_edit_count: i64,
+    lines_added: i64,
+    lines_removed: i64,
+    extension_counts: HashMap<String, i64>,
+    first_try_files: i64,
+    first_try_rate: f64,
+}
 
 /// Analyzer that tracks file modification patterns.
 pub struct EditChurnAnalyzer;
@@ -201,7 +222,7 @@ impl EditChurnAnalyzer {
         let mut sorted = counts.to_vec();
         sorted.sort();
         let mid = sorted.len() / 2;
-        if sorted.len() % 2 == 0 {
+        if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) as f64 / 2.0
         } else {
             sorted[mid] as f64
@@ -279,29 +300,11 @@ impl EditChurnAnalyzer {
 
         burst_files
     }
-}
 
-impl Default for EditChurnAnalyzer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AnalyticsPlugin for EditChurnAnalyzer {
-    fn name(&self) -> &str {
-        "core.edit_churn"
-    }
-
-    fn triggers(&self) -> Vec<AnalyticsTrigger> {
-        vec![AnalyticsTrigger::OnDemand]
-    }
-
-    fn analyze_session(
-        &self,
-        session: &Session,
-        messages: &[Message],
-        _ctx: &AnalyticsContext,
-    ) -> Result<Vec<MetricOutput>> {
+    /// Compute churn metrics from a set of messages.
+    ///
+    /// This is the core analysis logic used by both session and thread analysis.
+    fn compute_metrics(messages: &[Message]) -> ChurnMetrics {
         let mut file_counts: HashMap<String, i64> = HashMap::new();
         let mut file_timestamps: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
         let mut extension_counts: HashMap<String, i64> = HashMap::new();
@@ -350,40 +353,20 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
         let mut file_edit_list: Vec<(&String, &i64)> = file_counts.iter().collect();
         file_edit_list.sort_by(|a, b| b.1.cmp(a.1));
 
-        // Build file_edit_counts as a JSON object
-        let file_counts_json: serde_json::Value = file_edit_list
-            .iter()
-            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
-            .collect();
-
         // Compute dynamic threshold for high churn (statistical outliers)
         let counts: Vec<i64> = file_counts.values().copied().collect();
         let high_churn_threshold = Self::compute_dynamic_threshold(&counts);
 
         // Find high-churn files (statistical outliers)
-        let high_churn_files: Vec<&String> = file_edit_list
+        let high_churn_files: Vec<String> = file_edit_list
             .iter()
             .filter(|(_, count)| **count as f64 >= high_churn_threshold)
-            .map(|(path, _)| *path)
+            .map(|(path, _)| (*path).clone())
             .collect();
 
         // Detect burst editing patterns
         let burst_edit_files = Self::detect_burst_edits(&file_timestamps);
         let burst_edit_count: i64 = burst_edit_files.values().sum();
-
-        // Build burst_edit_files as JSON object
-        let burst_files_json: serde_json::Value = burst_edit_files
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
-            .collect();
-
-        // Build extension counts as JSON object (sorted by count)
-        let mut ext_list: Vec<(&String, &i64)> = extension_counts.iter().collect();
-        ext_list.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_counts_json: serde_json::Value = ext_list
-            .iter()
-            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
-            .collect();
 
         // Calculate first-try rate (files edited exactly once)
         let first_try_files = file_counts.values().filter(|&&count| count == 1).count() as i64;
@@ -393,56 +376,201 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
             0.0
         };
 
+        ChurnMetrics {
+            total_edits,
+            unique_files,
+            churn_ratio,
+            file_counts,
+            high_churn_files,
+            high_churn_threshold,
+            burst_edit_files,
+            burst_edit_count,
+            lines_added: total_lines_added,
+            lines_removed: total_lines_removed,
+            extension_counts,
+            first_try_files,
+            first_try_rate,
+        }
+    }
+}
+
+impl Default for EditChurnAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnalyticsPlugin for EditChurnAnalyzer {
+    fn name(&self) -> &str {
+        "core.edit_churn"
+    }
+
+    fn triggers(&self) -> Vec<AnalyticsTrigger> {
+        vec![AnalyticsTrigger::OnDemand]
+    }
+
+    fn analyze_session(
+        &self,
+        session: &Session,
+        messages: &[Message],
+        _ctx: &AnalyticsContext,
+    ) -> Result<Vec<MetricOutput>> {
+        let m = Self::compute_metrics(messages);
+
+        // Build file_edit_counts as a JSON object (sorted by count descending)
+        let mut file_edit_list: Vec<(&String, &i64)> = m.file_counts.iter().collect();
+        file_edit_list.sort_by(|a, b| b.1.cmp(a.1));
+        let file_counts_json: serde_json::Value = file_edit_list
+            .iter()
+            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
+            .collect();
+
+        // Build burst_edit_files as JSON object
+        let burst_files_json: serde_json::Value = m
+            .burst_edit_files
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
+            .collect();
+
+        // Build extension counts as JSON object (sorted by count)
+        let mut ext_list: Vec<(&String, &i64)> = m.extension_counts.iter().collect();
+        ext_list.sort_by(|a, b| b.1.cmp(a.1));
+        let ext_counts_json: serde_json::Value = ext_list
+            .iter()
+            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
+            .collect();
+
         Ok(vec![
-            MetricOutput::session(&session.id, "edit_count", serde_json::json!(total_edits)),
-            MetricOutput::session(&session.id, "unique_files", serde_json::json!(unique_files)),
+            MetricOutput::session(&session.id, "edit_count", serde_json::json!(m.total_edits)),
             MetricOutput::session(
                 &session.id,
-                "churn_ratio",
-                serde_json::json!(churn_ratio),
+                "unique_files",
+                serde_json::json!(m.unique_files),
             ),
+            MetricOutput::session(&session.id, "churn_ratio", serde_json::json!(m.churn_ratio)),
             MetricOutput::session(&session.id, "file_edit_counts", file_counts_json),
             MetricOutput::session(
                 &session.id,
                 "high_churn_files",
-                serde_json::json!(high_churn_files),
+                serde_json::json!(m.high_churn_files),
             ),
             MetricOutput::session(
                 &session.id,
                 "high_churn_threshold",
-                serde_json::json!(high_churn_threshold),
+                serde_json::json!(m.high_churn_threshold),
             ),
             MetricOutput::session(&session.id, "burst_edit_files", burst_files_json),
             MetricOutput::session(
                 &session.id,
                 "burst_edit_count",
-                serde_json::json!(burst_edit_count),
+                serde_json::json!(m.burst_edit_count),
             ),
-            MetricOutput::session(
-                &session.id,
-                "lines_added",
-                serde_json::json!(total_lines_added),
-            ),
+            MetricOutput::session(&session.id, "lines_added", serde_json::json!(m.lines_added)),
             MetricOutput::session(
                 &session.id,
                 "lines_removed",
-                serde_json::json!(total_lines_removed),
+                serde_json::json!(m.lines_removed),
             ),
             MetricOutput::session(
                 &session.id,
                 "lines_changed",
-                serde_json::json!(total_lines_added + total_lines_removed),
+                serde_json::json!(m.lines_added + m.lines_removed),
             ),
             MetricOutput::session(&session.id, "edits_by_extension", ext_counts_json),
             MetricOutput::session(
                 &session.id,
                 "first_try_files",
-                serde_json::json!(first_try_files),
+                serde_json::json!(m.first_try_files),
             ),
             MetricOutput::session(
                 &session.id,
                 "first_try_rate",
-                serde_json::json!(first_try_rate),
+                serde_json::json!(m.first_try_rate),
+            ),
+        ])
+    }
+
+    fn supports_thread_analysis(&self) -> bool {
+        true
+    }
+
+    fn analyze_thread(
+        &self,
+        thread: &Thread,
+        messages: &[Message],
+        _ctx: &AnalyticsContext,
+    ) -> Result<Vec<MetricOutput>> {
+        let m = Self::compute_metrics(messages);
+
+        // Build file_edit_counts as a JSON object (sorted by count descending)
+        let mut file_edit_list: Vec<(&String, &i64)> = m.file_counts.iter().collect();
+        file_edit_list.sort_by(|a, b| b.1.cmp(a.1));
+        let file_counts_json: serde_json::Value = file_edit_list
+            .iter()
+            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
+            .collect();
+
+        // Build burst_edit_files as JSON object
+        let burst_files_json: serde_json::Value = m
+            .burst_edit_files
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
+            .collect();
+
+        // Build extension counts as JSON object (sorted by count)
+        let mut ext_list: Vec<(&String, &i64)> = m.extension_counts.iter().collect();
+        ext_list.sort_by(|a, b| b.1.cmp(a.1));
+        let ext_counts_json: serde_json::Value = ext_list
+            .iter()
+            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
+            .collect();
+
+        Ok(vec![
+            MetricOutput::thread(&thread.id, "edit_count", serde_json::json!(m.total_edits)),
+            MetricOutput::thread(
+                &thread.id,
+                "unique_files",
+                serde_json::json!(m.unique_files),
+            ),
+            MetricOutput::thread(&thread.id, "churn_ratio", serde_json::json!(m.churn_ratio)),
+            MetricOutput::thread(&thread.id, "file_edit_counts", file_counts_json),
+            MetricOutput::thread(
+                &thread.id,
+                "high_churn_files",
+                serde_json::json!(m.high_churn_files),
+            ),
+            MetricOutput::thread(
+                &thread.id,
+                "high_churn_threshold",
+                serde_json::json!(m.high_churn_threshold),
+            ),
+            MetricOutput::thread(&thread.id, "burst_edit_files", burst_files_json),
+            MetricOutput::thread(
+                &thread.id,
+                "burst_edit_count",
+                serde_json::json!(m.burst_edit_count),
+            ),
+            MetricOutput::thread(&thread.id, "lines_added", serde_json::json!(m.lines_added)),
+            MetricOutput::thread(
+                &thread.id,
+                "lines_removed",
+                serde_json::json!(m.lines_removed),
+            ),
+            MetricOutput::thread(
+                &thread.id,
+                "lines_changed",
+                serde_json::json!(m.lines_added + m.lines_removed),
+            ),
+            MetricOutput::thread(&thread.id, "edits_by_extension", ext_counts_json),
+            MetricOutput::thread(
+                &thread.id,
+                "first_try_files",
+                serde_json::json!(m.first_try_files),
+            ),
+            MetricOutput::thread(
+                &thread.id,
+                "first_try_rate",
+                serde_json::json!(m.first_try_rate),
             ),
         ])
     }
@@ -604,11 +732,8 @@ mod tests {
 
     #[test]
     fn test_high_churn_threshold() {
-        // A file edited 2 times should NOT be high churn
-        assert!(2 < HIGH_CHURN_THRESHOLD);
-
-        // A file edited 3 times should be high churn
-        assert!(3 >= HIGH_CHURN_THRESHOLD);
+        // Verify the constant is what we expect (3 edits minimum)
+        assert_eq!(HIGH_CHURN_THRESHOLD, 3);
     }
 
     #[test]
@@ -632,7 +757,9 @@ mod tests {
         assert!(EditChurnAnalyzer::should_exclude_path("/project/DESIGN.md"));
 
         // Regular code files should NOT be excluded
-        assert!(!EditChurnAnalyzer::should_exclude_path("/project/src/main.rs"));
+        assert!(!EditChurnAnalyzer::should_exclude_path(
+            "/project/src/main.rs"
+        ));
         assert!(!EditChurnAnalyzer::should_exclude_path(
             "/project/Cargo.toml"
         ));
@@ -687,10 +814,19 @@ mod tests {
 
     #[test]
     fn test_extract_extension() {
-        assert_eq!(EditChurnAnalyzer::extract_extension("/path/to/file.rs"), "rs");
-        assert_eq!(EditChurnAnalyzer::extract_extension("/path/to/file.test.ts"), "ts");
+        assert_eq!(
+            EditChurnAnalyzer::extract_extension("/path/to/file.rs"),
+            "rs"
+        );
+        assert_eq!(
+            EditChurnAnalyzer::extract_extension("/path/to/file.test.ts"),
+            "ts"
+        );
         assert_eq!(EditChurnAnalyzer::extract_extension("Cargo.toml"), "toml");
-        assert_eq!(EditChurnAnalyzer::extract_extension("/path/Makefile"), "no_ext");
+        assert_eq!(
+            EditChurnAnalyzer::extract_extension("/path/Makefile"),
+            "no_ext"
+        );
         assert_eq!(EditChurnAnalyzer::extract_extension(".gitignore"), "no_ext");
     }
 
@@ -744,7 +880,10 @@ mod tests {
     #[test]
     fn test_compute_dynamic_threshold() {
         // Small sample (<5 files) falls back to fixed threshold
-        assert_eq!(EditChurnAnalyzer::compute_dynamic_threshold(&[1, 2, 3, 4]), 3.0);
+        assert_eq!(
+            EditChurnAnalyzer::compute_dynamic_threshold(&[1, 2, 3, 4]),
+            3.0
+        );
 
         // Low variance session: [1, 1, 1, 1, 2]
         // median=1, mean=1.2, stddev≈0.4, threshold=max(3, 1+0.8)=3

@@ -123,10 +123,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "Analyzing {} session(s)...\n",
-        sessions.len()
-    );
+    println!("Analyzing {} session(s)...\n", sessions.len());
 
     let mut total_metrics = 0;
     let mut sessions_with_data = 0;
@@ -141,7 +138,7 @@ fn main() -> Result<()> {
 
         // Run plugins (or specific plugin)
         let results = if let Some(ref plugin_name) = args.plugin {
-            match engine.run_plugin(plugin_name, &session, &messages, &db) {
+            match engine.run_plugin(plugin_name, session, &messages, &db) {
                 Ok(r) => vec![r],
                 Err(e) => {
                     if args.verbose {
@@ -154,11 +151,16 @@ fn main() -> Result<()> {
             // Run each plugin individually to catch errors
             let mut results = Vec::new();
             for plugin_name in engine.plugin_names() {
-                match engine.run_plugin(plugin_name, &session, &messages, &db) {
+                match engine.run_plugin(plugin_name, session, &messages, &db) {
                     Ok(r) => results.push(r),
                     Err(e) => {
                         if args.verbose {
-                            eprintln!("Plugin {} error on session {}: {}", plugin_name, &session.id[..8], e);
+                            eprintln!(
+                                "Plugin {} error on session {}: {}",
+                                plugin_name,
+                                &session.id[..8],
+                                e
+                            );
                         }
                     }
                 }
@@ -223,10 +225,7 @@ fn print_text_results(
 
         println!(
             "  [{}] {} ({} metrics, {}ms)",
-            status_icon,
-            result.plugin_name,
-            result.metrics_produced,
-            result.duration_ms
+            status_icon, result.plugin_name, result.metrics_produced, result.duration_ms
         );
 
         if let Some(ref e) = result.error_message {
@@ -311,7 +310,7 @@ fn format_metric_value(value: &serde_json::Value) -> String {
                 format!(
                     "[{}]",
                     arr.iter()
-                        .map(|v| format_metric_value(v))
+                        .map(format_metric_value)
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

@@ -503,6 +503,18 @@ impl Database {
         Ok(threads)
     }
 
+    /// Get a single thread by ID
+    pub fn get_thread(&self, thread_id: &str) -> Result<Option<Thread>> {
+        let conn = self.conn.lock().unwrap();
+        let thread = conn
+            .query_row("SELECT * FROM threads WHERE id = ?", [thread_id], |row| {
+                Self::row_to_thread(row)
+            })
+            .optional()?;
+
+        Ok(thread)
+    }
+
     fn row_to_thread(row: &Row) -> rusqlite::Result<Thread> {
         let thread_type_str: String = row.get("thread_type")?;
         let started_at_str: String = row.get("started_at")?;
@@ -781,10 +793,7 @@ impl Database {
 
     /// Get the latest message timestamp for a specific session.
     /// Used for analytics freshness checking.
-    pub fn get_session_last_message_ts(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<DateTime<Utc>>> {
+    pub fn get_session_last_message_ts(&self, session_id: &str) -> Result<Option<DateTime<Utc>>> {
         let conn = self.conn.lock().unwrap();
         let result: Option<String> = conn
             .query_row(
@@ -858,6 +867,134 @@ impl Database {
             unique_files,
             churn_ratio,
             high_churn_files,
+            computed_at,
+        }))
+    }
+
+    /// Get all metrics for a thread across all plugins.
+    pub fn get_thread_plugin_metrics(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<crate::types::PluginMetric>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, plugin_name, entity_type, entity_id, metric_name, metric_value, computed_at
+            FROM plugin_metrics
+            WHERE entity_type = 'thread' AND entity_id = ?
+            ORDER BY plugin_name, metric_name
+            "#,
+        )?;
+
+        let metrics = stmt
+            .query_map([thread_id], |row| {
+                let computed_at_str: String = row.get(6)?;
+                let metric_value = Self::parse_metric_value(row.get_ref(5)?);
+                Ok(crate::types::PluginMetric {
+                    id: row.get(0)?,
+                    plugin_name: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    metric_name: row.get(4)?,
+                    metric_value,
+                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(metrics)
+    }
+
+    /// Get pre-computed thread analytics from plugin_metrics table.
+    /// Returns None if no analytics have been computed for this thread.
+    pub fn get_thread_analytics(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::analytics::ThreadAnalytics>> {
+        let metrics = self.get_thread_plugin_metrics(thread_id)?;
+
+        // Filter to edit_churn plugin metrics
+        let edit_churn_metrics: Vec<_> = metrics
+            .iter()
+            .filter(|m| m.plugin_name == "core.edit_churn")
+            .collect();
+
+        if edit_churn_metrics.is_empty() {
+            return Ok(None);
+        }
+
+        // Extract each metric value
+        let mut edit_count: i64 = 0;
+        let mut unique_files: i64 = 0;
+        let mut churn_ratio: f64 = 0.0;
+        let mut high_churn_files: Vec<String> = Vec::new();
+        let mut high_churn_threshold: f64 = 0.0;
+        let mut burst_edit_files: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut burst_edit_count: i64 = 0;
+        let mut lines_changed: i64 = 0;
+        let mut first_try_rate: f64 = 0.0;
+        let mut computed_at = chrono::Utc::now();
+
+        for metric in &edit_churn_metrics {
+            match metric.metric_name.as_str() {
+                "edit_count" => {
+                    edit_count = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "unique_files" => {
+                    unique_files = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "churn_ratio" => {
+                    churn_ratio = metric.metric_value.as_f64().unwrap_or(0.0);
+                }
+                "high_churn_files" => {
+                    if let Some(arr) = metric.metric_value.as_array() {
+                        high_churn_files = arr
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                    }
+                }
+                "high_churn_threshold" => {
+                    high_churn_threshold = metric.metric_value.as_f64().unwrap_or(0.0);
+                }
+                "burst_edit_files" => {
+                    if let Some(obj) = metric.metric_value.as_object() {
+                        burst_edit_files = obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0)))
+                            .collect();
+                    }
+                }
+                "burst_edit_count" => {
+                    burst_edit_count = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "lines_changed" => {
+                    lines_changed = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "first_try_rate" => {
+                    first_try_rate = metric.metric_value.as_f64().unwrap_or(0.0);
+                }
+                _ => {}
+            }
+            // Use the computed_at from any metric (they should all be the same)
+            computed_at = metric.computed_at;
+        }
+
+        Ok(Some(crate::analytics::ThreadAnalytics {
+            edit_count,
+            unique_files,
+            churn_ratio,
+            high_churn_files,
+            high_churn_threshold,
+            burst_edit_files,
+            burst_edit_count,
+            lines_changed,
+            first_try_rate,
             computed_at,
         }))
     }
