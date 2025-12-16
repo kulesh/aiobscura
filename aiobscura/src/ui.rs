@@ -90,6 +90,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             sub_tab,
             ..
         } => render_project_detail_view(frame, app, project_name.clone(), *sub_tab),
+        ViewMode::SessionDetail { session_name, .. } => {
+            render_session_detail_view(frame, app, session_name.clone())
+        }
     }
 }
 
@@ -129,6 +132,208 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
     render_analytics_panel(frame, app, chunks[2]);
     render_messages(frame, app, chunks[3]);
     render_detail_footer(frame, app, chunks[4]);
+}
+
+/// Render the session detail view (merged messages across all threads).
+fn render_session_detail_view(frame: &mut Frame, app: &mut App, session_name: String) {
+    let area = frame.area();
+
+    // Layout: header, analytics, messages, footer
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // Header
+        Constraint::Length(5), // Analytics panel
+        Constraint::Min(5),    // Messages
+        Constraint::Length(1), // Footer
+    ])
+    .split(area);
+
+    render_header(frame, &format!("Session: {}", session_name), chunks[0]);
+    render_session_analytics_panel(frame, app, chunks[1]);
+    render_session_messages(frame, app, chunks[2]);
+    render_session_detail_footer(frame, chunks[3]);
+}
+
+/// Render session-level analytics panel (no toggle, just session stats).
+fn render_session_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
+    // Check for error state
+    if let Some(ref error) = app.session_analytics_error {
+        let error_line = Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::styled(
+                truncate_string(error, 60),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(error_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" Session Analytics ")
+                .title_style(Style::default().fg(Color::Red)),
+        );
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let lines = build_session_analytics_lines(app);
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(" Session Analytics ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
+    );
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the session messages with thread segmentation.
+fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
+    if app.session_messages.is_empty() {
+        let empty = Paragraph::new("No messages in this session")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_MESSAGES)),
+            );
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    // Build message groups by consecutive thread
+    let groups = group_messages_by_thread(&app.session_messages);
+
+    // Build lines with thread headers
+    let mut lines: Vec<Line> = Vec::new();
+    for (thread_id, messages) in groups {
+        // Add thread header
+        let thread_label = if thread_id.len() > 8 {
+            thread_id[..8].to_string()
+        } else {
+            thread_id.clone()
+        };
+        
+        // Determine thread type for coloring
+        let thread_color = if let Some(thread) = app.session_threads.iter().find(|t| t.id == thread_id) {
+            match thread.thread_type {
+                ThreadType::Main => BADGE_MAIN,
+                ThreadType::Agent => BADGE_AGENT,
+                ThreadType::Background => BADGE_BG,
+            }
+        } else {
+            Color::DarkGray
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("─── ", Style::default().fg(thread_color)),
+            Span::styled(thread_label, Style::default().fg(thread_color).bold()),
+            Span::styled(" ───────────────────────────────────────", Style::default().fg(thread_color)),
+        ]));
+
+        // Add messages for this thread
+        for msg in messages {
+            let role_style = match msg.author_role {
+                AuthorRole::Human => Style::default().fg(Color::Green),
+                AuthorRole::Assistant => Style::default().fg(Color::Blue),
+                AuthorRole::Agent => Style::default().fg(Color::Cyan),
+                AuthorRole::System => Style::default().fg(Color::Yellow),
+                AuthorRole::Tool => Style::default().fg(Color::Magenta),
+            };
+
+            let role_prefix = match msg.author_role {
+                AuthorRole::Human => "[human]",
+                AuthorRole::Assistant => "[assistant]",
+                AuthorRole::Agent => "[agent]",
+                AuthorRole::System => "[system]",
+                AuthorRole::Tool => "[tool]",
+            };
+
+            // Get content preview
+            let content_preview = msg
+                .content
+                .as_ref()
+                .map(|c| {
+                    let first_line = c.lines().next().unwrap_or("");
+                    if first_line.len() > 80 {
+                        format!("{}...", &first_line[..77])
+                    } else {
+                        first_line.to_string()
+                    }
+                })
+                .unwrap_or_else(|| {
+                    msg.tool_name
+                        .as_ref()
+                        .map(|t| format!("<{}>", t))
+                        .unwrap_or_default()
+                });
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", role_prefix), role_style),
+                Span::styled(content_preview, Style::default().fg(Color::White)),
+            ]));
+        }
+
+        lines.push(Line::from("")); // Blank line between groups
+    }
+
+    // Calculate scrolling
+    let visible_height = area.height.saturating_sub(2) as usize; // Subtract border
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    let scroll_offset = app.session_scroll_offset.min(max_scroll);
+
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll_offset as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_MESSAGES))
+                .title(format!(
+                    " Messages ({}) ",
+                    app.session_messages.len()
+                ))
+                .title_style(Style::default().fg(BORDER_MESSAGES).bold()),
+        );
+    frame.render_widget(paragraph, area);
+}
+
+/// Group messages by consecutive thread_id.
+fn group_messages_by_thread(messages: &[Message]) -> Vec<(String, Vec<&Message>)> {
+    let mut groups: Vec<(String, Vec<&Message>)> = Vec::new();
+
+    for msg in messages {
+        if let Some((last_thread_id, last_group)) = groups.last_mut() {
+            if *last_thread_id == msg.thread_id {
+                last_group.push(msg);
+            } else {
+                groups.push((msg.thread_id.clone(), vec![msg]));
+            }
+        } else {
+            groups.push((msg.thread_id.clone(), vec![msg]));
+        }
+    }
+
+    groups
+}
+
+/// Render the footer for session detail view.
+fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" back  "),
+        Span::styled("j/k", Style::default().fg(Color::Yellow)),
+        Span::raw(" scroll  "),
+        Span::styled("g/G", Style::default().fg(Color::Yellow)),
+        Span::raw(" top/bottom  "),
+        Span::styled("q", Style::default().fg(Color::Yellow)),
+        Span::raw(" quit"),
+    ]))
+    .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, area);
 }
 
 /// Render the header with title.

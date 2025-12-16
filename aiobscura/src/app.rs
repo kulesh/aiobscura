@@ -79,6 +79,12 @@ pub enum ViewMode {
         project_name: String,
         sub_tab: ProjectSubTab,
     },
+    /// Session detail view showing merged messages across all threads
+    SessionDetail {
+        #[allow(dead_code)]
+        session_id: String,
+        session_name: String,
+    },
 }
 
 /// Metadata for the detail view header.
@@ -181,6 +187,14 @@ pub struct App {
     /// Project files table selection state
     pub project_files_table_state: TableState,
 
+    // ========== Session Detail View State ==========
+    /// Messages for session detail view (merged across all threads)
+    pub session_messages: Vec<Message>,
+    /// Threads for current session (for reference/drill-down)
+    pub session_threads: Vec<Thread>,
+    /// Scroll offset for session detail view
+    pub session_scroll_offset: usize,
+
     // ========== Navigation Return State ==========
     /// Return destination when exiting Detail/PlanDetail views
     /// (project_id, project_name, sub_tab) - if set, return to project sub-tab
@@ -247,6 +261,10 @@ impl App {
             project_plans_table_state: TableState::default(),
             project_files: Vec::new(),
             project_files_table_state: TableState::default(),
+            // Session detail view state
+            session_messages: Vec::new(),
+            session_threads: Vec::new(),
+            session_scroll_offset: 0,
             // Navigation return state
             return_to_project: None,
             // Live refresh state
@@ -525,6 +543,7 @@ impl App {
             ViewMode::Live => self.handle_live_key(key),
             ViewMode::ProjectList => self.handle_project_list_key(key),
             ViewMode::ProjectDetail { .. } => self.handle_project_detail_key(key),
+            ViewMode::SessionDetail { .. } => self.handle_session_detail_key(key),
         }
     }
 
@@ -1476,6 +1495,52 @@ impl App {
         }
     }
 
+    /// Handle keyboard input in session detail view.
+    fn handle_session_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.close_session_detail();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.session_scroll_offset = self.session_scroll_offset.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.session_scroll_offset = self.session_scroll_offset.saturating_sub(1);
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.session_scroll_offset = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.session_scroll_offset = self.session_messages.len().saturating_sub(1);
+            }
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
+                self.session_scroll_offset = self.session_scroll_offset.saturating_add(10);
+            }
+            KeyCode::PageUp | KeyCode::Char('u') => {
+                self.session_scroll_offset = self.session_scroll_offset.saturating_sub(10);
+            }
+            _ => {}
+        }
+    }
+
+    /// Close session detail and return to project sessions tab.
+    fn close_session_detail(&mut self) {
+        if let Some((project_id, project_name, sub_tab)) = self.return_to_project.take() {
+            self.view_mode = ViewMode::ProjectDetail {
+                project_id,
+                project_name,
+                sub_tab,
+            };
+        } else {
+            self.view_mode = ViewMode::ProjectList;
+        }
+        self.session_messages.clear();
+        self.session_threads.clear();
+        self.session_scroll_offset = 0;
+        self.session_analytics = None;
+        self.session_analytics_error = None;
+    }
+
     /// Close project list and switch to thread list.
     fn close_project_list(&mut self) {
         // Always reload threads and stats for fresh data
@@ -1676,6 +1741,7 @@ impl App {
             ViewMode::Detail { .. }
             | ViewMode::PlanDetail { .. }
             | ViewMode::PlanList { .. }
+            | ViewMode::SessionDetail { .. }
             | ViewMode::Wrapped => {}
         }
         Ok(())
@@ -1921,8 +1987,38 @@ impl App {
         {
             match sub_tab {
                 ProjectSubTab::Sessions => {
-                    // TODO: Waypoint 3 - Open session detail view
-                    // For now, do nothing when pressing Enter on a session
+                    // Open the selected session in detail view
+                    if let Some(idx) = self.project_sessions_table_state.selected() {
+                        if let Some(session_row) = self.project_sessions.get(idx) {
+                            let session_id = session_row.id.clone();
+                            let session_name = format!("Session {}", session_row.short_id());
+
+                            // Load messages for this session (merged across all threads)
+                            if let Ok(messages) =
+                                self.db.get_session_messages(&session_id, 10_000)
+                            {
+                                // Load threads for this session
+                                let threads = self
+                                    .db
+                                    .get_session_threads(&session_id)
+                                    .unwrap_or_default();
+
+                                // Save return destination
+                                self.return_to_project = Some((project_id, project_name, sub_tab));
+                                self.session_messages = messages;
+                                self.session_threads = threads;
+                                self.session_scroll_offset = 0;
+
+                                // Load session analytics
+                                self.load_session_analytics(&session_id);
+
+                                self.view_mode = ViewMode::SessionDetail {
+                                    session_id,
+                                    session_name,
+                                };
+                            }
+                        }
+                    }
                 }
                 ProjectSubTab::Plans => {
                     // Open the selected plan in detail view
