@@ -267,24 +267,7 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             // Get content preview (shortened to leave room for timestamp)
-            let max_content_len = 60;
-            let content_preview = msg
-                .content
-                .as_ref()
-                .map(|c| {
-                    let first_line = c.lines().next().unwrap_or("");
-                    if first_line.len() > max_content_len {
-                        format!("{}...", &first_line[..max_content_len - 3])
-                    } else {
-                        first_line.to_string()
-                    }
-                })
-                .unwrap_or_else(|| {
-                    msg.tool_name
-                        .as_ref()
-                        .map(|t| format!("<{}>", t))
-                        .unwrap_or_default()
-                });
+            let content_preview = get_message_preview(msg, 60);
 
             // Format timestamp (HH:MM in local time)
             let time_str = format_message_time(msg.ts);
@@ -893,6 +876,60 @@ fn format_group_duration(first: DateTime<Utc>, last: DateTime<Utc>) -> String {
         } else {
             format!("{} hours", hours)
         }
+    }
+}
+
+/// Extract a meaningful preview from tool_input JSON (command, path, etc.)
+fn extract_tool_arg_preview(input: &Option<serde_json::Value>) -> String {
+    input
+        .as_ref()
+        .and_then(|v| {
+            // Try common argument field names used by various tools
+            v.get("command")
+                .or_else(|| v.get("file_path"))
+                .or_else(|| v.get("filePath"))
+                .or_else(|| v.get("path"))
+                .or_else(|| v.get("pattern"))
+                .or_else(|| v.get("query"))
+                .or_else(|| v.get("content"))
+                .or_else(|| v.get("description"))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Get a content preview for a message (suitable for one-line display).
+/// Handles tool calls and results properly, extracting meaningful previews.
+fn get_message_preview(msg: &Message, max_len: usize) -> String {
+    match msg.message_type {
+        MessageType::ToolCall => {
+            let tool = msg.tool_name.as_deref().unwrap_or("unknown");
+            let arg_preview = extract_tool_arg_preview(&msg.tool_input);
+            if arg_preview.is_empty() {
+                format!("<{}>", tool)
+            } else {
+                truncate_string(&format!("<{}> {}", tool, arg_preview), max_len)
+            }
+        }
+        MessageType::ToolResult => msg
+            .tool_result
+            .as_ref()
+            .and_then(|r| r.lines().next())
+            .map(|s| truncate_string(s, max_len))
+            .unwrap_or_else(|| "[result]".to_string()),
+        _ => msg
+            .content
+            .as_ref()
+            .and_then(|c| c.lines().next())
+            .map(|s| truncate_string(s, max_len))
+            .unwrap_or_else(|| {
+                // Fallback to tool_name for any other message with tool_name
+                msg.tool_name
+                    .as_ref()
+                    .map(|t| format!("<{}>", t))
+                    .unwrap_or_default()
+            }),
     }
 }
 
