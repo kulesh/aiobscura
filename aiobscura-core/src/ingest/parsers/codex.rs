@@ -72,6 +72,25 @@ impl Default for CodexParser {
 }
 
 // ============================================
+// Helper functions
+// ============================================
+
+/// Detect system-injected context patterns in "user" role messages.
+///
+/// These are messages sent as "user" role but are actually CLI/system context,
+/// not actual human input. They should be labeled as "caller" (the system calling
+/// the model) rather than "human".
+fn is_system_injected_context(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<user_shell_command>")
+        || trimmed.starts_with("<INSTRUCTIONS>")
+        || trimmed.starts_with("<user_instructions>")
+        || trimmed.starts_with("<system")
+        || trimmed.starts_with("# AGENTS.md instructions for")
+}
+
+// ============================================
 // Raw JSONL record types (serde deserialization)
 // ============================================
 
@@ -432,16 +451,18 @@ impl AssistantParser for CodexParser {
 
                                     if let Some(text) = text {
                                         if !text.is_empty() {
-                                            // Detect environment context (system-injected, not user input)
-                                            let is_environment_context = role == "user"
-                                                && text.trim().starts_with("<environment_context>");
+                                            // Detect system-injected context patterns (not actual human input)
+                                            // These are messages sent as "user" role but are CLI/system context
+                                            let is_system_context =
+                                                role == "user" && is_system_injected_context(&text);
 
                                             // Determine author role and message type based on role and content
                                             let (author_role, message_type) = match role {
                                                 "assistant" => {
                                                     (AuthorRole::Assistant, MessageType::Response)
                                                 }
-                                                "user" if is_environment_context => {
+                                                "user" if is_system_context => {
+                                                    // System/CLI injected context - label as "caller"
                                                     (AuthorRole::System, MessageType::Context)
                                                 }
                                                 "user" => (AuthorRole::Human, MessageType::Prompt),
@@ -613,8 +634,18 @@ impl AssistantParser for CodexParser {
                         }
 
                         "ghost_snapshot" => {
-                            // Git state snapshot - capture as context
+                            // Git state snapshot - capture as context with commit hash
                             seq += 1;
+
+                            // Extract short commit hash for display
+                            let commit_preview = payload
+                                .ghost_commit
+                                .as_ref()
+                                .and_then(|gc| gc.get("id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| if s.len() > 8 { &s[..8] } else { s })
+                                .unwrap_or("unknown");
+
                             result.messages.push(Message {
                                 id: 0,
                                 session_id: session_id.clone().unwrap_or_default(),
@@ -622,10 +653,10 @@ impl AssistantParser for CodexParser {
                                 seq,
                                 ts,
                                 author_role: AuthorRole::System,
-                                author_name: Some("ghost_snapshot".to_string()),
+                                author_name: Some("snapshot".to_string()),
                                 message_type: MessageType::Context,
-                                content: None,
-                                content_type: None,
+                                content: Some(format!("git checkpoint: {}", commit_preview)),
+                                content_type: Some(ContentType::Text),
                                 tool_name: None,
                                 tool_input: None,
                                 tool_result: None,
