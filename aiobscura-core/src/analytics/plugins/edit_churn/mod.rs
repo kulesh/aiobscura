@@ -17,6 +17,9 @@
 //! | `churn_ratio` | float | `(total_edits - unique_files) / total_edits` |
 //! | `file_edit_counts` | object | Map of file path to edit count |
 //! | `high_churn_files` | array | Files edited 3+ times, sorted by count |
+//! | `lines_added` | integer | Total lines added across all edits |
+//! | `lines_removed` | integer | Total lines removed across all edits |
+//! | `lines_changed` | integer | Total lines changed (added + removed) |
 //!
 //! ## Churn Ratio Interpretation
 //!
@@ -87,6 +90,54 @@ impl EditChurnAnalyzer {
             .any(|pattern| path.contains(pattern))
     }
 
+    /// Extract line change counts from a tool_input.
+    ///
+    /// For Edit tool: compares old_string vs new_string line counts.
+    /// For Write tool: counts lines in content (all additions).
+    ///
+    /// Returns (lines_added, lines_removed).
+    fn extract_line_changes(tool_name: Option<&str>, tool_input: &serde_json::Value) -> (i64, i64) {
+        match tool_name {
+            Some("Edit") | Some("edit") => {
+                let old_lines = tool_input
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0) as i64;
+                let new_lines = tool_input
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0) as i64;
+
+                // Simple heuristic: if new > old, added; if old > new, removed
+                let added = (new_lines - old_lines).max(0);
+                let removed = (old_lines - new_lines).max(0);
+                (added, removed)
+            }
+            Some("Write") | Some("write") => {
+                // Write is all additions
+                let lines = tool_input
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0) as i64;
+                (lines, 0)
+            }
+            Some("MultiEdit") => {
+                // MultiEdit has an array of edits
+                let edits = tool_input
+                    .get("edits")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.len())
+                    .unwrap_or(0) as i64;
+                // Approximate: assume 5 lines per edit on average
+                (edits * 5, edits * 3)
+            }
+            _ => (0, 0),
+        }
+    }
+
     /// Check if a message is a file modification tool call.
     fn is_file_edit(message: &Message) -> bool {
         if message.message_type != MessageType::ToolCall {
@@ -132,6 +183,8 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
     ) -> Result<Vec<MetricOutput>> {
         let mut file_counts: HashMap<String, i64> = HashMap::new();
         let mut total_edits = 0i64;
+        let mut total_lines_added = 0i64;
+        let mut total_lines_removed = 0i64;
 
         // Count edits per file (excluding plan files and other non-code)
         for msg in messages {
@@ -147,6 +200,12 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                     }
                     total_edits += 1;
                     *file_counts.entry(file_path).or_insert(0) += 1;
+
+                    // Track line changes
+                    let (added, removed) =
+                        Self::extract_line_changes(msg.tool_name.as_deref(), tool_input);
+                    total_lines_added += added;
+                    total_lines_removed += removed;
                 }
             }
         }
@@ -184,6 +243,21 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                 &session.id,
                 "high_churn_files",
                 serde_json::json!(high_churn_files),
+            ),
+            MetricOutput::session(
+                &session.id,
+                "lines_added",
+                serde_json::json!(total_lines_added),
+            ),
+            MetricOutput::session(
+                &session.id,
+                "lines_removed",
+                serde_json::json!(total_lines_removed),
+            ),
+            MetricOutput::session(
+                &session.id,
+                "lines_changed",
+                serde_json::json!(total_lines_added + total_lines_removed),
             ),
         ])
     }
@@ -383,5 +457,46 @@ mod tests {
         assert!(!EditChurnAnalyzer::should_exclude_path(
             "/project/docs/plan.md"
         )); // lowercase, not in .claude
+    }
+
+    #[test]
+    fn test_extract_line_changes_edit() {
+        // Edit: 2 lines -> 5 lines = 3 added, 0 removed
+        let input = serde_json::json!({
+            "old_string": "line1\nline2",
+            "new_string": "line1\nline2\nline3\nline4\nline5"
+        });
+        let (added, removed) = EditChurnAnalyzer::extract_line_changes(Some("Edit"), &input);
+        assert_eq!(added, 3);
+        assert_eq!(removed, 0);
+
+        // Edit: 5 lines -> 2 lines = 0 added, 3 removed
+        let input = serde_json::json!({
+            "old_string": "line1\nline2\nline3\nline4\nline5",
+            "new_string": "line1\nline2"
+        });
+        let (added, removed) = EditChurnAnalyzer::extract_line_changes(Some("Edit"), &input);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn test_extract_line_changes_write() {
+        // Write: all new content = all additions
+        let input = serde_json::json!({
+            "content": "line1\nline2\nline3"
+        });
+        let (added, removed) = EditChurnAnalyzer::extract_line_changes(Some("Write"), &input);
+        assert_eq!(added, 3);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_extract_line_changes_unknown() {
+        // Unknown tool: no changes tracked
+        let input = serde_json::json!({});
+        let (added, removed) = EditChurnAnalyzer::extract_line_changes(Some("Read"), &input);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
     }
 }
