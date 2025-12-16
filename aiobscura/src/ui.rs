@@ -319,10 +319,7 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(BORDER_MESSAGES))
-                .title(format!(
-                    " Messages ({}) ",
-                    app.session_messages.len()
-                ))
+                .title(format!(" Messages ({}) ", app.session_messages.len()))
                 .title_style(Style::default().fg(BORDER_MESSAGES).bold()),
         );
     frame.render_widget(paragraph, area);
@@ -3145,9 +3142,16 @@ fn render_project_sessions_content(frame: &mut Frame, app: &mut App, area: Rect)
         return;
     }
 
-    let header_cells = ["Session ID", "Last Updated", "Duration", "Threads", "Msgs", "Model"]
-        .into_iter()
-        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header_cells = [
+        "Session ID",
+        "Last Updated",
+        "Duration",
+        "Threads",
+        "Msgs",
+        "Model",
+    ]
+    .into_iter()
+    .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
     let header = Row::new(header_cells).height(1);
 
     let rows = app.project_sessions.iter().map(|session| {

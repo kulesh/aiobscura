@@ -1962,14 +1962,11 @@ impl App {
                             let session_name = format!("Session {}", session_row.short_id());
 
                             // Load messages for this session (merged across all threads)
-                            if let Ok(messages) =
-                                self.db.get_session_messages(&session_id, 10_000)
+                            if let Ok(messages) = self.db.get_session_messages(&session_id, 10_000)
                             {
                                 // Load threads for this session
-                                let threads = self
-                                    .db
-                                    .get_session_threads(&session_id)
-                                    .unwrap_or_default();
+                                let threads =
+                                    self.db.get_session_threads(&session_id).unwrap_or_default();
 
                                 // Save return destination
                                 self.return_to_project = Some((project_id, project_name, sub_tab));
