@@ -46,6 +46,17 @@ use std::collections::HashMap;
 /// Minimum edit count to be considered "high churn".
 const HIGH_CHURN_THRESHOLD: i64 = 3;
 
+/// Paths containing these patterns are excluded from churn analysis.
+/// These are typically AI-generated planning docs, not user code.
+const EXCLUDED_PATH_PATTERNS: &[&str] = &[
+    "/.claude/plans/",   // Claude Code planning documents
+    "/.claude/todos/",   // Claude Code todo files
+    "/PLAN.md",          // Common AI planning file
+    "/IMPLEMENTATION.md",
+    "/DESIGN.md",
+    "/ARCHITECTURE.md",
+];
+
 /// Analyzer that tracks file modification patterns.
 pub struct EditChurnAnalyzer;
 
@@ -64,6 +75,16 @@ impl EditChurnAnalyzer {
             .or_else(|| tool_input.get("filePath"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
+    }
+
+    /// Check if a file path should be excluded from churn analysis.
+    ///
+    /// Excludes AI planning documents and other non-code files that
+    /// would skew the churn metrics.
+    fn should_exclude_path(path: &str) -> bool {
+        EXCLUDED_PATH_PATTERNS
+            .iter()
+            .any(|pattern| path.contains(pattern))
     }
 
     /// Check if a message is a file modification tool call.
@@ -112,16 +133,19 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
         let mut file_counts: HashMap<String, i64> = HashMap::new();
         let mut total_edits = 0i64;
 
-        // Count edits per file
+        // Count edits per file (excluding plan files and other non-code)
         for msg in messages {
             if !Self::is_file_edit(msg) {
                 continue;
             }
 
-            total_edits += 1;
-
             if let Some(ref tool_input) = msg.tool_input {
                 if let Some(file_path) = Self::extract_file_path(tool_input) {
+                    // Skip excluded paths (plan files, etc.)
+                    if Self::should_exclude_path(&file_path) {
+                        continue;
+                    }
+                    total_edits += 1;
                     *file_counts.entry(file_path).or_insert(0) += 1;
                 }
             }
@@ -326,5 +350,38 @@ mod tests {
 
         // A file edited 3 times should be high churn
         assert!(3 >= HIGH_CHURN_THRESHOLD);
+    }
+
+    #[test]
+    fn test_should_exclude_path() {
+        // Claude plan files should be excluded
+        assert!(EditChurnAnalyzer::should_exclude_path(
+            "/Users/kulesh/.claude/plans/glimmering-church.md"
+        ));
+        assert!(EditChurnAnalyzer::should_exclude_path(
+            "/home/user/.claude/plans/test-plan.md"
+        ));
+        assert!(EditChurnAnalyzer::should_exclude_path(
+            "/Users/kulesh/.claude/todos/todo.md"
+        ));
+
+        // Common AI planning files should be excluded
+        assert!(EditChurnAnalyzer::should_exclude_path("/project/PLAN.md"));
+        assert!(EditChurnAnalyzer::should_exclude_path(
+            "/project/IMPLEMENTATION.md"
+        ));
+        assert!(EditChurnAnalyzer::should_exclude_path("/project/DESIGN.md"));
+
+        // Regular code files should NOT be excluded
+        assert!(!EditChurnAnalyzer::should_exclude_path("/project/src/main.rs"));
+        assert!(!EditChurnAnalyzer::should_exclude_path(
+            "/project/Cargo.toml"
+        ));
+        assert!(!EditChurnAnalyzer::should_exclude_path(
+            "/project/README.md"
+        ));
+        assert!(!EditChurnAnalyzer::should_exclude_path(
+            "/project/docs/plan.md"
+        )); // lowercase, not in .claude
     }
 }
