@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "aiobscura-sync"
 path = "src/sync.rs"
 
+[[bin]]
+name = "aiobscura-analyze"
+path = "src/analyze.rs"
+
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
 anyhow.workspace = true
