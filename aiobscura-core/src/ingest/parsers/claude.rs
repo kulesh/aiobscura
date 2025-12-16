@@ -211,6 +211,13 @@ impl AssistantParser for ClaudeCodeParser {
             .map(|s| s.starts_with("agent-"))
             .unwrap_or(false);
 
+        // Determine thread type from file name - used for role assignment
+        let thread_type = if is_agent_file {
+            ThreadType::Agent
+        } else {
+            ThreadType::Main
+        };
+
         // Open file
         let file = File::open(ctx.path).map_err(|e| {
             Error::Io(std::io::Error::new(
@@ -374,26 +381,13 @@ impl AssistantParser for ClaudeCodeParser {
                     .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-                // Determine thread type from file name
-                let ttype = if ctx
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("agent-"))
-                    .unwrap_or(false)
-                {
-                    ThreadType::Agent
-                } else {
-                    ThreadType::Main
-                };
-
-                let tid = format!("{}-{}", sid, ttype.as_str());
+                let tid = format!("{}-{}", sid, thread_type.as_str());
                 thread_id = Some(tid.clone());
 
                 result.threads.push(Thread {
                     id: tid,
                     session_id: sid.clone(),
-                    thread_type: ttype,
+                    thread_type,
                     parent_thread_id: None,
                     spawned_by_message_id: None,
                     started_at: ts,
@@ -419,6 +413,7 @@ impl AssistantParser for ClaudeCodeParser {
                 &raw_json,
                 session_id.as_ref().unwrap_or(&String::new()),
                 thread_id.as_ref().unwrap_or(&String::new()),
+                thread_type,
                 &mut seq,
                 ts,
                 &source_path,
@@ -623,12 +618,20 @@ impl ClaudeCodeParser {
         raw_json: &serde_json::Value,
         session_id: &str,
         thread_id: &str,
+        thread_type: ThreadType,
         seq: &mut i32,
         ts: DateTime<Utc>,
         source_path: &str,
         source_offset: i64,
         source_line: Option<i32>,
     ) -> Vec<Message> {
+        // In agent threads, user messages come from the parent assistant (caller),
+        // not a human. In main threads, user messages are from actual humans.
+        let user_role = if thread_type == ThreadType::Agent {
+            AuthorRole::Caller
+        } else {
+            AuthorRole::Human
+        };
         let mut messages = Vec::new();
         let record_type = record.record_type.as_deref().unwrap_or("unknown");
 
@@ -850,7 +853,7 @@ impl ClaudeCodeParser {
                                         thread_id: thread_id.to_string(),
                                         seq: *seq,
                                         ts,
-                                        author_role: AuthorRole::Human,
+                                        author_role: user_role,
                                         author_name: None,
                                         message_type: MessageType::Prompt,
                                         content: Some(text.clone()),
@@ -881,7 +884,7 @@ impl ClaudeCodeParser {
                                                     thread_id: thread_id.to_string(),
                                                     seq: *seq,
                                                     ts,
-                                                    author_role: AuthorRole::Human,
+                                                    author_role: user_role,
                                                     author_name: None,
                                                     message_type: MessageType::Prompt,
                                                     content: Some(text.clone()),
@@ -953,7 +956,7 @@ impl ClaudeCodeParser {
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
                                                 ts,
-                                                author_role: AuthorRole::Human,
+                                                author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Prompt,
                                                 content: None,
@@ -983,7 +986,7 @@ impl ClaudeCodeParser {
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
                                                 ts,
-                                                author_role: AuthorRole::Human,
+                                                author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
                                                 content: Some(
@@ -1015,7 +1018,7 @@ impl ClaudeCodeParser {
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
                                                 ts,
-                                                author_role: AuthorRole::Human,
+                                                author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
                                                 content: Some(

@@ -486,15 +486,26 @@ fn test_codex_parse_minimal_session() {
     // Should have parsed messages (user + assistant)
     assert!(!result.messages.is_empty());
 
-    // Check for caller messages (first user prompt is CLI invocation)
-    let caller_msgs: Vec<_> = result
+    // Check for caller context messages (environment_context, etc.)
+    let caller_context_msgs: Vec<_> = result
         .messages
         .iter()
-        .filter(|m| m.author_role == AuthorRole::System && m.message_type == MessageType::Prompt)
+        .filter(|m| m.author_role == AuthorRole::Caller && m.message_type == MessageType::Context)
         .collect();
     assert!(
-        !caller_msgs.is_empty(),
-        "should have at least 1 caller message (first user prompt)"
+        !caller_context_msgs.is_empty(),
+        "should have at least 1 caller context message (environment_context)"
+    );
+
+    // Check for caller prompt messages (CLI invocation)
+    let caller_prompt_msgs: Vec<_> = result
+        .messages
+        .iter()
+        .filter(|m| m.author_role == AuthorRole::Caller && m.message_type == MessageType::Prompt)
+        .collect();
+    assert!(
+        !caller_prompt_msgs.is_empty(),
+        "should have at least 1 caller prompt (CLI invocation)"
     );
 
     // Check for human messages (subsequent user prompts)
@@ -519,8 +530,12 @@ fn test_codex_parse_minimal_session() {
         "should have at least 2 assistant messages"
     );
 
-    // Check first caller message content (CLI invocation)
-    assert!(caller_msgs[0].content.as_ref().unwrap().contains("list"));
+    // Check caller prompt content (CLI invocation)
+    assert!(caller_prompt_msgs[0]
+        .content
+        .as_ref()
+        .unwrap()
+        .contains("list"));
 }
 
 #[test]
