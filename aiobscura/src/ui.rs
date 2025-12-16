@@ -5,7 +5,7 @@ use aiobscura_core::{
     ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus,
     ThreadType,
 };
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{AnalyticsViewMode, App, ProjectSubTab, ViewMode};
+use crate::app::{App, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -90,6 +90,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             sub_tab,
             ..
         } => render_project_detail_view(frame, app, project_name.clone(), *sub_tab),
+        ViewMode::SessionDetail { session_name, .. } => {
+            render_session_detail_view(frame, app, session_name.clone())
+        }
     }
 }
 
@@ -129,6 +132,232 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
     render_analytics_panel(frame, app, chunks[2]);
     render_messages(frame, app, chunks[3]);
     render_detail_footer(frame, app, chunks[4]);
+}
+
+/// Render the session detail view (merged messages across all threads).
+fn render_session_detail_view(frame: &mut Frame, app: &mut App, session_name: String) {
+    let area = frame.area();
+
+    // Layout: header, analytics, messages, footer
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // Header
+        Constraint::Length(5), // Analytics panel
+        Constraint::Min(5),    // Messages
+        Constraint::Length(1), // Footer
+    ])
+    .split(area);
+
+    render_header(frame, &format!("Session: {}", session_name), chunks[0]);
+    render_session_analytics_panel(frame, app, chunks[1]);
+    render_session_messages(frame, app, chunks[2]);
+    render_session_detail_footer(frame, chunks[3]);
+}
+
+/// Render session-level analytics panel (no toggle, just session stats).
+fn render_session_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
+    // Check for error state
+    if let Some(ref error) = app.session_analytics_error {
+        let error_line = Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::styled(
+                truncate_string(error, 60),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(error_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" Session Analytics ")
+                .title_style(Style::default().fg(Color::Red)),
+        );
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let lines = build_session_analytics_lines(app);
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(" Session Analytics ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
+    );
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the session messages with thread segmentation.
+fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
+    if app.session_messages.is_empty() {
+        let empty = Paragraph::new("No messages in this session")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_MESSAGES)),
+            );
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    // Build message groups by consecutive thread
+    let groups = group_messages_by_thread(&app.session_messages);
+
+    // Build lines with thread headers
+    let mut lines: Vec<Line> = Vec::new();
+    for (thread_id, messages) in groups {
+        // Add thread header
+        let thread_label = if thread_id.len() > 8 {
+            thread_id[..8].to_string()
+        } else {
+            thread_id.clone()
+        };
+
+        // Determine thread type, badge, and color
+        let (thread_type, thread_color, badge) =
+            if let Some(thread) = app.session_threads.iter().find(|t| t.id == thread_id) {
+                match thread.thread_type {
+                    ThreadType::Main => (ThreadType::Main, BADGE_MAIN, "●"),
+                    ThreadType::Agent => (ThreadType::Agent, BADGE_AGENT, "◎"),
+                    ThreadType::Background => (ThreadType::Background, BADGE_BG, "◇"),
+                }
+            } else {
+                (ThreadType::Main, Color::DarkGray, "●")
+            };
+
+        // For non-main threads, calculate and show duration
+        let duration_str = if !matches!(thread_type, ThreadType::Main) && !messages.is_empty() {
+            let first_ts = messages.first().unwrap().ts;
+            let last_ts = messages.last().unwrap().ts;
+            format!(" ({})", format_group_duration(first_ts, last_ts))
+        } else {
+            String::new()
+        };
+
+        // Build thread header line
+        lines.push(Line::from(vec![
+            Span::styled("─── ", Style::default().fg(thread_color)),
+            Span::styled(format!("{} ", badge), Style::default().fg(thread_color)),
+            Span::styled(thread_label, Style::default().fg(thread_color).bold()),
+            Span::styled(duration_str, Style::default().fg(thread_color)),
+            Span::styled(
+                " ───────────────────────────────────",
+                Style::default().fg(thread_color),
+            ),
+        ]));
+
+        // Add messages for this thread
+        for msg in messages {
+            // Determine role style and prefix based on author role AND thread type
+            // In main thread, Human is a real human -> [human] (green)
+            // In agent/background threads, Human is the caller (parent assistant) -> [caller] (cyan)
+            let (role_style, role_prefix) = match (&msg.author_role, &thread_type) {
+                (AuthorRole::Human, ThreadType::Main) => {
+                    (Style::default().fg(Color::Green), "[human]")
+                }
+                (AuthorRole::Human, _) => (Style::default().fg(Color::Cyan), "[caller]"),
+                (AuthorRole::Assistant, _) => (Style::default().fg(Color::Blue), "[assistant]"),
+                (AuthorRole::Agent, _) => (Style::default().fg(Color::Cyan), "[agent]"),
+                (AuthorRole::System, _) => (Style::default().fg(Color::Yellow), "[system]"),
+                (AuthorRole::Tool, _) => (Style::default().fg(Color::Magenta), "[tool]"),
+            };
+
+            // Get content preview (shortened to leave room for timestamp)
+            let max_content_len = 60;
+            let content_preview = msg
+                .content
+                .as_ref()
+                .map(|c| {
+                    let first_line = c.lines().next().unwrap_or("");
+                    if first_line.len() > max_content_len {
+                        format!("{}...", &first_line[..max_content_len - 3])
+                    } else {
+                        first_line.to_string()
+                    }
+                })
+                .unwrap_or_else(|| {
+                    msg.tool_name
+                        .as_ref()
+                        .map(|t| format!("<{}>", t))
+                        .unwrap_or_default()
+                });
+
+            // Format timestamp (HH:MM in local time)
+            let time_str = format_message_time(msg.ts);
+
+            // Calculate padding for right-aligned timestamp
+            let role_part = format!("{} ", role_prefix);
+            let content_len = role_part.chars().count() + content_preview.chars().count();
+            let target_width: usize = 72; // Target width before timestamp
+            let padding_needed = target_width.saturating_sub(content_len);
+            let padding = " ".repeat(padding_needed);
+
+            lines.push(Line::from(vec![
+                Span::styled(role_part, role_style),
+                Span::styled(content_preview, Style::default().fg(Color::White)),
+                Span::raw(padding),
+                Span::styled(time_str, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        lines.push(Line::from("")); // Blank line between groups
+    }
+
+    // Calculate scrolling
+    let visible_height = area.height.saturating_sub(2) as usize; // Subtract border
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    let scroll_offset = app.session_scroll_offset.min(max_scroll);
+
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll_offset as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_MESSAGES))
+                .title(format!(" Messages ({}) ", app.session_messages.len()))
+                .title_style(Style::default().fg(BORDER_MESSAGES).bold()),
+        );
+    frame.render_widget(paragraph, area);
+}
+
+/// Group messages by consecutive thread_id.
+fn group_messages_by_thread(messages: &[Message]) -> Vec<(String, Vec<&Message>)> {
+    let mut groups: Vec<(String, Vec<&Message>)> = Vec::new();
+
+    for msg in messages {
+        if let Some((last_thread_id, last_group)) = groups.last_mut() {
+            if *last_thread_id == msg.thread_id {
+                last_group.push(msg);
+            } else {
+                groups.push((msg.thread_id.clone(), vec![msg]));
+            }
+        } else {
+            groups.push((msg.thread_id.clone(), vec![msg]));
+        }
+    }
+
+    groups
+}
+
+/// Render the footer for session detail view.
+fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" back  "),
+        Span::styled("j/k", Style::default().fg(Color::Yellow)),
+        Span::raw(" scroll  "),
+        Span::styled("g/G", Style::default().fg(Color::Yellow)),
+        Span::raw(" top/bottom  "),
+        Span::styled("q", Style::default().fg(Color::Yellow)),
+        Span::raw(" quit"),
+    ]))
+    .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, area);
 }
 
 /// Render the header with title.
@@ -299,36 +528,10 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the analytics panel with session/thread toggle.
+/// Render the analytics panel showing thread-level analytics.
 fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
-    // Determine which analytics to show based on view mode
-    let (is_thread_mode, error, analytics_available) = match app.analytics_view_mode {
-        AnalyticsViewMode::Session => (
-            false,
-            app.session_analytics_error.as_ref(),
-            app.session_analytics.is_some(),
-        ),
-        AnalyticsViewMode::Thread => (
-            true,
-            app.thread_analytics_error.as_ref(),
-            app.thread_analytics.is_some(),
-        ),
-    };
-
-    // Build the title with toggle hint
-    let toggle_hint = if is_thread_mode {
-        "[a: Session]"
-    } else {
-        "[a: Thread]"
-    };
-    let title_text = if is_thread_mode {
-        " Analytics (Thread) "
-    } else {
-        " Analytics (Session) "
-    };
-
     // Check for error state
-    if let Some(error) = error {
+    if let Some(ref error) = app.thread_analytics_error {
         let error_line = Line::from(vec![
             Span::styled("Error: ", Style::default().fg(Color::Red)),
             Span::styled(
@@ -341,16 +544,15 @@ fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Red))
-                .title(title_text)
-                .title_style(Style::default().fg(Color::Red))
-                .title_bottom(Line::from(toggle_hint).right_aligned()),
+                .title(" Thread Analytics ")
+                .title_style(Style::default().fg(Color::Red)),
         );
         frame.render_widget(paragraph, area);
         return;
     }
 
     // Check if we have analytics
-    if !analytics_available {
+    if app.thread_analytics.is_none() {
         let placeholder = Paragraph::new("No analytics computed")
             .style(Style::default().fg(Color::DarkGray))
             .block(
@@ -358,29 +560,22 @@ fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(BORDER_INFO))
-                    .title(title_text)
-                    .title_style(Style::default().fg(BORDER_INFO))
-                    .title_bottom(Line::from(toggle_hint).right_aligned()),
+                    .title(" Thread Analytics ")
+                    .title_style(Style::default().fg(BORDER_INFO)),
             );
         frame.render_widget(placeholder, area);
         return;
     }
 
-    // Build the analytics lines based on mode
-    let lines = if is_thread_mode {
-        build_thread_analytics_lines(app)
-    } else {
-        build_session_analytics_lines(app)
-    };
+    let lines = build_thread_analytics_lines(app);
 
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(BORDER_INFO))
-            .title(title_text)
-            .title_style(Style::default().fg(BORDER_INFO).bold())
-            .title_bottom(Line::from(toggle_hint).right_aligned()),
+            .title(" Thread Analytics ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
     );
     frame.render_widget(paragraph, area);
 }
@@ -455,9 +650,9 @@ fn build_session_analytics_lines(app: &App) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(line2_spans));
 
-    // Line 3: Placeholder for future metrics (e.g., lines changed, first-try rate)
+    // Line 3: Additional session info
     let line3_spans = vec![Span::styled(
-        "Press 'a' to view thread-level analytics",
+        "Session-level aggregate across all threads",
         Style::default().fg(Color::DarkGray).italic(),
     )];
     lines.push(Line::from(line3_spans));
@@ -660,6 +855,43 @@ fn format_duration(secs: i64) -> String {
             format!("{}d {}h", days, hours)
         } else {
             format!("{}d", days)
+        }
+    }
+}
+
+/// Format a message timestamp as local time HH:MM (24-hour compact).
+fn format_message_time(ts: DateTime<Utc>) -> String {
+    ts.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+/// Format duration between two timestamps for thread group headers.
+fn format_group_duration(first: DateTime<Utc>, last: DateTime<Utc>) -> String {
+    let secs = (last - first).num_seconds().max(0);
+    if secs == 0 {
+        "<1 second".to_string()
+    } else if secs == 1 {
+        "1 second".to_string()
+    } else if secs < 60 {
+        format!("{} seconds", secs)
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        let remaining_secs = secs % 60;
+        if remaining_secs > 0 {
+            format!("{} min {} sec", mins, remaining_secs)
+        } else if mins == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{} minutes", mins)
+        }
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{} hr {} min", hours, mins)
+        } else if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{} hours", hours)
         }
     }
 }
@@ -2391,8 +2623,8 @@ fn render_project_detail_view(
         ProjectSubTab::Overview => {
             render_project_overview_content(frame, app, chunks[2]);
         }
-        ProjectSubTab::Threads => {
-            render_project_threads_content(frame, app, chunks[2]);
+        ProjectSubTab::Sessions => {
+            render_project_sessions_content(frame, app, chunks[2]);
         }
         ProjectSubTab::Plans => {
             render_project_plans_content(frame, app, chunks[2]);
@@ -2814,7 +3046,7 @@ fn render_project_detail_footer(frame: &mut Frame, sub_tab: ProjectSubTab, area:
         ProjectSubTab::Overview => {
             // No extra hints for overview
         }
-        ProjectSubTab::Threads | ProjectSubTab::Plans => {
+        ProjectSubTab::Sessions | ProjectSubTab::Plans => {
             spans.push(Span::styled("Enter", Style::default().fg(Color::Yellow)));
             spans.push(Span::raw(" open  "));
             spans.push(Span::styled("j/k", Style::default().fg(Color::Yellow)));
@@ -2858,7 +3090,7 @@ fn render_project_sub_tabs(frame: &mut Frame, active: ProjectSubTab, area: Rect)
     let mut spans = Vec::new();
     spans.push(Span::raw(" "));
     spans.extend(make_tab("Overview", "1", active == ProjectSubTab::Overview));
-    spans.extend(make_tab("Threads", "2", active == ProjectSubTab::Threads));
+    spans.extend(make_tab("Sessions", "2", active == ProjectSubTab::Sessions));
     spans.extend(make_tab("Plans", "3", active == ProjectSubTab::Plans));
     spans.extend(make_tab("Files", "4", active == ProjectSubTab::Files));
 
@@ -2893,78 +3125,80 @@ fn render_project_overview_content(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Render the project threads content (table of threads).
-fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.project_threads.is_empty() {
-        let empty_msg = Paragraph::new("No threads found for this project")
+/// Render the project sessions content (table of sessions).
+fn render_project_sessions_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.project_sessions.is_empty() {
+        let empty_msg = Paragraph::new("No sessions found for this project")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(BORDER_PROJECT))
-                    .title(" Threads ")
+                    .title(" Sessions ")
                     .title_style(Style::default().fg(BORDER_PROJECT).bold()),
             );
         frame.render_widget(empty_msg, area);
         return;
     }
 
-    let header_cells = ["Last Updated", "Thread ID", "Type", "Msgs"]
-        .into_iter()
-        .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
+    let header_cells = [
+        "Session ID",
+        "Last Updated",
+        "Duration",
+        "Threads",
+        "Msgs",
+        "Model",
+    ]
+    .into_iter()
+    .map(|h| Cell::from(h).style(Style::default().fg(Color::Yellow).bold()));
     let header = Row::new(header_cells).height(1);
 
-    let rows = app.project_threads.iter().map(|thread| {
-        let (badge, type_text, color) = match thread.thread_type {
-            aiobscura_core::ThreadType::Main => ("●", "main", BADGE_MAIN),
-            aiobscura_core::ThreadType::Agent => ("◎", "agent", BADGE_AGENT),
-            aiobscura_core::ThreadType::Background => ("◇", "bg", BADGE_BG),
-        };
-
-        // Use tree-drawing characters for hierarchy (like main Threads view)
-        let tree_prefix = if thread.indent_level > 0 {
-            if thread.is_last_child {
-                "└"
-            } else {
-                "├"
-            }
-        } else {
-            ""
-        };
-
-        let type_cell = Cell::from(Line::from(vec![
-            Span::styled(tree_prefix, Style::default().fg(SEPARATOR_COLOR)),
-            Span::styled(format!("{} ", badge), Style::default().fg(color)),
-            Span::styled(type_text, Style::default().fg(color)),
-        ]));
-
-        let msg_style = if thread.message_count > 100 {
+    let rows = app.project_sessions.iter().map(|session| {
+        let msg_style = if session.message_count > 500 {
             Style::default().fg(Color::Yellow)
-        } else if thread.message_count > 50 {
+        } else if session.message_count > 100 {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
+        let thread_style = if session.thread_count > 5 {
+            Style::default().fg(Color::Yellow)
+        } else if session.thread_count > 1 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let model_display = session
+            .model_name
+            .as_ref()
+            .map(|m| truncate_model_name(m))
+            .unwrap_or_else(|| "—".to_string());
+
         Row::new([
-            Cell::from(thread.relative_time()),
-            Cell::from(thread.short_id()),
-            type_cell,
-            Cell::from(thread.message_count.to_string()).style(msg_style),
+            Cell::from(session.short_id()),
+            Cell::from(session.relative_time()),
+            Cell::from(session.formatted_duration()),
+            Cell::from(session.thread_count.to_string()).style(thread_style),
+            Cell::from(session.message_count.to_string()).style(msg_style),
+            Cell::from(model_display).style(Style::default().fg(Color::DarkGray)),
         ])
     });
 
     let widths = [
+        Constraint::Length(10), // Session ID
         Constraint::Length(12), // Last Updated
-        Constraint::Length(10), // Thread ID
-        Constraint::Length(10), // Type
+        Constraint::Length(10), // Duration
+        Constraint::Length(8),  // Threads
         Constraint::Length(6),  // Msgs
+        Constraint::Min(10),    // Model
     ];
 
-    let thread_count = app.project_threads.len();
+    let session_count = app.project_sessions.len();
     let selected = app
-        .project_threads_table_state
+        .project_sessions_table_state
         .selected()
         .map(|i| i + 1)
         .unwrap_or(0);
@@ -2976,7 +3210,7 @@ fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) 
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(BORDER_PROJECT))
-                .title(format!(" Threads ({}/{}) ", selected, thread_count))
+                .title(format!(" Sessions ({}/{}) ", selected, session_count))
                 .title_style(Style::default().fg(BORDER_PROJECT).bold()),
         )
         .row_highlight_style(
@@ -2986,7 +3220,27 @@ fn render_project_threads_content(frame: &mut Frame, app: &mut App, area: Rect) 
         )
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut app.project_threads_table_state);
+    frame.render_stateful_widget(table, area, &mut app.project_sessions_table_state);
+}
+
+/// Truncate model name for display (e.g., "claude-3-5-sonnet-20241022" -> "sonnet-20241022")
+fn truncate_model_name(name: &str) -> String {
+    // Try to extract just the model variant and date
+    if let Some(pos) = name.rfind("sonnet") {
+        return name[pos..].to_string();
+    }
+    if let Some(pos) = name.rfind("opus") {
+        return name[pos..].to_string();
+    }
+    if let Some(pos) = name.rfind("haiku") {
+        return name[pos..].to_string();
+    }
+    // Fall back to last 15 chars if name is too long
+    if name.len() > 15 {
+        format!("...{}", &name[name.len() - 12..])
+    } else {
+        name.to_string()
+    }
 }
 
 /// Render the project plans content (table of plans).
