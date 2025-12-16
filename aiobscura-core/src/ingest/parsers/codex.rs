@@ -365,99 +365,12 @@ impl AssistantParser for CodexParser {
                     let msg_type = payload.msg_type.as_deref().unwrap_or("unknown");
 
                     match msg_type {
-                        "user_message" => {
-                            if let Some(message) = &payload.message {
-                                if !message.is_empty() {
-                                    seq += 1;
-                                    result.messages.push(Message {
-                                        id: 0,
-                                        session_id: session_id.clone().unwrap_or_default(),
-                                        thread_id: thread_id.clone().unwrap_or_default(),
-                                        seq,
-                                        ts,
-                                        author_role: AuthorRole::Human,
-                                        author_name: None,
-                                        message_type: MessageType::Prompt,
-                                        content: Some(message.clone()),
-                                        content_type: Some(ContentType::Text),
-                                        tool_name: None,
-                                        tool_input: None,
-                                        tool_result: None,
-                                        tokens_in: None,
-                                        tokens_out: None,
-                                        duration_ms: None,
-                                        source_file_path: source_path.clone(),
-                                        source_offset: record_offset as i64,
-                                        source_line: Some(line_number),
-                                        raw_data: raw_json.clone(),
-                                        metadata: serde_json::json!({}),
-                                    });
-                                }
-                            }
-                        }
-
-                        "agent_message" => {
-                            if let Some(message) = &payload.message {
-                                if !message.is_empty() {
-                                    seq += 1;
-                                    result.messages.push(Message {
-                                        id: 0,
-                                        session_id: session_id.clone().unwrap_or_default(),
-                                        thread_id: thread_id.clone().unwrap_or_default(),
-                                        seq,
-                                        ts,
-                                        author_role: AuthorRole::Agent,
-                                        author_name: None,
-                                        message_type: MessageType::Response,
-                                        content: Some(message.clone()),
-                                        content_type: Some(ContentType::Text),
-                                        tool_name: None,
-                                        tool_input: None,
-                                        tool_result: None,
-                                        tokens_in: None,
-                                        tokens_out: None,
-                                        duration_ms: None,
-                                        source_file_path: source_path.clone(),
-                                        source_offset: record_offset as i64,
-                                        source_line: Some(line_number),
-                                        raw_data: raw_json.clone(),
-                                        metadata: serde_json::json!({}),
-                                    });
-                                }
-                            }
-                        }
-
-                        "agent_reasoning" => {
-                            if let Some(text) = &payload.text {
-                                if !text.is_empty() {
-                                    seq += 1;
-                                    result.messages.push(Message {
-                                        id: 0,
-                                        session_id: session_id.clone().unwrap_or_default(),
-                                        thread_id: thread_id.clone().unwrap_or_default(),
-                                        seq,
-                                        ts,
-                                        author_role: AuthorRole::Assistant,
-                                        author_name: None,
-                                        message_type: MessageType::Context,
-                                        content: Some(text.clone()),
-                                        content_type: Some(ContentType::Text),
-                                        tool_name: None,
-                                        tool_input: None,
-                                        tool_result: None,
-                                        tokens_in: None,
-                                        tokens_out: None,
-                                        duration_ms: None,
-                                        source_file_path: source_path.clone(),
-                                        source_offset: record_offset as i64,
-                                        source_line: Some(line_number),
-                                        raw_data: raw_json.clone(),
-                                        metadata: serde_json::json!({
-                                            "reasoning": true,
-                                        }),
-                                    });
-                                }
-                            }
+                        // Skip these - they duplicate response_item events:
+                        // - user_message duplicates response_item.message (role=user)
+                        // - agent_message duplicates response_item.message (role=assistant)
+                        // - agent_reasoning duplicates response_item.reasoning.summary
+                        "user_message" | "agent_message" | "agent_reasoning" => {
+                            // Intentionally skipped - content captured via response_item
                         }
 
                         "token_count" => {
@@ -468,7 +381,7 @@ impl AssistantParser for CodexParser {
                         }
 
                         _ => {
-                            // Unknown event_msg type - capture as context
+                            // Unknown event_msg type - capture as context for future-proofing
                             seq += 1;
                             result.messages.push(Message {
                                 id: 0,
@@ -506,11 +419,6 @@ impl AssistantParser for CodexParser {
                     match item_type {
                         "message" => {
                             let role = payload.role.as_deref().unwrap_or("unknown");
-                            let (author_role, message_type) = match role {
-                                "assistant" => (AuthorRole::Assistant, MessageType::Response),
-                                "user" => (AuthorRole::Human, MessageType::Prompt),
-                                _ => (AuthorRole::System, MessageType::Context),
-                            };
 
                             // Extract text from content blocks
                             if let Some(blocks) = &payload.content {
@@ -524,6 +432,22 @@ impl AssistantParser for CodexParser {
 
                                     if let Some(text) = text {
                                         if !text.is_empty() {
+                                            // Detect environment context (system-injected, not user input)
+                                            let is_environment_context = role == "user"
+                                                && text.trim().starts_with("<environment_context>");
+
+                                            // Determine author role and message type based on role and content
+                                            let (author_role, message_type) = match role {
+                                                "assistant" => {
+                                                    (AuthorRole::Assistant, MessageType::Response)
+                                                }
+                                                "user" if is_environment_context => {
+                                                    (AuthorRole::System, MessageType::Context)
+                                                }
+                                                "user" => (AuthorRole::Human, MessageType::Prompt),
+                                                _ => (AuthorRole::System, MessageType::Context),
+                                            };
+
                                             seq += 1;
 
                                             // Apply token counts from last token_count event
@@ -641,16 +565,23 @@ impl AssistantParser for CodexParser {
                             // Model reasoning (may be encrypted)
                             seq += 1;
 
-                            let content = if payload.encrypted_content.is_some() {
-                                Some("[encrypted reasoning]".to_string())
-                            } else {
-                                payload
-                                    .summary
-                                    .as_ref()
-                                    .and_then(|s| s.first())
-                                    .and_then(|v| v.get("text"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
+                            // Extract summary text if available
+                            let summary_text = payload
+                                .summary
+                                .as_ref()
+                                .and_then(|s| s.first())
+                                .and_then(|v| v.get("text"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            // Combine summary with encrypted indicator when both are present
+                            let content = match (&summary_text, &payload.encrypted_content) {
+                                (Some(summary), Some(_)) => {
+                                    Some(format!("{}\n[encrypted reasoning]", summary))
+                                }
+                                (Some(summary), None) => Some(summary.clone()),
+                                (None, Some(_)) => Some("[encrypted reasoning]".to_string()),
+                                (None, None) => None,
                             };
 
                             result.messages.push(Message {
