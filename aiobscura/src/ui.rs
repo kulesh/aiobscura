@@ -426,11 +426,18 @@ fn extract_basename(path: &str) -> &str {
 }
 
 /// Truncate a string to max length with ellipsis.
+/// Handles multi-byte UTF-8 characters safely.
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        // Find a valid char boundary at or before max_len - 3 (for "...")
+        let target = max_len.saturating_sub(3);
+        let mut end = target;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -3289,14 +3296,19 @@ fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     ])
 }
 
-/// Truncate a string to a maximum length, adding "..." if truncated.
+/// Truncate a string to a maximum length.
+/// Handles multi-byte UTF-8 characters safely.
+/// Note: Does not add "..." - caller should handle that if needed.
 fn truncate_str(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
-    } else if max_len > 3 {
-        &s[..max_len - 3]
     } else {
-        &s[..max_len]
+        // Find a valid char boundary at or before max_len
+        let mut end = max_len;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        &s[..end]
     }
 }
 

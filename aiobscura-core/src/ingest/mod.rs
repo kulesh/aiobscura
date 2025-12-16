@@ -445,7 +445,12 @@ impl IngestCoordinator {
                     .map(|c| {
                         let cleaned = c.lines().next().unwrap_or("").trim();
                         if cleaned.len() > 60 {
-                            format!("{}...", &cleaned[..60])
+                            // Find a valid char boundary at or before byte 60
+                            let mut end = 60;
+                            while !cleaned.is_char_boundary(end) && end > 0 {
+                                end -= 1;
+                            }
+                            format!("{}...", &cleaned[..end])
                         } else {
                             cleaned.to_string()
                         }
