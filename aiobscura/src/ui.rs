@@ -252,32 +252,27 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
 
         // Add messages for this thread
         for msg in messages {
-            // Determine role style and prefix based on author role AND thread type
-            // In main thread, Human is a real human -> [human] (green)
-            // In agent/background threads, Human is the caller (parent assistant) -> [caller] (cyan)
-            // System context messages are labeled as [caller] (CLI/system calling the model)
-            // except for snapshots which get [snapshot]
-            let (role_style, role_prefix) = match (&msg.author_role, &thread_type) {
-                (AuthorRole::Human, ThreadType::Main) => {
-                    (Style::default().fg(Color::Green), "[human]")
-                }
-                (AuthorRole::Human, _) => (Style::default().fg(Color::Cyan), "[caller]"),
-                (AuthorRole::Assistant, _) => (Style::default().fg(Color::Blue), "[assistant]"),
-                (AuthorRole::Agent, _) => (Style::default().fg(Color::Cyan), "[agent]"),
-                (AuthorRole::System, _) => {
-                    // Check author_name to distinguish snapshot from other system context
+            // Map author role directly to display style and label.
+            // The parser layer determines the correct role (Human vs Caller)
+            // based on context, so UI just needs a 1:1 mapping.
+            let (role_style, role_prefix) = match msg.author_role {
+                AuthorRole::Human => (Style::default().fg(Color::Green), "[human]"),
+                AuthorRole::Caller => (Style::default().fg(Color::Cyan), "[caller]"),
+                AuthorRole::Assistant => (Style::default().fg(Color::Blue), "[assistant]"),
+                AuthorRole::Agent => (Style::default().fg(Color::Cyan), "[agent]"),
+                AuthorRole::Tool => (Style::default().fg(Color::Magenta), "[tool]"),
+                AuthorRole::System => {
+                    // System is for true system events like snapshots
                     if msg.author_name.as_deref() == Some("snapshot") {
                         (Style::default().fg(Color::DarkGray), "[snapshot]")
                     } else {
-                        // System-injected context (environment, instructions) -> [caller]
-                        (Style::default().fg(Color::Cyan), "[caller]")
+                        (Style::default().fg(Color::DarkGray), "[system]")
                     }
                 }
-                (AuthorRole::Tool, _) => (Style::default().fg(Color::Magenta), "[tool]"),
             };
 
             // Get content preview (shortened to leave room for timestamp)
-            let content_preview = get_message_preview(msg, 60);
+            let content_preview = msg.preview(60);
 
             // Format timestamp (HH:MM in local time)
             let time_str = format_message_time(msg.ts);
@@ -886,60 +881,6 @@ fn format_group_duration(first: DateTime<Utc>, last: DateTime<Utc>) -> String {
         } else {
             format!("{} hours", hours)
         }
-    }
-}
-
-/// Extract a meaningful preview from tool_input JSON (command, path, etc.)
-fn extract_tool_arg_preview(input: &Option<serde_json::Value>) -> String {
-    input
-        .as_ref()
-        .and_then(|v| {
-            // Try common argument field names used by various tools
-            v.get("command")
-                .or_else(|| v.get("file_path"))
-                .or_else(|| v.get("filePath"))
-                .or_else(|| v.get("path"))
-                .or_else(|| v.get("pattern"))
-                .or_else(|| v.get("query"))
-                .or_else(|| v.get("content"))
-                .or_else(|| v.get("description"))
-        })
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Get a content preview for a message (suitable for one-line display).
-/// Handles tool calls and results properly, extracting meaningful previews.
-fn get_message_preview(msg: &Message, max_len: usize) -> String {
-    match msg.message_type {
-        MessageType::ToolCall => {
-            let tool = msg.tool_name.as_deref().unwrap_or("unknown");
-            let arg_preview = extract_tool_arg_preview(&msg.tool_input);
-            if arg_preview.is_empty() {
-                format!("<{}>", tool)
-            } else {
-                truncate_string(&format!("<{}> {}", tool, arg_preview), max_len)
-            }
-        }
-        MessageType::ToolResult => msg
-            .tool_result
-            .as_ref()
-            .and_then(|r| r.lines().next())
-            .map(|s| truncate_string(s, max_len))
-            .unwrap_or_else(|| "[result]".to_string()),
-        _ => msg
-            .content
-            .as_ref()
-            .and_then(|c| c.lines().next())
-            .map(|s| truncate_string(s, max_len))
-            .unwrap_or_else(|| {
-                // Fallback to tool_name for any other message with tool_name
-                msg.tool_name
-                    .as_ref()
-                    .map(|t| format!("<{}>", t))
-                    .unwrap_or_default()
-            }),
     }
 }
 
@@ -3923,6 +3864,7 @@ fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     // Role styling
     let (role_str, role_style) = match msg.author_role {
         AuthorRole::Human => ("human", Style::default().fg(Color::Cyan)),
+        AuthorRole::Caller => ("caller", Style::default().fg(Color::Cyan)),
         AuthorRole::Assistant => ("assistant", Style::default().fg(Color::Green)),
         AuthorRole::Tool => ("tool", Style::default().fg(Color::Yellow)),
         AuthorRole::Agent => ("agent", Style::default().fg(BADGE_AGENT)),

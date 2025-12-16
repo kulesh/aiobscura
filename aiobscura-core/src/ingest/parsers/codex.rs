@@ -471,13 +471,13 @@ impl AssistantParser for CodexParser {
                                                     (AuthorRole::Assistant, MessageType::Response)
                                                 }
                                                 "user" if is_system_context => {
-                                                    // System/CLI injected context - label as "caller"
-                                                    (AuthorRole::System, MessageType::Context)
+                                                    // System/CLI injected context (environment, instructions)
+                                                    (AuthorRole::Caller, MessageType::Context)
                                                 }
                                                 "user" if !seen_first_user_prompt => {
                                                     // First user prompt is the CLI invocation
                                                     seen_first_user_prompt = true;
-                                                    (AuthorRole::System, MessageType::Prompt)
+                                                    (AuthorRole::Caller, MessageType::Prompt)
                                                 }
                                                 "user" => (AuthorRole::Human, MessageType::Prompt),
                                                 _ => (AuthorRole::System, MessageType::Context),
