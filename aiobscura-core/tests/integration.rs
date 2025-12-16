@@ -6,7 +6,7 @@
 use aiobscura_core::db::Database;
 use aiobscura_core::ingest::parsers::{ClaudeCodeParser, CodexParser};
 use aiobscura_core::ingest::{AssistantParser, ParseContext};
-use aiobscura_core::types::{Assistant, AuthorRole, Checkpoint, MessageType};
+use aiobscura_core::types::{Assistant, AuthorRole, Checkpoint, Message, MessageType};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -755,4 +755,229 @@ fn test_codex_project_creation() {
     // Project path should match cwd from session_meta
     assert_eq!(project.path.to_string_lossy(), "/Users/test/dev/myproject");
     assert_eq!(project.name, Some("myproject".to_string()));
+}
+
+// ============================================
+// Analytics Plugin Framework Tests
+// ============================================
+
+#[test]
+fn test_analytics_plugin_framework() {
+    use aiobscura_core::analytics::{create_default_engine, PluginRunStatus};
+
+    // Create temporary database
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("analytics-test.db");
+    let db = Database::open(&db_path).expect("database should open");
+    db.migrate().expect("migrations should run");
+
+    // Parse a fixture file with tool calls
+    let path = fixture_path("with-tool-calls.jsonl");
+    let parser = ClaudeCodeParser::with_root(fixture_path("").parent().unwrap().to_path_buf());
+    let ctx = parse_context(&path);
+    let result = parser.parse(&ctx).expect("parse should succeed");
+
+    // Store all the necessary data
+    let session_source_path = result
+        .session
+        .as_ref()
+        .map(|s| s.source_file_path.clone())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    let source_file = aiobscura_core::types::SourceFile {
+        path: PathBuf::from(&session_source_path),
+        file_type: aiobscura_core::types::FileType::Jsonl,
+        assistant: aiobscura_core::types::Assistant::ClaudeCode,
+        created_at: chrono::Utc::now(),
+        modified_at: chrono::Utc::now(),
+        size_bytes: std::fs::metadata(&path).unwrap().len(),
+        last_parsed_at: Some(chrono::Utc::now()),
+        checkpoint: result.new_checkpoint.clone(),
+    };
+    db.upsert_source_file(&source_file).unwrap();
+
+    if let Some(ref project) = result.project {
+        db.upsert_project(project).unwrap();
+    }
+
+    if let Some(ref session) = result.session {
+        if let Some(ref model_id) = session.backing_model_id {
+            let backing_model = aiobscura_core::types::BackingModel {
+                id: model_id.clone(),
+                provider: "anthropic".to_string(),
+                model_id: model_id.clone(),
+                display_name: Some(model_id.clone()),
+                first_seen_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            };
+            db.upsert_backing_model(&backing_model).unwrap();
+        }
+    }
+
+    let session = result.session.as_ref().expect("should have session");
+    db.upsert_session(session).unwrap();
+
+    for thread in &result.threads {
+        db.insert_thread(thread).unwrap();
+    }
+
+    if !result.messages.is_empty() {
+        db.insert_messages(&result.messages).unwrap();
+    }
+
+    // Insert synthetic Edit messages for testing the edit_churn plugin
+    // This creates: src/main.rs (3 edits), src/lib.rs (2 edits), Cargo.toml (1 edit) = 6 total
+    let thread_id = result
+        .threads
+        .first()
+        .map(|t| t.id.as_str())
+        .unwrap_or("test-main");
+    let edit_messages = vec![
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            100,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            101,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            102,
+            "src/main.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            103,
+            "src/lib.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            104,
+            "src/lib.rs",
+            &session_source_path,
+        ),
+        make_edit_msg(
+            &session.id,
+            thread_id,
+            105,
+            "Cargo.toml",
+            &session_source_path,
+        ),
+    ];
+    db.insert_messages(&edit_messages).unwrap();
+
+    // Create analytics engine and run plugins
+    let engine = create_default_engine();
+
+    // Verify plugins are registered
+    let plugin_names = engine.plugin_names();
+    assert!(
+        plugin_names.contains(&"core.edit_churn"),
+        "edit_churn plugin should be registered"
+    );
+
+    // Load session and messages from database
+    let stored_session = db.get_session(&session.id).unwrap().unwrap();
+    let stored_messages = db.get_session_messages(&session.id, 10000).unwrap();
+
+    // Run all plugins
+    let results = engine.run_all(&stored_session, &stored_messages, &db);
+    let result = results
+        .iter()
+        .find(|r| r.plugin_name == "core.edit_churn")
+        .unwrap();
+    assert_eq!(result.status, PluginRunStatus::Success);
+    assert!(
+        result.metrics_produced > 0,
+        "Plugin should produce metrics, got {}",
+        result.metrics_produced
+    );
+
+    // Verify metrics stored in database
+    let metrics = db.get_session_plugin_metrics(&session.id).unwrap();
+    assert!(
+        !metrics.is_empty(),
+        "Should have metrics in database for session {}",
+        session.id
+    );
+
+    let edit_count = metrics
+        .iter()
+        .find(|m| m.metric_name == "edit_count")
+        .expect("should have edit_count metric");
+    assert_eq!(edit_count.metric_value.as_i64().unwrap(), 6);
+
+    let unique_files = metrics
+        .iter()
+        .find(|m| m.metric_name == "unique_files")
+        .unwrap();
+    assert_eq!(unique_files.metric_value.as_i64().unwrap(), 3);
+
+    let churn_ratio = metrics
+        .iter()
+        .find(|m| m.metric_name == "churn_ratio")
+        .unwrap();
+    let ratio = churn_ratio.metric_value.as_f64().unwrap();
+    assert!(
+        (ratio - 0.5).abs() < 0.001,
+        "churn_ratio should be ~0.5, got {}",
+        ratio
+    );
+
+    let high_churn = metrics
+        .iter()
+        .find(|m| m.metric_name == "high_churn_files")
+        .unwrap();
+    let high_churn_arr = high_churn.metric_value.as_array().unwrap();
+    assert_eq!(high_churn_arr.len(), 1, "only src/main.rs has 3+ edits");
+    assert_eq!(high_churn_arr[0].as_str().unwrap(), "src/main.rs");
+}
+
+/// Helper to create an Edit tool message
+fn make_edit_msg(
+    session_id: &str,
+    thread_id: &str,
+    seq: i32,
+    file_path: &str,
+    source_file_path: &str,
+) -> Message {
+    Message {
+        id: seq as i64,
+        session_id: session_id.to_string(),
+        thread_id: thread_id.to_string(),
+        seq,
+        ts: chrono::Utc::now(),
+        author_role: AuthorRole::Tool,
+        author_name: Some("Edit".to_string()),
+        message_type: MessageType::ToolCall,
+        content: None,
+        content_type: None,
+        tool_name: Some("Edit".to_string()),
+        tool_input: Some(serde_json::json!({
+            "file_path": file_path,
+            "old_string": "foo",
+            "new_string": "bar"
+        })),
+        tool_result: None,
+        tokens_in: None,
+        tokens_out: None,
+        duration_ms: None,
+        source_file_path: source_file_path.to_string(),
+        source_offset: 0,
+        source_line: None,
+        raw_data: serde_json::json!({}),
+        metadata: serde_json::json!({}),
+    }
 }

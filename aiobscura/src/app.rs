@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, WrappedConfig, WrappedPeriod,
-    WrappedStats,
+    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, SessionAnalytics, ThreadAnalytics,
+    WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{
@@ -26,6 +26,16 @@ pub enum ProjectSubTab {
     Threads,
     Plans,
     Files,
+}
+
+/// Analytics panel view mode (session-level or thread-level).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum AnalyticsViewMode {
+    /// Show session-level analytics (aggregated across all threads)
+    #[default]
+    Session,
+    /// Show thread-level analytics (for the current thread only)
+    Thread,
 }
 
 /// Current view mode
@@ -120,6 +130,18 @@ pub struct App {
     pub plan_scroll_offset: usize,
     /// Metadata for current thread (detail view)
     pub thread_metadata: Option<ThreadMetadata>,
+    /// Analytics for current session (detail view)
+    pub session_analytics: Option<SessionAnalytics>,
+    /// Error message if session analytics computation failed
+    pub session_analytics_error: Option<String>,
+    /// Analytics for current thread (detail view)
+    pub thread_analytics: Option<ThreadAnalytics>,
+    /// Error message if thread analytics computation failed
+    pub thread_analytics_error: Option<String>,
+    /// Current analytics view mode (session vs thread)
+    pub analytics_view_mode: AnalyticsViewMode,
+    /// Scroll offset for analytics panel (for scrolling long content)
+    pub analytics_scroll_offset: usize,
     /// Wrapped stats for the wrapped view
     pub wrapped_stats: Option<WrappedStats>,
     /// Current wrapped period
@@ -200,6 +222,12 @@ impl App {
             selected_plan: None,
             plan_scroll_offset: 0,
             thread_metadata: None,
+            session_analytics: None,
+            session_analytics_error: None,
+            thread_analytics: None,
+            thread_analytics_error: None,
+            analytics_view_mode: AnalyticsViewMode::default(),
+            analytics_scroll_offset: 0,
             wrapped_stats: None,
             wrapped_period: WrappedPeriod::current_year(),
             wrapped_card_index: 0,
@@ -541,6 +569,9 @@ impl App {
             KeyCode::Char('p') => {
                 self.open_plan_list(true);
             }
+            KeyCode::Char('a') => {
+                self.toggle_analytics_view();
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.scroll_down();
             }
@@ -578,6 +609,14 @@ impl App {
 
                     // Load metadata for the header
                     self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
+
+                    // Load/compute analytics (both session and thread)
+                    self.load_session_analytics(&session_id);
+                    self.load_thread_analytics(&thread_id);
+
+                    // Reset analytics view mode to session (default)
+                    self.analytics_view_mode = AnalyticsViewMode::Session;
+                    self.analytics_scroll_offset = 0;
 
                     self.view_mode = ViewMode::Detail {
                         thread_id,
@@ -655,6 +694,51 @@ impl App {
         })
     }
 
+    /// Load or compute session analytics for the detail view.
+    fn load_session_analytics(&mut self, session_id: &str) {
+        use aiobscura_core::analytics::create_default_engine;
+
+        let engine = create_default_engine();
+        match engine.ensure_session_analytics(session_id, &self.db) {
+            Ok(analytics) => {
+                self.session_analytics = Some(analytics);
+                self.session_analytics_error = None;
+            }
+            Err(e) => {
+                self.session_analytics = None;
+                self.session_analytics_error = Some(e.to_string());
+                tracing::warn!(session_id, error = %e, "Failed to compute session analytics");
+            }
+        }
+    }
+
+    /// Load or compute thread analytics for the detail view.
+    fn load_thread_analytics(&mut self, thread_id: &str) {
+        use aiobscura_core::analytics::create_default_engine;
+
+        let engine = create_default_engine();
+        match engine.ensure_thread_analytics(thread_id, &self.db) {
+            Ok(analytics) => {
+                self.thread_analytics = Some(analytics);
+                self.thread_analytics_error = None;
+            }
+            Err(e) => {
+                self.thread_analytics = None;
+                self.thread_analytics_error = Some(e.to_string());
+                tracing::warn!(thread_id, error = %e, "Failed to compute thread analytics");
+            }
+        }
+    }
+
+    /// Toggle between session and thread analytics view.
+    fn toggle_analytics_view(&mut self) {
+        self.analytics_view_mode = match self.analytics_view_mode {
+            AnalyticsViewMode::Session => AnalyticsViewMode::Thread,
+            AnalyticsViewMode::Thread => AnalyticsViewMode::Session,
+        };
+        self.analytics_scroll_offset = 0; // Reset scroll when switching
+    }
+
     /// Close detail view and return to list.
     fn close_detail_view(&mut self) {
         // Check if we should return to a project sub-tab
@@ -670,6 +754,12 @@ impl App {
         self.messages.clear();
         self.scroll_offset = 0;
         self.thread_metadata = None;
+        self.session_analytics = None;
+        self.session_analytics_error = None;
+        self.thread_analytics = None;
+        self.thread_analytics_error = None;
+        self.analytics_view_mode = AnalyticsViewMode::Session;
+        self.analytics_scroll_offset = 0;
     }
 
     /// Scroll down in detail view.
@@ -1954,6 +2044,14 @@ impl App {
                                 self.scroll_offset = 0;
                                 self.thread_metadata =
                                     self.load_thread_metadata(&thread_id, &session_id);
+                                // Load/compute analytics (both session and thread)
+                                self.load_session_analytics(&session_id);
+                                self.load_thread_analytics(&thread_id);
+
+                                // Reset analytics view mode to session (default)
+                                self.analytics_view_mode = AnalyticsViewMode::Session;
+                                self.analytics_scroll_offset = 0;
+
                                 self.view_mode = ViewMode::Detail {
                                     thread_id,
                                     thread_name,

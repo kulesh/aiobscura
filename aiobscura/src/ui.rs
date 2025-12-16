@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ProjectSubTab, ViewMode};
+use crate::app::{AnalyticsViewMode, App, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -114,10 +114,11 @@ fn render_list_view(frame: &mut Frame, app: &mut App) {
 fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
     let area = frame.area();
 
-    // Layout: header, metadata, messages, footer
+    // Layout: header, metadata, analytics, messages, footer
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
         Constraint::Length(5), // Metadata summary (4 rows + border)
+        Constraint::Length(6), // Analytics panel (4 lines + 2 border)
         Constraint::Min(5),    // Messages
         Constraint::Length(1), // Footer
     ])
@@ -125,8 +126,9 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
 
     render_header(frame, &format!("Thread: {}", thread_name), chunks[0]);
     render_thread_metadata(frame, app, chunks[1]);
-    render_messages(frame, app, chunks[2]);
-    render_detail_footer(frame, app, chunks[3]);
+    render_analytics_panel(frame, app, chunks[2]);
+    render_messages(frame, app, chunks[3]);
+    render_detail_footer(frame, app, chunks[4]);
 }
 
 /// Render the header with title.
@@ -295,6 +297,308 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
             .title_style(Style::default().fg(BORDER_INFO).bold()),
     );
     frame.render_widget(paragraph, area);
+}
+
+/// Render the analytics panel with session/thread toggle.
+fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
+    // Determine which analytics to show based on view mode
+    let (is_thread_mode, error, analytics_available) = match app.analytics_view_mode {
+        AnalyticsViewMode::Session => (
+            false,
+            app.session_analytics_error.as_ref(),
+            app.session_analytics.is_some(),
+        ),
+        AnalyticsViewMode::Thread => (
+            true,
+            app.thread_analytics_error.as_ref(),
+            app.thread_analytics.is_some(),
+        ),
+    };
+
+    // Build the title with toggle hint
+    let toggle_hint = if is_thread_mode {
+        "[a: Session]"
+    } else {
+        "[a: Thread]"
+    };
+    let title_text = if is_thread_mode {
+        " Analytics (Thread) "
+    } else {
+        " Analytics (Session) "
+    };
+
+    // Check for error state
+    if let Some(error) = error {
+        let error_line = Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::styled(
+                truncate_string(error, 60),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(error_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red))
+                .title(title_text)
+                .title_style(Style::default().fg(Color::Red))
+                .title_bottom(Line::from(toggle_hint).right_aligned()),
+        );
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // Check if we have analytics
+    if !analytics_available {
+        let placeholder = Paragraph::new("No analytics computed")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_INFO))
+                    .title(title_text)
+                    .title_style(Style::default().fg(BORDER_INFO))
+                    .title_bottom(Line::from(toggle_hint).right_aligned()),
+            );
+        frame.render_widget(placeholder, area);
+        return;
+    }
+
+    // Build the analytics lines based on mode
+    let lines = if is_thread_mode {
+        build_thread_analytics_lines(app)
+    } else {
+        build_session_analytics_lines(app)
+    };
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(title_text)
+            .title_style(Style::default().fg(BORDER_INFO).bold())
+            .title_bottom(Line::from(toggle_hint).right_aligned()),
+    );
+    frame.render_widget(paragraph, area);
+}
+
+/// Build lines for session analytics display.
+fn build_session_analytics_lines(app: &App) -> Vec<Line<'static>> {
+    let analytics = match &app.session_analytics {
+        Some(a) => a,
+        None => return vec![Line::from("No data")],
+    };
+
+    let mut lines = Vec::new();
+
+    // Line 1: Edits, files, churn
+    let mut line1_spans: Vec<Span> = Vec::new();
+    line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}", analytics.edit_count),
+        Style::default().fg(Color::White),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" ({} files)", analytics.unique_files),
+        Style::default().fg(Color::DarkGray),
+    ));
+    line1_spans.push(Span::raw("  "));
+
+    let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
+    let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
+    line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}%", churn_pct),
+        Style::default().fg(churn_color),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" [{}]", churn_label),
+        Style::default()
+            .fg(churn_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(line1_spans));
+
+    // Line 2: Hot files
+    let mut line2_spans: Vec<Span> = Vec::new();
+    if !analytics.high_churn_files.is_empty() {
+        line2_spans.push(Span::styled(
+            "Hot files: ",
+            Style::default().fg(LABEL_COLOR),
+        ));
+        let max_files = 4;
+        let files_to_show: Vec<&str> = analytics
+            .high_churn_files
+            .iter()
+            .take(max_files)
+            .map(|p| extract_basename(p))
+            .collect();
+        line2_spans.push(Span::styled(
+            files_to_show.join(", "),
+            Style::default().fg(Color::Yellow),
+        ));
+        let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
+        if remaining > 0 {
+            line2_spans.push(Span::styled(
+                format!(" +{}", remaining),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    } else {
+        line2_spans.push(Span::styled(
+            "No hot files detected",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::from(line2_spans));
+
+    // Line 3: Placeholder for future metrics (e.g., lines changed, first-try rate)
+    let line3_spans = vec![Span::styled(
+        "Press 'a' to view thread-level analytics",
+        Style::default().fg(Color::DarkGray).italic(),
+    )];
+    lines.push(Line::from(line3_spans));
+
+    lines
+}
+
+/// Build lines for thread analytics display.
+fn build_thread_analytics_lines(app: &App) -> Vec<Line<'static>> {
+    let analytics = match &app.thread_analytics {
+        Some(a) => a,
+        None => return vec![Line::from("No data")],
+    };
+
+    let mut lines = Vec::new();
+
+    // Line 1: Edits, files, churn
+    let mut line1_spans: Vec<Span> = Vec::new();
+    line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}", analytics.edit_count),
+        Style::default().fg(Color::White),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" ({} files)", analytics.unique_files),
+        Style::default().fg(Color::DarkGray),
+    ));
+    line1_spans.push(Span::raw("  "));
+
+    let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
+    let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
+    line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+    line1_spans.push(Span::styled(
+        format!("{}%", churn_pct),
+        Style::default().fg(churn_color),
+    ));
+    line1_spans.push(Span::styled(
+        format!(" [{}]", churn_label),
+        Style::default()
+            .fg(churn_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(line1_spans));
+
+    // Line 2: Lines changed and first-try rate
+    let mut line2_spans: Vec<Span> = Vec::new();
+    line2_spans.push(Span::styled("Lines: ", Style::default().fg(LABEL_COLOR)));
+    line2_spans.push(Span::styled(
+        format!("{}", analytics.lines_changed),
+        Style::default().fg(Color::White),
+    ));
+    line2_spans.push(Span::raw("  "));
+    line2_spans.push(Span::styled(
+        "First-try: ",
+        Style::default().fg(LABEL_COLOR),
+    ));
+    let first_try_pct = (analytics.first_try_rate * 100.0).round() as i64;
+    let first_try_color = if first_try_pct >= 70 {
+        Color::Green
+    } else if first_try_pct >= 40 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    line2_spans.push(Span::styled(
+        format!("{}%", first_try_pct),
+        Style::default().fg(first_try_color),
+    ));
+    if analytics.burst_edit_count > 0 {
+        line2_spans.push(Span::raw("  "));
+        line2_spans.push(Span::styled("Bursts: ", Style::default().fg(LABEL_COLOR)));
+        line2_spans.push(Span::styled(
+            format!("{}", analytics.burst_edit_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines.push(Line::from(line2_spans));
+
+    // Line 3: Hot files for this thread
+    let mut line3_spans: Vec<Span> = Vec::new();
+    if !analytics.high_churn_files.is_empty() {
+        line3_spans.push(Span::styled("Hot: ", Style::default().fg(LABEL_COLOR)));
+        let max_files = 5;
+        let files_to_show: Vec<&str> = analytics
+            .high_churn_files
+            .iter()
+            .take(max_files)
+            .map(|p| extract_basename(p))
+            .collect();
+        line3_spans.push(Span::styled(
+            files_to_show.join(", "),
+            Style::default().fg(Color::Yellow),
+        ));
+        let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
+        if remaining > 0 {
+            line3_spans.push(Span::styled(
+                format!(" +{}", remaining),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    } else {
+        line3_spans.push(Span::styled(
+            "No hot files in this thread",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::from(line3_spans));
+
+    lines
+}
+
+/// Get color and label for churn ratio.
+fn churn_level(ratio: f64) -> (Color, &'static str) {
+    if ratio <= 0.3 {
+        (Color::Green, "LOW")
+    } else if ratio <= 0.6 {
+        (Color::Yellow, "MOD")
+    } else {
+        (Color::Red, "HIGH")
+    }
+}
+
+/// Extract the basename from a file path.
+fn extract_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Truncate a string to max length with ellipsis.
+/// Handles multi-byte UTF-8 characters safely.
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        // Find a valid char boundary at or before max_len - 3 (for "...")
+        let target = max_len.saturating_sub(3);
+        let mut end = target;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
 }
 
 /// Format a path for display (replace $HOME with ~, truncate if needed).
@@ -2421,9 +2725,13 @@ fn render_project_tools_files(
         let filled = (((*count as f64 / max_file_count as f64) * bar_width as f64) as usize).max(1);
         let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
 
-        // Truncate basename if needed
+        // Truncate basename if needed (handle UTF-8 safely)
         let name_display = if basename.len() > 20 {
-            format!("{}...", &basename[..17])
+            let mut end = 17;
+            while !basename.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}...", &basename[..end])
         } else {
             basename.to_string()
         };
@@ -2989,12 +3297,16 @@ fn format_active_session_line(session: &ActiveSession, is_child: bool) -> Line<'
         ThreadType::Main => format!("{} (main)", session.project_name),
         ThreadType::Agent | ThreadType::Background => {
             // Show truncated thread_id for agents/background threads
-            let short_id = if session.thread_id.len() > 12 {
-                format!("{}...", &session.thread_id[..12])
+            if session.thread_id.len() > 12 {
+                // Find valid char boundary (defensive, IDs should be ASCII)
+                let mut end = 12;
+                while !session.thread_id.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
+                format!("{}...", &session.thread_id[..end])
             } else {
                 session.thread_id.clone()
-            };
-            short_id
+            }
         }
     };
 
@@ -3152,14 +3464,19 @@ fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     ])
 }
 
-/// Truncate a string to a maximum length, adding "..." if truncated.
+/// Truncate a string to a maximum length.
+/// Handles multi-byte UTF-8 characters safely.
+/// Note: Does not add "..." - caller should handle that if needed.
 fn truncate_str(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
-    } else if max_len > 3 {
-        &s[..max_len - 3]
     } else {
-        &s[..max_len]
+        // Find a valid char boundary at or before max_len
+        let mut end = max_len;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        &s[..end]
     }
 }
 

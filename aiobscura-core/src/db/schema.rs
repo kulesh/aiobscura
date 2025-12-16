@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// SQL migrations, indexed by version number
 const MIGRATIONS: &[&str] = &[
@@ -426,6 +426,16 @@ const MIGRATIONS: &[&str] = &[
     );
 
     CREATE INDEX IF NOT EXISTS idx_plan_versions_slug ON plan_versions(plan_slug);
+    "#,
+    // Version 5: Add metric_version column to plugin_metrics for schema versioning
+    r#"
+    -- Add metric_version column to track metric schema changes
+    -- Allows selective recomputation when plugin output format changes
+    ALTER TABLE plugin_metrics ADD COLUMN metric_version INTEGER NOT NULL DEFAULT 1;
+
+    -- Add index for efficient queries by plugin and entity
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_plugin ON plugin_metrics(plugin_name);
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_entity ON plugin_metrics(entity_type, entity_id);
     "#,
 ];
 
