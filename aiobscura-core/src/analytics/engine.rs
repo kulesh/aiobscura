@@ -420,6 +420,62 @@ impl AnalyticsEngine {
             .collect()
     }
 
+    /// Ensure session analytics are computed and up-to-date.
+    ///
+    /// This method:
+    /// 1. Checks if analytics exist for the session
+    /// 2. Checks if they're still fresh (computed after last message)
+    /// 3. Recomputes if stale or missing
+    /// 4. Returns the analytics
+    ///
+    /// Used by the TUI to show analytics inline with minimal latency.
+    pub fn ensure_session_analytics(
+        &self,
+        session_id: &str,
+        db: &Database,
+    ) -> Result<crate::analytics::SessionAnalytics> {
+        // Check if we have existing analytics
+        if let Some(existing) = db.get_session_analytics(session_id)? {
+            // Check freshness: is computed_at >= last message timestamp?
+            if let Some(last_msg_ts) = db.get_session_last_message_ts(session_id)? {
+                if existing.computed_at >= last_msg_ts {
+                    // Analytics are fresh, return cached
+                    tracing::debug!(
+                        session_id,
+                        computed_at = %existing.computed_at,
+                        "Using cached session analytics"
+                    );
+                    return Ok(existing);
+                }
+                tracing::debug!(
+                    session_id,
+                    computed_at = %existing.computed_at,
+                    last_msg_ts = %last_msg_ts,
+                    "Session analytics are stale, recomputing"
+                );
+            } else {
+                // No messages in session, return existing analytics
+                return Ok(existing);
+            }
+        }
+
+        // Need to compute analytics
+        tracing::info!(session_id, "Computing session analytics");
+
+        let session = db
+            .get_session(session_id)?
+            .ok_or_else(|| Error::Config(format!("Session not found: {}", session_id)))?;
+
+        let messages = db.get_session_messages(session_id, 100_000)?;
+
+        // Run the edit_churn plugin
+        self.run_plugin("core.edit_churn", &session, &messages, db)?;
+
+        // Fetch the newly computed analytics
+        db.get_session_analytics(session_id)?
+            .ok_or_else(|| Error::Config("Failed to compute session analytics".to_string()))
+    }
+
     /// Run all registered plugins on all sessions in the database.
     ///
     /// This is useful for batch processing. Returns the total number of

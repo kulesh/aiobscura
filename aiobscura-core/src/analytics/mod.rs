@@ -31,6 +31,29 @@ pub use engine::{
 };
 pub use plugins::create_default_engine;
 
+// Session analytics struct
+use chrono::{DateTime, Utc};
+
+/// Pre-computed analytics for a session.
+///
+/// Contains metrics from the `core.edit_churn` plugin that track
+/// file modification patterns during a session.
+#[derive(Debug, Clone)]
+pub struct SessionAnalytics {
+    /// Total number of Edit/Write tool calls
+    pub edit_count: i64,
+    /// Number of unique files modified
+    pub unique_files: i64,
+    /// Churn ratio: (edits - unique_files) / edits
+    /// 0.0 = no churn (each file edited once)
+    /// Higher values indicate more re-editing of same files
+    pub churn_ratio: f64,
+    /// Files edited 3+ times, sorted by edit count descending
+    pub high_churn_files: Vec<String>,
+    /// When these metrics were computed
+    pub computed_at: DateTime<Utc>,
+}
+
 // Existing exports
 pub use dashboard::DashboardStats;
 pub use personality::Personality;

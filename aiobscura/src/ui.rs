@@ -114,10 +114,11 @@ fn render_list_view(frame: &mut Frame, app: &mut App) {
 fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
     let area = frame.area();
 
-    // Layout: header, metadata, messages, footer
+    // Layout: header, metadata, analytics, messages, footer
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
         Constraint::Length(5), // Metadata summary (4 rows + border)
+        Constraint::Length(3), // Analytics (1 row + border)
         Constraint::Min(5),    // Messages
         Constraint::Length(1), // Footer
     ])
@@ -125,8 +126,9 @@ fn render_detail_view(frame: &mut Frame, app: &mut App, thread_name: String) {
 
     render_header(frame, &format!("Thread: {}", thread_name), chunks[0]);
     render_thread_metadata(frame, app, chunks[1]);
-    render_messages(frame, app, chunks[2]);
-    render_detail_footer(frame, app, chunks[3]);
+    render_session_analytics(frame, app, chunks[2]);
+    render_messages(frame, app, chunks[3]);
+    render_detail_footer(frame, app, chunks[4]);
 }
 
 /// Render the header with title.
@@ -295,6 +297,141 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
             .title_style(Style::default().fg(BORDER_INFO).bold()),
     );
     frame.render_widget(paragraph, area);
+}
+
+/// Render the session analytics summary section.
+fn render_session_analytics(frame: &mut Frame, app: &App, area: Rect) {
+    // Check for error state
+    if let Some(ref error) = app.session_analytics_error {
+        let error_line = Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::styled(
+                truncate_string(error, 60),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(error_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" Analytics ")
+                .title_style(Style::default().fg(Color::Red)),
+        );
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // Check if we have analytics
+    let analytics = match &app.session_analytics {
+        Some(a) => a,
+        None => {
+            // No analytics yet - could be loading or no data
+            let placeholder = Paragraph::new("No analytics computed")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(BORDER_INFO))
+                        .title(" Analytics ")
+                        .title_style(Style::default().fg(BORDER_INFO)),
+                );
+            frame.render_widget(placeholder, area);
+            return;
+        }
+    };
+
+    // Build the analytics line
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Edits: N (M files)
+    spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+    spans.push(Span::styled(
+        format!("{}", analytics.edit_count),
+        Style::default().fg(Color::White),
+    ));
+    spans.push(Span::styled(
+        format!(" ({} files)", analytics.unique_files),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    spans.push(Span::raw("  "));
+
+    // Churn: XX% [LEVEL]
+    let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
+    let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
+    spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+    spans.push(Span::styled(
+        format!("{}%", churn_pct),
+        Style::default().fg(churn_color),
+    ));
+    spans.push(Span::styled(
+        format!(" [{}]", churn_label),
+        Style::default().fg(churn_color).add_modifier(Modifier::BOLD),
+    ));
+
+    // Hot files: file1, file2, +N
+    if !analytics.high_churn_files.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("Hot: ", Style::default().fg(LABEL_COLOR)));
+
+        let max_files = 3;
+        let files_to_show: Vec<&str> = analytics
+            .high_churn_files
+            .iter()
+            .take(max_files)
+            .map(|p| extract_basename(p))
+            .collect();
+
+        spans.push(Span::styled(
+            files_to_show.join(", "),
+            Style::default().fg(Color::Yellow),
+        ));
+
+        let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
+        if remaining > 0 {
+            spans.push(Span::styled(
+                format!(" +{}", remaining),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_INFO))
+            .title(" Analytics ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
+    );
+    frame.render_widget(paragraph, area);
+}
+
+/// Get color and label for churn ratio.
+fn churn_level(ratio: f64) -> (Color, &'static str) {
+    if ratio <= 0.3 {
+        (Color::Green, "LOW")
+    } else if ratio <= 0.6 {
+        (Color::Yellow, "MOD")
+    } else {
+        (Color::Red, "HIGH")
+    }
+}
+
+/// Extract the basename from a file path.
+fn extract_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Truncate a string to max length with ellipsis.
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
 }
 
 /// Format a path for display (replace $HOME with ~, truncate if needed).

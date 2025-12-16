@@ -120,6 +120,10 @@ pub struct App {
     pub plan_scroll_offset: usize,
     /// Metadata for current thread (detail view)
     pub thread_metadata: Option<ThreadMetadata>,
+    /// Analytics for current session (detail view)
+    pub session_analytics: Option<aiobscura_core::analytics::SessionAnalytics>,
+    /// Error message if analytics computation failed
+    pub session_analytics_error: Option<String>,
     /// Wrapped stats for the wrapped view
     pub wrapped_stats: Option<WrappedStats>,
     /// Current wrapped period
@@ -200,6 +204,8 @@ impl App {
             selected_plan: None,
             plan_scroll_offset: 0,
             thread_metadata: None,
+            session_analytics: None,
+            session_analytics_error: None,
             wrapped_stats: None,
             wrapped_period: WrappedPeriod::current_year(),
             wrapped_card_index: 0,
@@ -579,6 +585,9 @@ impl App {
                     // Load metadata for the header
                     self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
 
+                    // Load/compute session analytics
+                    self.load_session_analytics(&session_id);
+
                     self.view_mode = ViewMode::Detail {
                         thread_id,
                         thread_name,
@@ -655,6 +664,24 @@ impl App {
         })
     }
 
+    /// Load or compute session analytics for the detail view.
+    fn load_session_analytics(&mut self, session_id: &str) {
+        use aiobscura_core::analytics::create_default_engine;
+
+        let engine = create_default_engine();
+        match engine.ensure_session_analytics(session_id, &self.db) {
+            Ok(analytics) => {
+                self.session_analytics = Some(analytics);
+                self.session_analytics_error = None;
+            }
+            Err(e) => {
+                self.session_analytics = None;
+                self.session_analytics_error = Some(e.to_string());
+                tracing::warn!(session_id, error = %e, "Failed to compute session analytics");
+            }
+        }
+    }
+
     /// Close detail view and return to list.
     fn close_detail_view(&mut self) {
         // Check if we should return to a project sub-tab
@@ -670,6 +697,8 @@ impl App {
         self.messages.clear();
         self.scroll_offset = 0;
         self.thread_metadata = None;
+        self.session_analytics = None;
+        self.session_analytics_error = None;
     }
 
     /// Scroll down in detail view.
@@ -1954,6 +1983,8 @@ impl App {
                                 self.scroll_offset = 0;
                                 self.thread_metadata =
                                     self.load_thread_metadata(&thread_id, &session_id);
+                                // Load/compute session analytics
+                                self.load_session_analytics(&session_id);
                                 self.view_mode = ViewMode::Detail {
                                     thread_id,
                                     thread_name,

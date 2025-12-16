@@ -779,6 +779,89 @@ impl Database {
         }))
     }
 
+    /// Get the latest message timestamp for a specific session.
+    /// Used for analytics freshness checking.
+    pub fn get_session_last_message_ts(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT MAX(ts) FROM messages WHERE session_id = ?",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::from)?
+            .flatten();
+
+        Ok(result.and_then(|ts_str| {
+            DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }))
+    }
+
+    /// Get pre-computed session analytics from plugin_metrics table.
+    /// Returns None if no analytics have been computed for this session.
+    pub fn get_session_analytics(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::analytics::SessionAnalytics>> {
+        let metrics = self.get_session_plugin_metrics(session_id)?;
+
+        // Filter to edit_churn plugin metrics
+        let edit_churn_metrics: Vec<_> = metrics
+            .iter()
+            .filter(|m| m.plugin_name == "core.edit_churn")
+            .collect();
+
+        if edit_churn_metrics.is_empty() {
+            return Ok(None);
+        }
+
+        // Extract each metric value
+        let mut edit_count: i64 = 0;
+        let mut unique_files: i64 = 0;
+        let mut churn_ratio: f64 = 0.0;
+        let mut high_churn_files: Vec<String> = Vec::new();
+        let mut computed_at = chrono::Utc::now();
+
+        for metric in &edit_churn_metrics {
+            match metric.metric_name.as_str() {
+                "edit_count" => {
+                    edit_count = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "unique_files" => {
+                    unique_files = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "churn_ratio" => {
+                    churn_ratio = metric.metric_value.as_f64().unwrap_or(0.0);
+                }
+                "high_churn_files" => {
+                    if let Some(arr) = metric.metric_value.as_array() {
+                        high_churn_files = arr
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+            // Use the computed_at from any metric (they should all be the same)
+            computed_at = metric.computed_at;
+        }
+
+        Ok(Some(crate::analytics::SessionAnalytics {
+            edit_count,
+            unique_files,
+            churn_ratio,
+            high_churn_files,
+            computed_at,
+        }))
+    }
+
     fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         let author_role_str: String = row.get("author_role")?;
         let message_type_str: String = row.get("message_type")?;
