@@ -270,6 +270,13 @@ impl AssistantParser for CodexParser {
         let mut last_timestamp: Option<DateTime<Utc>> = None;
         let mut last_token_usage: Option<TokenUsage> = None;
 
+        // Track if we've seen the first user prompt (the CLI invocation).
+        // The first user message that isn't system-injected context is the
+        // CLI-provided prompt, which should be labeled as "caller" not "human".
+        // On incremental parse (start_offset > 0), we've already processed the
+        // initial prompt, so any new user messages are follow-up human input.
+        let mut seen_first_user_prompt = start_offset > 0;
+
         // Track call_id -> message seq for tool result linking
         let mut call_id_to_seq: HashMap<String, i32> = HashMap::new();
 
@@ -457,6 +464,8 @@ impl AssistantParser for CodexParser {
                                                 role == "user" && is_system_injected_context(&text);
 
                                             // Determine author role and message type based on role and content
+                                            // The first non-system user message is the CLI invocation (caller),
+                                            // subsequent user messages are actual human input.
                                             let (author_role, message_type) = match role {
                                                 "assistant" => {
                                                     (AuthorRole::Assistant, MessageType::Response)
@@ -464,6 +473,11 @@ impl AssistantParser for CodexParser {
                                                 "user" if is_system_context => {
                                                     // System/CLI injected context - label as "caller"
                                                     (AuthorRole::System, MessageType::Context)
+                                                }
+                                                "user" if !seen_first_user_prompt => {
+                                                    // First user prompt is the CLI invocation
+                                                    seen_first_user_prompt = true;
+                                                    (AuthorRole::System, MessageType::Prompt)
                                                 }
                                                 "user" => (AuthorRole::Human, MessageType::Prompt),
                                                 _ => (AuthorRole::System, MessageType::Context),
