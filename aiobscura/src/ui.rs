@@ -2565,9 +2565,13 @@ fn render_project_tools_files(
         let filled = (((*count as f64 / max_file_count as f64) * bar_width as f64) as usize).max(1);
         let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
 
-        // Truncate basename if needed
+        // Truncate basename if needed (handle UTF-8 safely)
         let name_display = if basename.len() > 20 {
-            format!("{}...", &basename[..17])
+            let mut end = 17;
+            while !basename.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}...", &basename[..end])
         } else {
             basename.to_string()
         };
@@ -3133,12 +3137,16 @@ fn format_active_session_line(session: &ActiveSession, is_child: bool) -> Line<'
         ThreadType::Main => format!("{} (main)", session.project_name),
         ThreadType::Agent | ThreadType::Background => {
             // Show truncated thread_id for agents/background threads
-            let short_id = if session.thread_id.len() > 12 {
-                format!("{}...", &session.thread_id[..12])
+            if session.thread_id.len() > 12 {
+                // Find valid char boundary (defensive, IDs should be ASCII)
+                let mut end = 12;
+                while !session.thread_id.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
+                format!("{}...", &session.thread_id[..end])
             } else {
                 session.thread_id.clone()
-            };
-            short_id
+            }
         }
     };
 

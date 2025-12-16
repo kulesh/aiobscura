@@ -283,7 +283,11 @@ fn plan_to_output(plan: &Plan) -> PlanOutput {
         .metadata
         .get("content_hash")
         .and_then(|v| v.as_str())
-        .map(|s| s[..16].to_string()); // First 16 chars of hash
+        .map(|s| {
+            // Take first 16 chars of hash (safely)
+            let end = 16.min(s.len());
+            s[..end].to_string()
+        });
 
     PlanOutput {
         slug: plan.id.clone(),
