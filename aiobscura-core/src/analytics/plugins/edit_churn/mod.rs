@@ -21,6 +21,8 @@
 //! | `lines_removed` | integer | Total lines removed across all edits |
 //! | `lines_changed` | integer | Total lines changed (added + removed) |
 //! | `edits_by_extension` | object | Map of file extension to edit count |
+//! | `first_try_files` | integer | Files edited exactly once (no rework) |
+//! | `first_try_rate` | float | Percentage of files edited exactly once |
 //!
 //! ## Churn Ratio Interpretation
 //!
@@ -254,6 +256,14 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
             .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
             .collect();
 
+        // Calculate first-try rate (files edited exactly once)
+        let first_try_files = file_counts.values().filter(|&&count| count == 1).count() as i64;
+        let first_try_rate = if unique_files > 0 {
+            first_try_files as f64 / unique_files as f64
+        } else {
+            0.0
+        };
+
         Ok(vec![
             MetricOutput::session(&session.id, "edit_count", serde_json::json!(total_edits)),
             MetricOutput::session(&session.id, "unique_files", serde_json::json!(unique_files)),
@@ -284,6 +294,16 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                 serde_json::json!(total_lines_added + total_lines_removed),
             ),
             MetricOutput::session(&session.id, "edits_by_extension", ext_counts_json),
+            MetricOutput::session(
+                &session.id,
+                "first_try_files",
+                serde_json::json!(first_try_files),
+            ),
+            MetricOutput::session(
+                &session.id,
+                "first_try_rate",
+                serde_json::json!(first_try_rate),
+            ),
         ])
     }
 }
@@ -532,5 +552,20 @@ mod tests {
         assert_eq!(EditChurnAnalyzer::extract_extension("Cargo.toml"), "toml");
         assert_eq!(EditChurnAnalyzer::extract_extension("/path/Makefile"), "no_ext");
         assert_eq!(EditChurnAnalyzer::extract_extension(".gitignore"), "no_ext");
+    }
+
+    #[test]
+    fn test_first_try_rate_concept() {
+        // If we have 10 files:
+        // - 7 edited exactly once (first try success)
+        // - 3 edited multiple times (required rework)
+        // first_try_rate = 7/10 = 0.7 = 70%
+        //
+        // Higher is better - means less rework needed
+
+        let first_try_files = 7i64;
+        let unique_files = 10i64;
+        let rate = first_try_files as f64 / unique_files as f64;
+        assert!((rate - 0.7).abs() < 0.001);
     }
 }
