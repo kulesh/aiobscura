@@ -28,16 +28,6 @@ pub enum ProjectSubTab {
     Files,
 }
 
-/// Analytics panel view mode (session-level or thread-level).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub enum AnalyticsViewMode {
-    /// Show session-level analytics (aggregated across all threads)
-    #[default]
-    Session,
-    /// Show thread-level analytics (for the current thread only)
-    Thread,
-}
-
 /// Current view mode
 #[derive(Debug, Clone, Default)]
 pub enum ViewMode {
@@ -144,10 +134,7 @@ pub struct App {
     pub thread_analytics: Option<ThreadAnalytics>,
     /// Error message if thread analytics computation failed
     pub thread_analytics_error: Option<String>,
-    /// Current analytics view mode (session vs thread)
-    pub analytics_view_mode: AnalyticsViewMode,
-    /// Scroll offset for analytics panel (for scrolling long content)
-    pub analytics_scroll_offset: usize,
+
     /// Wrapped stats for the wrapped view
     pub wrapped_stats: Option<WrappedStats>,
     /// Current wrapped period
@@ -240,8 +227,7 @@ impl App {
             session_analytics_error: None,
             thread_analytics: None,
             thread_analytics_error: None,
-            analytics_view_mode: AnalyticsViewMode::default(),
-            analytics_scroll_offset: 0,
+
             wrapped_stats: None,
             wrapped_period: WrappedPeriod::current_year(),
             wrapped_card_index: 0,
@@ -588,9 +574,6 @@ impl App {
             KeyCode::Char('p') => {
                 self.open_plan_list(true);
             }
-            KeyCode::Char('a') => {
-                self.toggle_analytics_view();
-            }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.scroll_down();
             }
@@ -632,10 +615,6 @@ impl App {
                     // Load/compute analytics (both session and thread)
                     self.load_session_analytics(&session_id);
                     self.load_thread_analytics(&thread_id);
-
-                    // Reset analytics view mode to session (default)
-                    self.analytics_view_mode = AnalyticsViewMode::Session;
-                    self.analytics_scroll_offset = 0;
 
                     self.view_mode = ViewMode::Detail {
                         thread_id,
@@ -749,15 +728,6 @@ impl App {
         }
     }
 
-    /// Toggle between session and thread analytics view.
-    fn toggle_analytics_view(&mut self) {
-        self.analytics_view_mode = match self.analytics_view_mode {
-            AnalyticsViewMode::Session => AnalyticsViewMode::Thread,
-            AnalyticsViewMode::Thread => AnalyticsViewMode::Session,
-        };
-        self.analytics_scroll_offset = 0; // Reset scroll when switching
-    }
-
     /// Close detail view and return to list.
     fn close_detail_view(&mut self) {
         // Check if we should return to a project sub-tab
@@ -777,8 +747,6 @@ impl App {
         self.session_analytics_error = None;
         self.thread_analytics = None;
         self.thread_analytics_error = None;
-        self.analytics_view_mode = AnalyticsViewMode::Session;
-        self.analytics_scroll_offset = 0;
     }
 
     /// Scroll down in detail view.

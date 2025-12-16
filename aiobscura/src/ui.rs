@@ -5,7 +5,7 @@ use aiobscura_core::{
     ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus,
     ThreadType,
 };
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{AnalyticsViewMode, App, ProjectSubTab, ViewMode};
+use crate::app::{App, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -216,50 +216,65 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             thread_id.clone()
         };
-        
-        // Determine thread type for coloring
-        let thread_color = if let Some(thread) = app.session_threads.iter().find(|t| t.id == thread_id) {
-            match thread.thread_type {
-                ThreadType::Main => BADGE_MAIN,
-                ThreadType::Agent => BADGE_AGENT,
-                ThreadType::Background => BADGE_BG,
-            }
+
+        // Determine thread type, badge, and color
+        let (thread_type, thread_color, badge) =
+            if let Some(thread) = app.session_threads.iter().find(|t| t.id == thread_id) {
+                match thread.thread_type {
+                    ThreadType::Main => (ThreadType::Main, BADGE_MAIN, "●"),
+                    ThreadType::Agent => (ThreadType::Agent, BADGE_AGENT, "◎"),
+                    ThreadType::Background => (ThreadType::Background, BADGE_BG, "◇"),
+                }
+            } else {
+                (ThreadType::Main, Color::DarkGray, "●")
+            };
+
+        // For non-main threads, calculate and show duration
+        let duration_str = if !matches!(thread_type, ThreadType::Main) && !messages.is_empty() {
+            let first_ts = messages.first().unwrap().ts;
+            let last_ts = messages.last().unwrap().ts;
+            format!(" ({})", format_group_duration(first_ts, last_ts))
         } else {
-            Color::DarkGray
+            String::new()
         };
 
+        // Build thread header line
         lines.push(Line::from(vec![
             Span::styled("─── ", Style::default().fg(thread_color)),
+            Span::styled(format!("{} ", badge), Style::default().fg(thread_color)),
             Span::styled(thread_label, Style::default().fg(thread_color).bold()),
-            Span::styled(" ───────────────────────────────────────", Style::default().fg(thread_color)),
+            Span::styled(duration_str, Style::default().fg(thread_color)),
+            Span::styled(
+                " ───────────────────────────────────",
+                Style::default().fg(thread_color),
+            ),
         ]));
 
         // Add messages for this thread
         for msg in messages {
-            let role_style = match msg.author_role {
-                AuthorRole::Human => Style::default().fg(Color::Green),
-                AuthorRole::Assistant => Style::default().fg(Color::Blue),
-                AuthorRole::Agent => Style::default().fg(Color::Cyan),
-                AuthorRole::System => Style::default().fg(Color::Yellow),
-                AuthorRole::Tool => Style::default().fg(Color::Magenta),
+            // Determine role style and prefix based on author role AND thread type
+            // In main thread, Human is a real human -> [human] (green)
+            // In agent/background threads, Human is the caller (parent assistant) -> [caller] (cyan)
+            let (role_style, role_prefix) = match (&msg.author_role, &thread_type) {
+                (AuthorRole::Human, ThreadType::Main) => {
+                    (Style::default().fg(Color::Green), "[human]")
+                }
+                (AuthorRole::Human, _) => (Style::default().fg(Color::Cyan), "[caller]"),
+                (AuthorRole::Assistant, _) => (Style::default().fg(Color::Blue), "[assistant]"),
+                (AuthorRole::Agent, _) => (Style::default().fg(Color::Cyan), "[agent]"),
+                (AuthorRole::System, _) => (Style::default().fg(Color::Yellow), "[system]"),
+                (AuthorRole::Tool, _) => (Style::default().fg(Color::Magenta), "[tool]"),
             };
 
-            let role_prefix = match msg.author_role {
-                AuthorRole::Human => "[human]",
-                AuthorRole::Assistant => "[assistant]",
-                AuthorRole::Agent => "[agent]",
-                AuthorRole::System => "[system]",
-                AuthorRole::Tool => "[tool]",
-            };
-
-            // Get content preview
+            // Get content preview (shortened to leave room for timestamp)
+            let max_content_len = 60;
             let content_preview = msg
                 .content
                 .as_ref()
                 .map(|c| {
                     let first_line = c.lines().next().unwrap_or("");
-                    if first_line.len() > 80 {
-                        format!("{}...", &first_line[..77])
+                    if first_line.len() > max_content_len {
+                        format!("{}...", &first_line[..max_content_len - 3])
                     } else {
                         first_line.to_string()
                     }
@@ -271,9 +286,21 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
                         .unwrap_or_default()
                 });
 
+            // Format timestamp (HH:MM in local time)
+            let time_str = format_message_time(msg.ts);
+
+            // Calculate padding for right-aligned timestamp
+            let role_part = format!("{} ", role_prefix);
+            let content_len = role_part.chars().count() + content_preview.chars().count();
+            let target_width: usize = 72; // Target width before timestamp
+            let padding_needed = target_width.saturating_sub(content_len);
+            let padding = " ".repeat(padding_needed);
+
             lines.push(Line::from(vec![
-                Span::styled(format!("{} ", role_prefix), role_style),
+                Span::styled(role_part, role_style),
                 Span::styled(content_preview, Style::default().fg(Color::White)),
+                Span::raw(padding),
+                Span::styled(time_str, Style::default().fg(Color::DarkGray)),
             ]));
         }
 
@@ -504,36 +531,10 @@ fn render_thread_metadata(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the analytics panel with session/thread toggle.
+/// Render the analytics panel showing thread-level analytics.
 fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
-    // Determine which analytics to show based on view mode
-    let (is_thread_mode, error, analytics_available) = match app.analytics_view_mode {
-        AnalyticsViewMode::Session => (
-            false,
-            app.session_analytics_error.as_ref(),
-            app.session_analytics.is_some(),
-        ),
-        AnalyticsViewMode::Thread => (
-            true,
-            app.thread_analytics_error.as_ref(),
-            app.thread_analytics.is_some(),
-        ),
-    };
-
-    // Build the title with toggle hint
-    let toggle_hint = if is_thread_mode {
-        "[a: Session]"
-    } else {
-        "[a: Thread]"
-    };
-    let title_text = if is_thread_mode {
-        " Analytics (Thread) "
-    } else {
-        " Analytics (Session) "
-    };
-
     // Check for error state
-    if let Some(error) = error {
+    if let Some(ref error) = app.thread_analytics_error {
         let error_line = Line::from(vec![
             Span::styled("Error: ", Style::default().fg(Color::Red)),
             Span::styled(
@@ -546,16 +547,15 @@ fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Red))
-                .title(title_text)
-                .title_style(Style::default().fg(Color::Red))
-                .title_bottom(Line::from(toggle_hint).right_aligned()),
+                .title(" Thread Analytics ")
+                .title_style(Style::default().fg(Color::Red)),
         );
         frame.render_widget(paragraph, area);
         return;
     }
 
     // Check if we have analytics
-    if !analytics_available {
+    if app.thread_analytics.is_none() {
         let placeholder = Paragraph::new("No analytics computed")
             .style(Style::default().fg(Color::DarkGray))
             .block(
@@ -563,29 +563,22 @@ fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(BORDER_INFO))
-                    .title(title_text)
-                    .title_style(Style::default().fg(BORDER_INFO))
-                    .title_bottom(Line::from(toggle_hint).right_aligned()),
+                    .title(" Thread Analytics ")
+                    .title_style(Style::default().fg(BORDER_INFO)),
             );
         frame.render_widget(placeholder, area);
         return;
     }
 
-    // Build the analytics lines based on mode
-    let lines = if is_thread_mode {
-        build_thread_analytics_lines(app)
-    } else {
-        build_session_analytics_lines(app)
-    };
+    let lines = build_thread_analytics_lines(app);
 
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(BORDER_INFO))
-            .title(title_text)
-            .title_style(Style::default().fg(BORDER_INFO).bold())
-            .title_bottom(Line::from(toggle_hint).right_aligned()),
+            .title(" Thread Analytics ")
+            .title_style(Style::default().fg(BORDER_INFO).bold()),
     );
     frame.render_widget(paragraph, area);
 }
@@ -660,9 +653,9 @@ fn build_session_analytics_lines(app: &App) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(line2_spans));
 
-    // Line 3: Placeholder for future metrics (e.g., lines changed, first-try rate)
+    // Line 3: Additional session info
     let line3_spans = vec![Span::styled(
-        "Press 'a' to view thread-level analytics",
+        "Session-level aggregate across all threads",
         Style::default().fg(Color::DarkGray).italic(),
     )];
     lines.push(Line::from(line3_spans));
@@ -865,6 +858,43 @@ fn format_duration(secs: i64) -> String {
             format!("{}d {}h", days, hours)
         } else {
             format!("{}d", days)
+        }
+    }
+}
+
+/// Format a message timestamp as local time HH:MM (24-hour compact).
+fn format_message_time(ts: DateTime<Utc>) -> String {
+    ts.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+/// Format duration between two timestamps for thread group headers.
+fn format_group_duration(first: DateTime<Utc>, last: DateTime<Utc>) -> String {
+    let secs = (last - first).num_seconds().max(0);
+    if secs == 0 {
+        "<1 second".to_string()
+    } else if secs == 1 {
+        "1 second".to_string()
+    } else if secs < 60 {
+        format!("{} seconds", secs)
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        let remaining_secs = secs % 60;
+        if remaining_secs > 0 {
+            format!("{} min {} sec", mins, remaining_secs)
+        } else if mins == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{} minutes", mins)
+        }
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{} hr {} min", hours, mins)
+        } else if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{} hours", hours)
         }
     }
 }
