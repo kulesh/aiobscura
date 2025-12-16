@@ -1118,8 +1118,17 @@ fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static
 
     let mut lines = Vec::new();
 
-    // Header line with icon, label, and index
+    // Format timestamp
+    let time_str = format_message_time(msg.ts);
+
+    // Header line with icon, label, index, and timestamp
     let counter = format!("[{}/{}]", index, total);
+    // Calculate padding: icon (2) + space + label + space + counter
+    let header_len = 2 + 1 + label.chars().count() + 1 + counter.chars().count();
+    let target_width: usize = 50;
+    let padding_needed = target_width.saturating_sub(header_len);
+    let padding = " ".repeat(padding_needed);
+
     lines.push(Line::from(vec![
         Span::raw(format!("{} ", icon)),
         Span::styled(label, style),
@@ -1127,6 +1136,8 @@ fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static
             format!(" {}", counter),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::raw(padding),
+        Span::styled(time_str, Style::default().fg(Color::DarkGray)),
     ]));
 
     // Content
@@ -1157,7 +1168,16 @@ fn format_tool_message(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
+    // Format timestamp
+    let time_str = format_message_time(msg.ts);
+
     let counter = format!("[{}/{}]", index, total);
+    // Calculate padding: icon (2) + space + "Tool: " (6) + tool_name + space + counter
+    let header_len = 2 + 1 + 6 + tool_name.chars().count() + 1 + counter.chars().count();
+    let target_width: usize = 50;
+    let padding_needed = target_width.saturating_sub(header_len);
+    let padding = " ".repeat(padding_needed);
+
     lines.push(Line::from(vec![
         Span::raw("🔧 "),
         Span::styled("Tool: ", Style::default().fg(Color::Yellow)),
@@ -1169,6 +1189,8 @@ fn format_tool_message(
             format!(" {}", counter),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::raw(padding),
+        Span::styled(time_str, Style::default().fg(Color::DarkGray)),
     ]));
 
     // Content
