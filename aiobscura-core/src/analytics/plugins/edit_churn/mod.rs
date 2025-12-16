@@ -20,6 +20,7 @@
 //! | `lines_added` | integer | Total lines added across all edits |
 //! | `lines_removed` | integer | Total lines removed across all edits |
 //! | `lines_changed` | integer | Total lines changed (added + removed) |
+//! | `edits_by_extension` | object | Map of file extension to edit count |
 //!
 //! ## Churn Ratio Interpretation
 //!
@@ -138,6 +139,16 @@ impl EditChurnAnalyzer {
         }
     }
 
+    /// Extract file extension from a path.
+    ///
+    /// Returns the extension without the dot, or "no_ext" for files without extension.
+    fn extract_extension(path: &str) -> &str {
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("no_ext")
+    }
+
     /// Check if a message is a file modification tool call.
     fn is_file_edit(message: &Message) -> bool {
         if message.message_type != MessageType::ToolCall {
@@ -182,6 +193,7 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
         _ctx: &AnalyticsContext,
     ) -> Result<Vec<MetricOutput>> {
         let mut file_counts: HashMap<String, i64> = HashMap::new();
+        let mut extension_counts: HashMap<String, i64> = HashMap::new();
         let mut total_edits = 0i64;
         let mut total_lines_added = 0i64;
         let mut total_lines_removed = 0i64;
@@ -199,7 +211,11 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                         continue;
                     }
                     total_edits += 1;
-                    *file_counts.entry(file_path).or_insert(0) += 1;
+                    *file_counts.entry(file_path.clone()).or_insert(0) += 1;
+
+                    // Track by file extension
+                    let ext = Self::extract_extension(&file_path).to_string();
+                    *extension_counts.entry(ext).or_insert(0) += 1;
 
                     // Track line changes
                     let (added, removed) =
@@ -228,6 +244,14 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
             .iter()
             .filter(|(_, count)| **count >= HIGH_CHURN_THRESHOLD)
             .map(|(path, _)| *path)
+            .collect();
+
+        // Build extension counts as JSON object (sorted by count)
+        let mut ext_list: Vec<(&String, &i64)> = extension_counts.iter().collect();
+        ext_list.sort_by(|a, b| b.1.cmp(a.1));
+        let ext_counts_json: serde_json::Value = ext_list
+            .iter()
+            .map(|(k, v)| ((*k).clone(), serde_json::json!(**v)))
             .collect();
 
         Ok(vec![
@@ -259,6 +283,7 @@ impl AnalyticsPlugin for EditChurnAnalyzer {
                 "lines_changed",
                 serde_json::json!(total_lines_added + total_lines_removed),
             ),
+            MetricOutput::session(&session.id, "edits_by_extension", ext_counts_json),
         ])
     }
 }
@@ -498,5 +523,14 @@ mod tests {
         let (added, removed) = EditChurnAnalyzer::extract_line_changes(Some("Read"), &input);
         assert_eq!(added, 0);
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_extract_extension() {
+        assert_eq!(EditChurnAnalyzer::extract_extension("/path/to/file.rs"), "rs");
+        assert_eq!(EditChurnAnalyzer::extract_extension("/path/to/file.test.ts"), "ts");
+        assert_eq!(EditChurnAnalyzer::extract_extension("Cargo.toml"), "toml");
+        assert_eq!(EditChurnAnalyzer::extract_extension("/path/Makefile"), "no_ext");
+        assert_eq!(EditChurnAnalyzer::extract_extension(".gitignore"), "no_ext");
     }
 }
