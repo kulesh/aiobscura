@@ -204,8 +204,10 @@ pub struct App {
     pub live_auto_scroll: bool,
     /// Active sessions for the live view (threads with recent activity)
     pub active_sessions: Vec<ActiveSession>,
-    /// Aggregate stats for the live view's toolbar
+    /// Aggregate stats for the live view's toolbar (30 min window)
     pub live_stats: LiveStats,
+    /// Aggregate stats for 24 hour window
+    pub live_stats_24h: LiveStats,
 }
 
 impl App {
@@ -263,6 +265,7 @@ impl App {
             live_auto_scroll: true,
             active_sessions: Vec::new(),
             live_stats: LiveStats::default(),
+            live_stats_24h: LiveStats::default(),
         }
     }
 
@@ -1376,7 +1379,9 @@ impl App {
         self.live_messages = self.db.get_recent_messages(50)?;
         // Get sessions active in last 30 minutes for the panel
         self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
+        // Load stats for both time windows (30m and 24h)
         self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
         // Load dashboard stats and projects for the dashboard panel
         self.dashboard_stats = self.db.get_dashboard_stats().ok();
         self.projects = self.db.list_projects_with_stats().unwrap_or_default();
@@ -1393,6 +1398,7 @@ impl App {
             self.live_messages = messages;
             self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
             self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+            self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
             self.dashboard_stats = self.db.get_dashboard_stats().ok();
             self.projects = self.db.list_projects_with_stats().unwrap_or_default();
             self.live_scroll_offset = 0;
@@ -1410,9 +1416,10 @@ impl App {
                 self.live_scroll_offset = 0;
             }
         }
-        // Also refresh active sessions and stats
+        // Also refresh active sessions and stats (both time windows)
         self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
         self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
         Ok(())
     }
 

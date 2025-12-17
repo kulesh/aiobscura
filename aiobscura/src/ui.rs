@@ -2489,18 +2489,40 @@ fn render_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Render the heatmap as styled spans (28 days).
+/// Render the heatmap as styled spans (28 days) with relative shading.
 fn render_heatmap_spans(daily_activity: &[i64; 28]) -> Vec<Span<'static>> {
+    // Calculate relative thresholds based on actual data
+    // Use quartiles for adaptive shading
+    let mut non_zero: Vec<i64> = daily_activity.iter().copied().filter(|&x| x > 0).collect();
+
+    // Determine thresholds based on data distribution
+    let (low_thresh, med_thresh) = if non_zero.is_empty() {
+        (1, 2) // Defaults if no activity
+    } else {
+        non_zero.sort_unstable();
+        let len = non_zero.len();
+        // Q1 (25th percentile) and Q2 (50th percentile / median)
+        let q1 = non_zero[len / 4];
+        let q2 = non_zero[len / 2];
+        // Ensure thresholds are distinct and sensible
+        let low = q1.max(1);
+        let med = q2.max(low + 1);
+        (low, med)
+    };
+
     // Convert activity counts to intensity blocks with spacing
     // ░ (none), ▒ (low), ▓ (medium), █ (high)
     let mut spans = Vec::new();
 
     for (i, &count) in daily_activity.iter().enumerate() {
-        let (ch, color) = match count {
-            0 => ('░', WRAPPED_DIM),
-            1..=5 => ('▒', Color::Rgb(0, 100, 0)), // Dark green
-            6..=15 => ('▓', Color::Rgb(0, 180, 0)), // Medium green
-            _ => ('█', WRAPPED_LIME),              // Bright green
+        let (ch, color) = if count == 0 {
+            ('░', WRAPPED_DIM)
+        } else if count <= low_thresh {
+            ('▒', Color::Rgb(0, 100, 0)) // Dark green - below Q1
+        } else if count <= med_thresh {
+            ('▓', Color::Rgb(0, 180, 0)) // Medium green - Q1 to Q2
+        } else {
+            ('█', WRAPPED_LIME) // Bright green - above Q2
         };
 
         spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
@@ -3474,11 +3496,26 @@ fn render_at_a_glance_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build stats lines
     let mut lines: Vec<Line> = Vec::new();
-
-    // Row 1: Today's stats from live_stats (30-min window) + active count
     let active_count = app.active_sessions.len();
+
+    // Row 1: 24H stats (like a weather map - longer time window first)
     lines.push(Line::from(vec![
-        Span::styled("Today  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled("24h    ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format!("{}", app.live_stats_24h.total_messages),
+            Style::default().fg(WRAPPED_CYAN).bold(),
+        ),
+        Span::styled(" msgs  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format_tokens_short(app.live_stats_24h.total_tokens),
+            Style::default().fg(WRAPPED_GOLD).bold(),
+        ),
+        Span::styled(" tokens", Style::default().fg(WRAPPED_DIM)),
+    ]));
+
+    // Row 2: 30m stats (recent activity window)
+    lines.push(Line::from(vec![
+        Span::styled("30m    ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
             format!("{}", app.live_stats.total_messages),
             Style::default().fg(WRAPPED_CYAN).bold(),
@@ -3496,23 +3533,8 @@ fn render_at_a_glance_panel(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" active", Style::default().fg(WRAPPED_DIM)),
     ]));
 
-    // Row 2: Overall stats from dashboard_stats
+    // Row 3: Streak and peak hour
     if let Some(stats) = &app.dashboard_stats {
-        lines.push(Line::from(vec![
-            Span::styled("Total  ", Style::default().fg(WRAPPED_DIM)),
-            Span::styled(
-                format!("{}", stats.project_count),
-                Style::default().fg(WRAPPED_CYAN).bold(),
-            ),
-            Span::styled(" projects  ", Style::default().fg(WRAPPED_DIM)),
-            Span::styled(
-                format!("{}", stats.session_count),
-                Style::default().fg(WRAPPED_LIME).bold(),
-            ),
-            Span::styled(" sessions", Style::default().fg(WRAPPED_DIM)),
-        ]));
-
-        // Row 3: Streak and peak hour
         lines.push(Line::from(vec![
             Span::styled("Streak ", Style::default().fg(WRAPPED_DIM)),
             Span::styled(
@@ -3525,11 +3547,6 @@ fn render_at_a_glance_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(WRAPPED_PURPLE).bold(),
             ),
         ]));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Loading stats...",
-            Style::default().fg(WRAPPED_DIM).italic(),
-        )));
     }
 
     let paragraph = Paragraph::new(lines);
@@ -3593,7 +3610,7 @@ fn render_live_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the quick projects panel with numbered shortcuts.
 fn render_quick_projects_panel(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .title(" Projects [1-5] ")
+        .title(" Recent Projects [1-5] ")
         .title_style(Style::default().fg(LIVE_INDICATOR).bold())
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
