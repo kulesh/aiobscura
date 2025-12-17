@@ -1338,8 +1338,37 @@ impl App {
                 self.live_scroll_offset = self.live_scroll_offset.saturating_add(10);
                 self.live_auto_scroll = false;
             }
+            // Number keys 1-5 jump to project by index (quick project switcher)
+            KeyCode::Char(c @ '1'..='5') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.projects.len() {
+                    // Navigate to project detail
+                    let project = &self.projects[idx];
+                    self.open_project_detail_by_id(&project.id.clone(), &project.name.clone());
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Open project detail view by ID and name (for quick navigation).
+    fn open_project_detail_by_id(&mut self, project_id: &str, project_name: &str) {
+        // Load project stats
+        if let Ok(Some(stats)) = self.db.get_project_stats(project_id) {
+            self.project_stats = Some(stats);
+        }
+        // Load sessions for the sessions sub-tab
+        let _ = self.load_project_sessions(project_id);
+        // Load plans for the plans sub-tab
+        let _ = self.load_project_plans(project_id);
+        // Load files for the files sub-tab
+        let _ = self.load_project_files(project_id);
+
+        self.view_mode = ViewMode::ProjectDetail {
+            project_id: project_id.to_string(),
+            project_name: project_name.to_string(),
+            sub_tab: ProjectSubTab::Overview,
+        };
     }
 
     /// Open the live activity view (called from main for startup).
@@ -1348,6 +1377,9 @@ impl App {
         // Get sessions active in last 30 minutes for the panel
         self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
         self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        // Load dashboard stats and projects for the dashboard panel
+        self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        self.projects = self.db.list_projects_with_stats().unwrap_or_default();
         self.live_scroll_offset = 0;
         self.live_auto_scroll = true;
         self.view_mode = ViewMode::Live;
@@ -1362,6 +1394,7 @@ impl App {
             self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
             self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
             self.dashboard_stats = self.db.get_dashboard_stats().ok();
+            self.projects = self.db.list_projects_with_stats().unwrap_or_default();
             self.live_scroll_offset = 0;
             self.live_auto_scroll = true;
             self.view_mode = ViewMode::Live;

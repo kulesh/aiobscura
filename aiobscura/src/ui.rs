@@ -3462,28 +3462,42 @@ const BORDER_LIVE: Color = Color::Rgb(50, 200, 50);
 fn render_live_view(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Calculate active sessions panel height (show up to 6 sessions, min 3)
+    // Calculate active sessions panel height (show up to 4 sessions, min 2)
     let active_session_count = app.active_sessions.len();
-    let sessions_height = (active_session_count.clamp(1, 6) + 2) as u16; // +2 for border
+    let sessions_height = (active_session_count.clamp(1, 4) + 2) as u16; // +2 for border
 
-    // Layout: tab header, status bar, active sessions, message stream, footer
+    // Calculate quick projects height (show up to 5 projects)
+    let projects_count = app.projects.len().min(5);
+    let projects_height = (projects_count.max(2) + 2) as u16; // +2 for border
+
+    // Use the larger of the two for the middle panel
+    let middle_panel_height = sessions_height.max(projects_height);
+
+    // Layout: tab header, dashboard summary, middle panels, message stream, footer
     let chunks = Layout::vertical([
-        Constraint::Length(2),               // Tab header
-        Constraint::Length(2),               // Status bar with LIVE indicator
-        Constraint::Length(sessions_height), // Active sessions panel
-        Constraint::Min(5),                  // Message stream
-        Constraint::Length(1),               // Footer
+        Constraint::Length(2),                   // Tab header
+        Constraint::Length(6),                   // Dashboard summary (stats + heatmap)
+        Constraint::Length(middle_panel_height), // Quick Projects | Active Sessions
+        Constraint::Min(5),                      // Message stream
+        Constraint::Length(1),                   // Footer
     ])
     .split(area);
 
     // === Tab Header ===
     render_tab_header(frame, ActiveTab::Live, chunks[0]);
 
-    // === Status Bar ===
-    render_live_status_bar(frame, app, chunks[1]);
+    // === Dashboard Summary ===
+    render_live_dashboard_summary(frame, app, chunks[1]);
 
-    // === Active Sessions ===
-    render_active_sessions_panel(frame, app, chunks[2]);
+    // === Middle Panel: Quick Projects | Active Sessions ===
+    let middle_chunks = Layout::horizontal([
+        Constraint::Percentage(40), // Quick Projects
+        Constraint::Percentage(60), // Active Sessions
+    ])
+    .split(chunks[2]);
+
+    render_quick_projects_panel(frame, app, middle_chunks[0]);
+    render_active_sessions_panel(frame, app, middle_chunks[1]);
 
     // === Message Stream ===
     render_live_message_stream(frame, app, chunks[3]);
@@ -3492,41 +3506,199 @@ fn render_live_view(frame: &mut Frame, app: &App) {
     render_live_footer(frame, app, chunks[4]);
 }
 
-/// Render the live view status bar with LIVE indicator and stats.
-fn render_live_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let message_count = app.live_messages.len();
+/// Render the dashboard summary panel with at-a-glance stats and activity heatmap.
+fn render_live_dashboard_summary(frame: &mut Frame, app: &App, area: Rect) {
+    // Split into: Stats (left) | Activity Heatmap (right)
+    let chunks = Layout::horizontal([
+        Constraint::Percentage(50), // At a glance stats
+        Constraint::Percentage(50), // Activity heatmap
+    ])
+    .split(area);
 
-    // Pulsing effect for LIVE indicator (blinks every ~1 second)
-    let pulse = (app.animation_frame / 10).is_multiple_of(2);
-    let live_style = if pulse {
-        Style::default().fg(LIVE_INDICATOR).bold()
-    } else {
-        Style::default().fg(Color::Green).bold()
-    };
+    render_at_a_glance_panel(frame, app, chunks[0]);
+    render_live_activity_panel(frame, app, chunks[1]);
+}
 
-    let auto_scroll_indicator = if app.live_auto_scroll {
-        Span::styled(" [AUTO-SCROLL] ", Style::default().fg(Color::DarkGray))
-    } else {
-        Span::styled(" [PAUSED] ", Style::default().fg(Color::Yellow))
-    };
+/// Render the "At a Glance" stats panel.
+fn render_at_a_glance_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Dashboard ")
+        .title_style(Style::default().fg(LIVE_INDICATOR).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_LIVE));
 
-    let status_line = Line::from(vec![
-        Span::styled(" ", Style::default()),
-        Span::styled("● LIVE", live_style),
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Build stats lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Row 1: Today's stats from live_stats (30-min window) + active count
+    let active_count = app.active_sessions.len();
+    lines.push(Line::from(vec![
+        Span::styled("Today  ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(
-            format!("  {} messages", message_count),
-            Style::default().fg(WRAPPED_DIM),
+            format!("{}", app.live_stats.total_messages),
+            Style::default().fg(WRAPPED_CYAN).bold(),
         ),
-        auto_scroll_indicator,
-    ]);
+        Span::styled(" msgs  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format_tokens_short(app.live_stats.total_tokens),
+            Style::default().fg(WRAPPED_GOLD).bold(),
+        ),
+        Span::styled(" tokens  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(
+            format!("{}", active_count),
+            Style::default().fg(LIVE_INDICATOR).bold(),
+        ),
+        Span::styled(" active", Style::default().fg(WRAPPED_DIM)),
+    ]));
 
-    let status_bar = Paragraph::new(status_line).block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(BORDER_LIVE)),
-    );
+    // Row 2: Overall stats from dashboard_stats
+    if let Some(stats) = &app.dashboard_stats {
+        lines.push(Line::from(vec![
+            Span::styled("Total  ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("{}", stats.project_count),
+                Style::default().fg(WRAPPED_CYAN).bold(),
+            ),
+            Span::styled(" projects  ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("{}", stats.session_count),
+                Style::default().fg(WRAPPED_LIME).bold(),
+            ),
+            Span::styled(" sessions", Style::default().fg(WRAPPED_DIM)),
+        ]));
 
-    frame.render_widget(status_bar, area);
+        // Row 3: Streak and peak hour
+        lines.push(Line::from(vec![
+            Span::styled("Streak ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("{} days", stats.current_streak),
+                Style::default().fg(WRAPPED_CORAL).bold(),
+            ),
+            Span::styled("  Peak ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                stats.format_peak_hour(),
+                Style::default().fg(WRAPPED_PURPLE).bold(),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Loading stats...",
+            Style::default().fg(WRAPPED_DIM).italic(),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+/// Render the activity heatmap panel for the live dashboard.
+fn render_live_activity_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Activity ")
+        .title_style(Style::default().fg(LIVE_INDICATOR).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_LIVE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if let Some(stats) = &app.dashboard_stats {
+        // Build heatmap line (28 chars for 28 days)
+        let heatmap_spans = render_heatmap_spans(&stats.daily_activity);
+
+        // Day labels (4 weeks) - shorter version
+        let day_labels = "M T W T F S S  M T W T F S S  M T W T F S S  M T W T F S S";
+
+        // Streak summary line
+        let streak_line = vec![
+            Span::styled(
+                format!("{}d streak", stats.current_streak),
+                Style::default().fg(WRAPPED_LIME).bold(),
+            ),
+            Span::styled("  │  ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format!("Best: {}d", stats.longest_streak),
+                Style::default().fg(WRAPPED_GOLD),
+            ),
+            Span::styled("  │  ", Style::default().fg(WRAPPED_DIM)),
+            Span::styled(
+                format_tokens_short(stats.total_tokens),
+                Style::default().fg(WRAPPED_CYAN),
+            ),
+            Span::styled(" total", Style::default().fg(WRAPPED_DIM)),
+        ];
+
+        let lines = vec![
+            Line::from(heatmap_spans),
+            Line::from(Span::styled(day_labels, Style::default().fg(WRAPPED_DIM))),
+            Line::raw(""),
+            Line::from(streak_line),
+        ];
+
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, inner);
+    } else {
+        let placeholder =
+            Paragraph::new("Loading activity...").style(Style::default().fg(WRAPPED_DIM).italic());
+        frame.render_widget(placeholder, inner);
+    }
+}
+
+/// Render the quick projects panel with numbered shortcuts.
+fn render_quick_projects_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Projects [1-5] ")
+        .title_style(Style::default().fg(LIVE_INDICATOR).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_LIVE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.projects.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No projects yet",
+            Style::default().fg(WRAPPED_DIM).italic(),
+        )));
+    } else {
+        // Show up to 5 projects with number keys
+        for (i, project) in app.projects.iter().take(5).enumerate() {
+            let key_num = format!("[{}]", i + 1);
+            let name = truncate_string(&project.name, 16);
+            let sessions_str = format!("{}s", project.session_count);
+            let time_str = project
+                .last_activity
+                .map(format_relative_time)
+                .unwrap_or_else(|| "—".to_string());
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {}", key_num),
+                    Style::default().fg(WRAPPED_CYAN).bold(),
+                ),
+                Span::styled(format!(" {:<16}", name), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>4}", sessions_str),
+                    Style::default().fg(WRAPPED_DIM),
+                ),
+                Span::styled(
+                    format!(" {:>8}", time_str),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
 }
 
 /// Render the active sessions panel showing threads with recent activity.
@@ -3804,57 +3976,28 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
 }
 
 /// Render the live view footer with key hints.
-fn render_live_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let stats = &app.live_stats;
-
-    // Format numbers with appropriate suffixes
-    let msgs = format_stat_number(stats.total_messages);
-    let tokens = format_with_commas(stats.total_tokens); // Raw number for fun ticking effect
-    let assistants = stats.total_agents.to_string();
-    let tools = format_stat_number(stats.total_tool_calls);
-
+fn render_live_footer(frame: &mut Frame, _app: &App, area: Rect) {
+    let key_style = Style::default().fg(WRAPPED_CYAN).bold();
     let label_style = Style::default().fg(Color::DarkGray);
-    let value_style = Style::default().fg(Color::Cyan);
-    let separator_style = Style::default().fg(Color::DarkGray);
+    let separator = Span::styled("  │  ", Style::default().fg(Color::DarkGray));
 
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" 📊 (30m) ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Messages: ", label_style),
-        Span::styled(msgs, value_style),
-        Span::styled("   ", separator_style),
-        Span::styled("Tokens: ", label_style),
-        Span::styled(tokens, value_style),
-        Span::styled("   ", separator_style),
-        Span::styled("Assistants: ", label_style),
-        Span::styled(assistants, value_style),
-        Span::styled("   ", separator_style),
-        Span::styled("Tool calls: ", label_style),
-        Span::styled(tools, value_style),
+        Span::styled(" ", Style::default()),
+        Span::styled("[1-5]", key_style),
+        Span::styled(" Project  ", label_style),
+        separator.clone(),
+        Span::styled("[Tab]", key_style),
+        Span::styled(" Projects view  ", label_style),
+        separator.clone(),
+        Span::styled("[j/k]", key_style),
+        Span::styled(" Scroll  ", label_style),
+        separator.clone(),
+        Span::styled("[Space]", key_style),
+        Span::styled(" Auto-scroll  ", label_style),
+        separator,
+        Span::styled("[q]", key_style),
+        Span::styled(" Quit", label_style),
     ]));
 
     frame.render_widget(footer, area);
-}
-
-/// Format a number with comma separators (e.g., 1234567 -> "1,234,567")
-fn format_with_commas(n: i64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
-/// Format a number for display in stats (e.g., 1234 -> "1,234", 45200 -> "45.2k")
-fn format_stat_number(n: i64) -> String {
-    if n >= 100_000 {
-        format!("{:.0}k", n as f64 / 1000.0)
-    } else if n >= 10_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        format_with_commas(n)
-    }
 }
