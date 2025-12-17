@@ -60,22 +60,29 @@ The architecture implements a **5-layer data flow** from raw logs to TUI display
 
 ## 2. Identified Abstraction Leaks
 
-### Leak 1: TUI Creates Its Own View Models (ThreadRow, SessionRow)
+### ~~Leak 1: TUI Creates Its Own View Models (ThreadRow, SessionRow)~~ — NOT A LEAK
 
 **Location:** `aiobscura/src/thread_row.rs`
 
-**Problem:** The TUI defines `ThreadRow` and `SessionRow` outside the core library. These duplicate fields from `types.rs` (`Thread`, `Session`) and add display logic.
+**Original concern:** ThreadRow/SessionRow are defined in TUI, not core.
 
-**Evidence:**
-- `ThreadRow` has `project_name: String`, `assistant_name: String` which are denormalized from `Session` → `Project`
-- `SessionRow` has `duration_secs`, `thread_count`, `message_count` which are computed on the fly
-- These types should live in `aiobscura-core` alongside `ProjectRow`, `ProjectStats`, `DashboardStats`
+**Why this is actually correct:**
 
-**Consequence:** If another UI (e.g., macOS GUI) is built, it will duplicate this logic.
+ThreadRow contains UI-specific fields that other UIs wouldn't use:
+- `indent_level: usize` — for TUI tree rendering
+- `is_last_child: bool` — for tree connector characters (├── vs └──)
+
+A web UI would compute tree structure client-side with JavaScript. A mobile app might not show threads as a tree at all.
+
+**The litmus test:** "Would a different UI use this exact shape?"
+- `ProjectRow` (in core) → Yes, any UI showing projects wants these fields
+- `ThreadRow` with `indent_level` → No, that's TUI tree-specific
+
+**Conclusion:** ThreadRow/SessionRow correctly live in the TUI layer. The real issue is the N+1 query pattern used to populate them (see Leak 2).
 
 ---
 
-### Leak 2: App.load_threads() Does Complex Query Logic
+### Leak 2: App.load_threads() Does Complex Query Logic (THE REAL ISSUE)
 
 **Location:** `aiobscura/src/app.rs:386-581`
 
@@ -87,9 +94,19 @@ The architecture implements a **5-layer data flow** from raw logs to TUI display
 5. Sort by project, then by last_activity
 6. Count messages per thread (N more queries)
 
-This is **business logic** that leaks into the presentation layer.
+This is **data access logic** that leaks into the presentation layer.
 
-**Better Abstraction:** A `Database::list_threads_with_context()` method in `repo.rs` that returns `Vec<ThreadRow>` in one query with JOINs.
+**Better Abstraction:** Core should provide efficient query methods that return **domain types with aggregated data**, not view models:
+
+```rust
+// In repo.rs - returns domain types, not UI types
+pub fn list_threads_with_counts(&self, session_id: &str)
+    -> Result<Vec<(Thread, i64)>>  // Thread + message_count
+
+pub fn get_project_name(&self, project_id: &str) -> Result<Option<String>>
+```
+
+The TUI then assembles `ThreadRow` from these efficient queries, adding only UI-specific fields (`indent_level`, `is_last_child`).
 
 ---
 
@@ -262,16 +279,18 @@ This couples the TUI to the analytics engine internals. The core API (`lib.rs`) 
 
 ### Critical (Architectural)
 1. **SessionType enum missing** - Requirements define AgentTask/Conversation/FileOperation but types.rs lacks this
-2. **View models scattered** - ThreadRow, SessionRow in TUI; ProjectRow, ProjectStats in core; inconsistent
 
 ### Major (Abstraction Leaks)
-3. **N+1 query patterns** - TUI makes many DB calls instead of single efficient queries
-4. **Business logic in TUI** - load_threads(), load_project_plans() filter/aggregate in app.rs
-5. **EnvironmentHealth/AssistantHealth in wrong layer** - Should be in core
+2. **N+1 query patterns** - TUI makes many DB calls instead of single efficient queries
+3. **Data access logic in TUI** - load_threads(), load_project_plans() filter/aggregate in app.rs instead of using efficient core queries
+4. **EnvironmentHealth/AssistantHealth in wrong layer** - Should be in core (no UI-specific fields)
 
 ### Minor (Code Quality)
-6. **Duplicated relative_time()** - Same logic in ThreadRow and SessionRow
-7. **Analytics coupling** - TUI directly uses create_default_engine() instead of core API
+5. **Duplicated relative_time()** - Same logic in ThreadRow and SessionRow
+6. **Analytics coupling** - TUI directly uses create_default_engine() instead of core API
+
+### Correctly Placed (Not Issues)
+- **ThreadRow/SessionRow in TUI** - These have UI-specific fields (`indent_level`, `is_last_child`) that other UIs wouldn't use. Different UIs will shape data differently for their rendering needs.
 
 ---
 
@@ -301,50 +320,53 @@ And add `session_type: SessionType` to `Session` struct.
 
 ---
 
-### Fix 2: Move View Models to Core
+### ~~Fix 2: Move View Models to Core~~ — REJECTED
 
-**Change:** Move `ThreadRow`, `SessionRow` from `aiobscura/src/thread_row.rs` to `aiobscura-core/src/types.rs` or a new `aiobscura-core/src/views.rs` module.
+**Original proposal:** Move `ThreadRow`, `SessionRow` to core.
 
-**Trade-off:**
-- **Pro:** All UIs share the same view models
-- **Con:** Core library grows; view-specific concerns in the library
-- **Mitigation:** Create a `views` module that's clearly UI-oriented
+**Why rejected:** These types have UI-specific fields (`indent_level`, `is_last_child`) that other UIs wouldn't use. View models should stay in their respective UI layers.
+
+**What to do instead:** Core provides efficient data access; each UI shapes data for its needs.
 
 ---
 
-### Fix 3: Add Efficient Query Methods to Database
+### Fix 2: Add Efficient Query Methods to Database (Revised)
 
 **Add to `repo.rs`:**
 ```rust
-/// List all threads with denormalized context, efficiently in one query.
-pub fn list_threads_with_context(&self, filter: &ThreadFilter) -> Result<Vec<ThreadRow>> {
-    // Single JOIN query instead of N+1
+/// List threads with message counts in a single query (avoids N+1).
+/// Returns domain types, not view models.
+pub fn list_threads_with_counts(&self, session_id: &str)
+    -> Result<Vec<(Thread, i64)>> {
+    // Single JOIN query: threads LEFT JOIN (SELECT COUNT(*) FROM messages)
 }
 
-/// Get all plans for a project directly.
+/// Get all plans for a project directly via session FK.
 pub fn list_project_plans(&self, project_id: &str) -> Result<Vec<Plan>> {
-    // Direct SQL with WHERE project_id via session FK
+    // Direct SQL with WHERE sessions.project_id = ?
 }
 
-/// Get complete thread detail in one query.
-pub fn get_thread_detail(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
-    // All metadata in one query
+/// Get thread metadata in one query (source_path, model, cwd, etc).
+pub fn get_thread_context(&self, thread_id: &str) -> Result<Option<ThreadContext>> {
+    // Single query returning aggregated context
 }
 
-/// Get environment health stats.
+/// Get environment health stats in one call.
 pub fn get_environment_health(&self) -> Result<EnvironmentHealth> {
-    // Aggregate in one method
+    // Combines db size, assistant stats, total counts
 }
 ```
 
+**Key principle:** These methods return **domain types** or **simple aggregation structs**, not UI-shaped view models. The TUI then assembles its `ThreadRow` from these efficient building blocks.
+
 **Trade-off:**
-- **Pro:** Faster queries, cleaner TUI code
-- **Con:** More methods in repo.rs, potential for view-specific logic in DB layer
-- **Mitigation:** Keep these methods clearly named as "for_display" or "with_context"
+- **Pro:** Eliminates N+1 queries, cleaner separation
+- **Con:** More methods in repo.rs
+- **Mitigation:** Group these as "aggregate" or "summary" queries, distinct from basic CRUD
 
 ---
 
-### Fix 4: Move EnvironmentHealth to Core
+### Fix 3: Move EnvironmentHealth to Core
 
 **Change:** Move `EnvironmentHealth` and `AssistantHealth` from `app.rs` to `types.rs`.
 
@@ -352,7 +374,7 @@ pub fn get_environment_health(&self) -> Result<EnvironmentHealth> {
 
 ---
 
-### Fix 5: Add Utility Module for Common Formatting
+### Fix 4: Add Utility Module for Common Formatting
 
 **Add `aiobscura-core/src/format.rs`:**
 ```rust
@@ -367,7 +389,7 @@ pub fn format_duration(secs: i64) -> String { ... }
 
 ---
 
-### Fix 6: Create a Higher-Level API Module
+### Fix 5: Create a Higher-Level API Module
 
 **Add `aiobscura-core/src/api.rs`:**
 ```rust
@@ -396,16 +418,74 @@ impl AiobscuraApi {
 
 | Fix | Impact | Effort | Priority |
 |-----|--------|--------|----------|
-| Fix 3: Efficient Query Methods | High (perf) | Medium | **P0** |
-| Fix 2: Move View Models to Core | High (arch) | Low | **P0** |
-| Fix 4: Move EnvironmentHealth | Medium | Low | **P1** |
-| Fix 5: Utility Module | Low | Low | **P1** |
+| Fix 2: Efficient Query Methods | High (perf) | Medium | **P0** |
+| Fix 3: Move EnvironmentHealth | Medium | Low | **P1** |
+| Fix 4: Utility Module | Low | Low | **P1** |
 | Fix 1: SessionType Enum | Medium | Medium | **P2** |
-| Fix 6: API Module | High (future) | High | **P2** |
+| Fix 5: API Module | High (future) | High | **P2** |
+
+Note: Original "Fix 2: Move View Models to Core" was **rejected** after analysis — ThreadRow/SessionRow correctly belong in the TUI layer due to UI-specific fields.
 
 ---
 
-## 7. Innocuous "Leaks" (Acceptable Trade-offs)
+## 7. Refined Architecture: Three-Layer Model
+
+Based on this analysis, the recommended architecture separates concerns into three distinct layers:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ LAYER 1: CORE (Domain Types)                                            │
+│                                                                         │
+│ Location: aiobscura-core/src/types.rs                                   │
+│ Contents: Session, Thread, Message, Plan, Project, BackingModel         │
+│ Principle: Pure DDD entities, normalized, no computed fields            │
+│ Used by: Everything                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ LAYER 2: AGGREGATES (Query Layer)                                       │
+│                                                                         │
+│ Location: aiobscura-core/src/db/repo.rs (aggregate methods)             │
+│ Contents: Efficient queries returning domain types + computed values    │
+│ Examples:                                                               │
+│   - list_threads_with_counts() → Vec<(Thread, i64)>                     │
+│   - get_project_stats() → ProjectStats                                  │
+│   - get_environment_health() → EnvironmentHealth                        │
+│ Principle: First/second-order aggregates over domain types              │
+│ Used by: Any UI that needs efficient data access                        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ LAYER 3: VIEW (UI-Specific Shaping)                                     │
+│                                                                         │
+│ Location: aiobscura/src/thread_row.rs, app.rs                           │
+│ Contents: ThreadRow, SessionRow (with indent_level, is_last_child)      │
+│ Principle: UI-specific decoration and layout concerns                   │
+│ Note: Different UIs will have different view types                      │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Boundaries
+
+| Concern | Layer | Example |
+|---------|-------|---------|
+| Entity identity & relationships | Core | `Thread.parent_thread_id` |
+| Counting, summing, joining | Aggregates | `message_count: i64` |
+| Tree indentation, relative time | View | `indent_level: usize` |
+
+### The Rule
+
+**Ask: "Is this intrinsic to the domain, or is it computed for display?"**
+
+- `Thread.thread_type` → Domain (intrinsic to what a thread IS)
+- `message_count` → Aggregate (computed from messages)
+- `indent_level` → View (for TUI tree rendering)
+
+---
+
+## 8. Innocuous "Leaks" (Acceptable Trade-offs)
 
 Some patterns that **look** like leaks but are actually acceptable:
 
@@ -416,3 +496,5 @@ Some patterns that **look** like leaks but are actually acceptable:
 3. **Message having both emitted_at and observed_at** - Enhancement over requirements; useful for debugging ingestion lag.
 
 4. **Deprecation aliases (AgentType, Event, EventType)** - Proper migration strategy; will be removed after full migration.
+
+5. **ThreadRow/SessionRow in TUI** - Correctly placed; they contain UI-specific fields (`indent_level`, `is_last_child`) that are presentation concerns, not domain or aggregate concerns.
