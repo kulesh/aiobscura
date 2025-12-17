@@ -3630,8 +3630,13 @@ fn render_quick_projects_panel(frame: &mut Frame, app: &App, area: Rect) {
         // Show up to 5 projects with number keys
         for (i, project) in app.projects.iter().take(5).enumerate() {
             let key_num = format!("[{}]", i + 1);
-            let name = truncate_string(&project.name, 16);
-            let sessions_str = format!("{}s", project.session_count);
+            let name = truncate_string(&project.name, 14);
+            // Use "sess" instead of "s" to avoid confusion with seconds
+            let sessions_str = if project.session_count == 1 {
+                "1 sess".to_string()
+            } else {
+                format!("{} sess", project.session_count)
+            };
             let time_str = project
                 .last_activity
                 .map(format_relative_time)
@@ -3642,13 +3647,13 @@ fn render_quick_projects_panel(frame: &mut Frame, app: &App, area: Rect) {
                     format!(" {}", key_num),
                     Style::default().fg(WRAPPED_CYAN).bold(),
                 ),
-                Span::styled(format!(" {:<16}", name), Style::default().fg(Color::White)),
+                Span::styled(format!(" {:<14}", name), Style::default().fg(Color::White)),
                 Span::styled(
-                    format!("{:>4}", sessions_str),
+                    format!("{:>7}", sessions_str),
                     Style::default().fg(WRAPPED_DIM),
                 ),
                 Span::styled(
-                    format!(" {:>8}", time_str),
+                    format!(" {:>7}", time_str),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
