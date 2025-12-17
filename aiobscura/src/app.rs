@@ -8,15 +8,41 @@ use aiobscura_core::analytics::{
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{
-    ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, SessionFilter, Thread,
-    ThreadType,
+    ActiveSession, Assistant, Database, LiveStats, Message, MessageWithContext, Plan,
+    SessionFilter, Thread, ThreadType,
 };
 use anyhow::Result;
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use crate::thread_row::{SessionRow, ThreadRow};
+
+/// Environment health statistics for a single assistant.
+#[derive(Debug, Clone)]
+pub struct AssistantHealth {
+    /// The assistant type
+    pub assistant: Assistant,
+    /// Number of source files tracked
+    pub file_count: i64,
+    /// Total size of source files in bytes
+    pub total_size_bytes: i64,
+    /// Last time files were parsed/synced
+    pub last_synced: Option<DateTime<Utc>>,
+}
+
+/// Overall environment health stats.
+#[derive(Debug, Clone, Default)]
+pub struct EnvironmentHealth {
+    /// Database size in bytes
+    pub database_size_bytes: u64,
+    /// Per-assistant health stats
+    pub assistants: Vec<AssistantHealth>,
+    /// Total session count
+    pub total_sessions: i64,
+    /// Total message count
+    pub total_messages: i64,
+}
 
 /// Sub-tab within Project detail view.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -208,6 +234,8 @@ pub struct App {
     pub live_stats: LiveStats,
     /// Aggregate stats for 24 hour window
     pub live_stats_24h: LiveStats,
+    /// Environment health stats
+    pub environment_health: EnvironmentHealth,
 }
 
 impl App {
@@ -266,7 +294,38 @@ impl App {
             active_sessions: Vec::new(),
             live_stats: LiveStats::default(),
             live_stats_24h: LiveStats::default(),
+            environment_health: EnvironmentHealth::default(),
         }
+    }
+
+    /// Load environment health stats from the database.
+    fn load_environment_health(&mut self) {
+        // Get database size
+        let database_size_bytes = self.db.get_database_size().unwrap_or(0);
+
+        // Get per-assistant stats
+        let assistant_stats = self.db.get_assistant_source_stats().unwrap_or_default();
+        let assistants: Vec<AssistantHealth> = assistant_stats
+            .into_iter()
+            .map(
+                |(assistant, file_count, total_size_bytes, last_synced)| AssistantHealth {
+                    assistant,
+                    file_count,
+                    total_size_bytes,
+                    last_synced,
+                },
+            )
+            .collect();
+
+        // Get total counts
+        let (total_sessions, total_messages, _) = self.db.get_total_counts().unwrap_or((0, 0, 0));
+
+        self.environment_health = EnvironmentHealth {
+            database_size_bytes,
+            assistants,
+            total_sessions,
+            total_messages,
+        };
     }
 
     /// Tick the animation state (call each frame).
@@ -1385,6 +1444,8 @@ impl App {
         // Load dashboard stats and projects for the dashboard panel
         self.dashboard_stats = self.db.get_dashboard_stats().ok();
         self.projects = self.db.list_projects_with_stats().unwrap_or_default();
+        // Load environment health
+        self.load_environment_health();
         self.live_scroll_offset = 0;
         self.live_auto_scroll = true;
         self.view_mode = ViewMode::Live;
@@ -1401,6 +1462,7 @@ impl App {
             self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
             self.dashboard_stats = self.db.get_dashboard_stats().ok();
             self.projects = self.db.list_projects_with_stats().unwrap_or_default();
+            self.load_environment_health();
             self.live_scroll_offset = 0;
             self.live_auto_scroll = true;
             self.view_mode = ViewMode::Live;

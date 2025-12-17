@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ProjectSubTab, ViewMode};
+use crate::app::{App, EnvironmentHealth, ProjectSubTab, ViewMode};
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -3433,14 +3433,17 @@ fn render_live_view(frame: &mut Frame, app: &App) {
     let projects_count = app.projects.len().min(5);
     let projects_height = (projects_count.max(2) + 2) as u16; // +2 for border
 
-    // Use the larger of the two for the middle panel
-    let middle_panel_height = sessions_height.max(projects_height);
+    // Environment panel needs 4 lines (db + 2 agents + border)
+    let env_height: u16 = 5;
+
+    // Use the larger of all three for the middle panel
+    let middle_panel_height = sessions_height.max(projects_height).max(env_height);
 
     // Layout: tab header, dashboard summary, middle panels, message stream, footer
     let chunks = Layout::vertical([
         Constraint::Length(2),                   // Tab header
         Constraint::Length(6),                   // Dashboard summary (stats + heatmap)
-        Constraint::Length(middle_panel_height), // Quick Projects | Active Sessions
+        Constraint::Length(middle_panel_height), // Projects | Environment | Sessions
         Constraint::Min(5),                      // Message stream
         Constraint::Length(1),                   // Footer
     ])
@@ -3452,15 +3455,17 @@ fn render_live_view(frame: &mut Frame, app: &App) {
     // === Dashboard Summary ===
     render_live_dashboard_summary(frame, app, chunks[1]);
 
-    // === Middle Panel: Quick Projects | Active Sessions ===
+    // === Middle Panel: Recent Projects | Environment | Active Sessions ===
     let middle_chunks = Layout::horizontal([
-        Constraint::Percentage(40), // Quick Projects
-        Constraint::Percentage(60), // Active Sessions
+        Constraint::Percentage(35), // Recent Projects
+        Constraint::Percentage(30), // Environment Health
+        Constraint::Percentage(35), // Active Sessions
     ])
     .split(chunks[2]);
 
     render_quick_projects_panel(frame, app, middle_chunks[0]);
-    render_active_sessions_panel(frame, app, middle_chunks[1]);
+    render_environment_health_panel(frame, &app.environment_health, middle_chunks[1]);
+    render_active_sessions_panel(frame, app, middle_chunks[2]);
 
     // === Message Stream ===
     render_live_message_stream(frame, app, chunks[3]);
@@ -3662,6 +3667,89 @@ fn render_quick_projects_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+/// Render the environment health panel showing agent status and database info.
+fn render_environment_health_panel(frame: &mut Frame, health: &EnvironmentHealth, area: Rect) {
+    let block = Block::default()
+        .title(" Environment ")
+        .title_style(Style::default().fg(LIVE_INDICATOR).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_LIVE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Database info line
+    let db_size = format_bytes(health.database_size_bytes);
+    lines.push(Line::from(vec![
+        Span::styled(" Database  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(db_size, Style::default().fg(WRAPPED_CYAN).bold()),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("{} sess", health.total_sessions),
+            Style::default().fg(WRAPPED_DIM),
+        ),
+    ]));
+
+    // Show each assistant with status
+    // Agents we know about (even if no data yet)
+    let known_assistants = [
+        (Assistant::ClaudeCode, "Claude Code"),
+        (Assistant::Codex, "Codex"),
+    ];
+
+    for (assistant, name) in known_assistants {
+        // Find stats for this assistant
+        let stats = health.assistants.iter().find(|a| a.assistant == assistant);
+
+        let (status_icon, status_color, detail) = match stats {
+            Some(s) if s.file_count > 0 => {
+                let sync_info = s
+                    .last_synced
+                    .map(format_relative_time)
+                    .unwrap_or_else(|| "—".to_string());
+                (
+                    "✓",
+                    WRAPPED_LIME,
+                    format!("{} files  {}", s.file_count, sync_info),
+                )
+            }
+            _ => ("○", WRAPPED_DIM, "no logs".to_string()),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", status_icon),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(format!("{:<11}", name), Style::default().fg(Color::White)),
+            Span::styled(detail, Style::default().fg(WRAPPED_DIM)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+/// Format bytes as human-readable size (e.g., "42 MB").
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Render the active sessions panel showing threads with recent activity.
