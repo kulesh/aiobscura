@@ -2912,6 +2912,75 @@ impl Database {
 
         Ok(messages)
     }
+
+    // ========== Environment Health ==========
+
+    /// Get the database file size in bytes.
+    pub fn get_database_size(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+
+        let page_count: u64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: u64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+
+        Ok(page_count * page_size)
+    }
+
+    /// Get environment health stats for each assistant.
+    /// Returns a list of (assistant, file_count, total_size_bytes, last_parsed_at).
+    pub fn get_assistant_source_stats(
+        &self,
+    ) -> Result<Vec<(Assistant, i64, i64, Option<DateTime<Utc>>)>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                assistant,
+                COUNT(*) as file_count,
+                COALESCE(SUM(size_bytes), 0) as total_size,
+                MAX(last_parsed_at) as last_parsed
+            FROM source_files
+            GROUP BY assistant
+            ORDER BY assistant
+            "#,
+        )?;
+
+        let rows: Vec<(Assistant, i64, i64, Option<DateTime<Utc>>)> = stmt
+            .query_map([], |row| {
+                let assistant_str: String = row.get(0)?;
+                let last_parsed_str: Option<String> = row.get(3)?;
+                let last_parsed = last_parsed_str
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok((
+                    assistant_str
+                        .parse()
+                        .unwrap_or(crate::types::Assistant::ClaudeCode),
+                    row.get(1)?,
+                    row.get(2)?,
+                    last_parsed,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Get total counts for environment overview.
+    pub fn get_total_counts(&self) -> Result<(i64, i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+
+        let session_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+        let message_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+        let source_file_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM source_files", [], |row| row.get(0))?;
+
+        Ok((session_count, message_count, source_file_count))
+    }
 }
 
 /// Filter for listing sessions

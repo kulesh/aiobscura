@@ -8,15 +8,41 @@ use aiobscura_core::analytics::{
 };
 use aiobscura_core::db::{FileStats, ToolStats};
 use aiobscura_core::{
-    ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, SessionFilter, Thread,
-    ThreadType,
+    ActiveSession, Assistant, Database, LiveStats, Message, MessageWithContext, Plan,
+    SessionFilter, Thread, ThreadType,
 };
 use anyhow::Result;
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use crate::thread_row::{SessionRow, ThreadRow};
+
+/// Environment health statistics for a single assistant.
+#[derive(Debug, Clone)]
+pub struct AssistantHealth {
+    /// The assistant type
+    pub assistant: Assistant,
+    /// Number of source files tracked
+    pub file_count: i64,
+    /// Total size of source files in bytes
+    pub total_size_bytes: i64,
+    /// Last time files were parsed/synced
+    pub last_synced: Option<DateTime<Utc>>,
+}
+
+/// Overall environment health stats.
+#[derive(Debug, Clone, Default)]
+pub struct EnvironmentHealth {
+    /// Database size in bytes
+    pub database_size_bytes: u64,
+    /// Per-assistant health stats
+    pub assistants: Vec<AssistantHealth>,
+    /// Total session count
+    pub total_sessions: i64,
+    /// Total message count
+    pub total_messages: i64,
+}
 
 /// Sub-tab within Project detail view.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -204,8 +230,12 @@ pub struct App {
     pub live_auto_scroll: bool,
     /// Active sessions for the live view (threads with recent activity)
     pub active_sessions: Vec<ActiveSession>,
-    /// Aggregate stats for the live view's toolbar
+    /// Aggregate stats for the live view's toolbar (30 min window)
     pub live_stats: LiveStats,
+    /// Aggregate stats for 24 hour window
+    pub live_stats_24h: LiveStats,
+    /// Environment health stats
+    pub environment_health: EnvironmentHealth,
 }
 
 impl App {
@@ -263,7 +293,39 @@ impl App {
             live_auto_scroll: true,
             active_sessions: Vec::new(),
             live_stats: LiveStats::default(),
+            live_stats_24h: LiveStats::default(),
+            environment_health: EnvironmentHealth::default(),
         }
+    }
+
+    /// Load environment health stats from the database.
+    fn load_environment_health(&mut self) {
+        // Get database size
+        let database_size_bytes = self.db.get_database_size().unwrap_or(0);
+
+        // Get per-assistant stats
+        let assistant_stats = self.db.get_assistant_source_stats().unwrap_or_default();
+        let assistants: Vec<AssistantHealth> = assistant_stats
+            .into_iter()
+            .map(
+                |(assistant, file_count, total_size_bytes, last_synced)| AssistantHealth {
+                    assistant,
+                    file_count,
+                    total_size_bytes,
+                    last_synced,
+                },
+            )
+            .collect();
+
+        // Get total counts
+        let (total_sessions, total_messages, _) = self.db.get_total_counts().unwrap_or((0, 0, 0));
+
+        self.environment_health = EnvironmentHealth {
+            database_size_bytes,
+            assistants,
+            total_sessions,
+            total_messages,
+        };
     }
 
     /// Tick the animation state (call each frame).
@@ -1338,8 +1400,37 @@ impl App {
                 self.live_scroll_offset = self.live_scroll_offset.saturating_add(10);
                 self.live_auto_scroll = false;
             }
+            // Number keys 1-5 jump to project by index (quick project switcher)
+            KeyCode::Char(c @ '1'..='5') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.projects.len() {
+                    // Navigate to project detail
+                    let project = &self.projects[idx];
+                    self.open_project_detail_by_id(&project.id.clone(), &project.name.clone());
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Open project detail view by ID and name (for quick navigation).
+    fn open_project_detail_by_id(&mut self, project_id: &str, project_name: &str) {
+        // Load project stats
+        if let Ok(Some(stats)) = self.db.get_project_stats(project_id) {
+            self.project_stats = Some(stats);
+        }
+        // Load sessions for the sessions sub-tab
+        let _ = self.load_project_sessions(project_id);
+        // Load plans for the plans sub-tab
+        let _ = self.load_project_plans(project_id);
+        // Load files for the files sub-tab
+        let _ = self.load_project_files(project_id);
+
+        self.view_mode = ViewMode::ProjectDetail {
+            project_id: project_id.to_string(),
+            project_name: project_name.to_string(),
+            sub_tab: ProjectSubTab::Overview,
+        };
     }
 
     /// Open the live activity view (called from main for startup).
@@ -1347,7 +1438,14 @@ impl App {
         self.live_messages = self.db.get_recent_messages(50)?;
         // Get sessions active in last 30 minutes for the panel
         self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
+        // Load stats for both time windows (30m and 24h)
         self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
+        // Load dashboard stats and projects for the dashboard panel
+        self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        self.projects = self.db.list_projects_with_stats().unwrap_or_default();
+        // Load environment health
+        self.load_environment_health();
         self.live_scroll_offset = 0;
         self.live_auto_scroll = true;
         self.view_mode = ViewMode::Live;
@@ -1361,7 +1459,10 @@ impl App {
             self.live_messages = messages;
             self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
             self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+            self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
             self.dashboard_stats = self.db.get_dashboard_stats().ok();
+            self.projects = self.db.list_projects_with_stats().unwrap_or_default();
+            self.load_environment_health();
             self.live_scroll_offset = 0;
             self.live_auto_scroll = true;
             self.view_mode = ViewMode::Live;
@@ -1377,9 +1478,10 @@ impl App {
                 self.live_scroll_offset = 0;
             }
         }
-        // Also refresh active sessions and stats
+        // Also refresh active sessions and stats (both time windows)
         self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
         self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
+        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
         Ok(())
     }
 
