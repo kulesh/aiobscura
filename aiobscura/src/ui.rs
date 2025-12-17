@@ -3683,14 +3683,17 @@ fn render_environment_health_panel(frame: &mut Frame, health: &EnvironmentHealth
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Database info line
+    // Database info line - show size, sessions, and messages
     let db_size = format_bytes(health.database_size_bytes);
     lines.push(Line::from(vec![
-        Span::styled(" Database  ", Style::default().fg(WRAPPED_DIM)),
+        Span::styled(" DB ", Style::default().fg(WRAPPED_DIM)),
         Span::styled(db_size, Style::default().fg(WRAPPED_CYAN).bold()),
         Span::styled("  ", Style::default()),
         Span::styled(
-            format!("{} sess", health.total_sessions),
+            format!(
+                "{} sess  {} msgs",
+                health.total_sessions, health.total_messages
+            ),
             Style::default().fg(WRAPPED_DIM),
         ),
     ]));
@@ -3698,7 +3701,7 @@ fn render_environment_health_panel(frame: &mut Frame, health: &EnvironmentHealth
     // Show each assistant with status
     // Agents we know about (even if no data yet)
     let known_assistants = [
-        (Assistant::ClaudeCode, "Claude Code"),
+        (Assistant::ClaudeCode, "Claude"),
         (Assistant::Codex, "Codex"),
     ];
 
@@ -3708,15 +3711,12 @@ fn render_environment_health_panel(frame: &mut Frame, health: &EnvironmentHealth
 
         let (status_icon, status_color, detail) = match stats {
             Some(s) if s.file_count > 0 => {
+                let size_str = format_bytes(s.total_size_bytes as u64);
                 let sync_info = s
                     .last_synced
                     .map(format_relative_time)
                     .unwrap_or_else(|| "—".to_string());
-                (
-                    "✓",
-                    WRAPPED_LIME,
-                    format!("{} files  {}", s.file_count, sync_info),
-                )
+                ("✓", WRAPPED_LIME, format!("{}  {}", size_str, sync_info))
             }
             _ => ("○", WRAPPED_DIM, "no logs".to_string()),
         };
@@ -3726,7 +3726,7 @@ fn render_environment_health_panel(frame: &mut Frame, health: &EnvironmentHealth
                 format!(" {} ", status_icon),
                 Style::default().fg(status_color),
             ),
-            Span::styled(format!("{:<11}", name), Style::default().fg(Color::White)),
+            Span::styled(format!("{:<7}", name), Style::default().fg(Color::White)),
             Span::styled(detail, Style::default().fg(WRAPPED_DIM)),
         ]));
     }
