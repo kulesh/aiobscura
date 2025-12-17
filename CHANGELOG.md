@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2024-12-17
+
+### Added
+
+- **Analytics Plugin Framework**
+  - New `aiobscura-analyze` CLI for running analytics plugins
+  - Edit churn analyzer with metrics: edit count, unique files, churn ratio, high churn detection
+  - Line change metrics (lines added/removed)
+  - Edits by file extension breakdown
+  - First-try rate efficiency metric
+  - Smart high churn detection with burst analysis
+  - Thread-level analytics with session/thread toggle in UI
+
+- **UI Improvements**
+  - Redesigned Live View as development dashboard with multi-window stats
+  - Environment health panel showing assistant status
+  - Adaptive activity heatmap
+  - Session Detail view with merged timeline
+  - Timestamps in Thread Detail view
+  - Caller labels for CLI-invoked prompts vs human input
+
+### Changed
+
+- Replaced Threads tab with Sessions tab in Project view
+- Introduced `AuthorRole::Caller` to distinguish CLI invocations from human input
+
+### Fixed
+
+- **Timestamps**: Implemented dual timestamp model (`emitted_at`/`observed_at`) so "Last Updated" shows actual event time, not ingestion time
+- Added `last_activity_at` column to threads table for accurate activity tracking
+- Codex parser: deduplicate messages, improve semantic accuracy
+- Codex parser: label first user prompt as [caller] (CLI invocation)
+- Codex parser: use [caller] for system-injected context, improve [snapshot] display
+- Tool call/result display in Session Detail view
+- UTF-8 safe string truncation for multi-byte characters
+
 ## [0.1.3] - 2024-12-10
 
 ### Added
@@ -72,7 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/kulesh/aiobscura/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/kulesh/aiobscura/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kulesh/aiobscura/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kulesh/aiobscura/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kulesh/aiobscura/releases/tag/v0.1.0
