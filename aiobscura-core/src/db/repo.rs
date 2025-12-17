@@ -29,6 +29,9 @@ pub struct ToolStats {
     pub breakdown: Vec<(String, i64)>,
 }
 
+/// Stats for an assistant's source files: (assistant, file_count, total_size_bytes, last_parsed_at)
+pub type AssistantSourceStats = (Assistant, i64, i64, Option<DateTime<Utc>>);
+
 /// Token usage statistics.
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
@@ -547,8 +550,8 @@ impl Database {
         conn.execute(
             r#"
             INSERT INTO threads (id, session_id, thread_type, parent_thread_id,
-                                spawned_by_message_id, started_at, ended_at, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                spawned_by_message_id, started_at, ended_at, last_activity_at, metadata)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
                 thread.id,
@@ -558,6 +561,7 @@ impl Database {
                 thread.spawned_by_message_id,
                 thread.started_at.to_rfc3339(),
                 thread.ended_at.map(|t| t.to_rfc3339()),
+                thread.last_activity_at.map(|t| t.to_rfc3339()),
                 thread.metadata.to_string(),
             ],
         )?;
@@ -593,6 +597,7 @@ impl Database {
         let thread_type_str: String = row.get("thread_type")?;
         let started_at_str: String = row.get("started_at")?;
         let ended_at_str: Option<String> = row.get("ended_at")?;
+        let last_activity_at_str: Option<String> = row.get("last_activity_at")?;
         let metadata_str: String = row.get("metadata")?;
 
         Ok(Thread {
@@ -605,6 +610,9 @@ impl Database {
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now()),
             ended_at: ended_at_str
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc)),
+            last_activity_at: last_activity_at_str
                 .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
             metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
@@ -690,21 +698,23 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
-            INSERT INTO messages (session_id, thread_id, seq, ts, author_role, author_name,
-                                  message_type, content, tool_name, tool_input, tool_result,
+            INSERT INTO messages (session_id, thread_id, seq, emitted_at, observed_at, author_role, author_name,
+                                  message_type, content, content_type, tool_name, tool_input, tool_result,
                                   tokens_in, tokens_out, duration_ms, source_file_path,
                                   source_offset, source_line, raw_data, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             "#,
             params![
                 message.session_id,
                 message.thread_id,
                 message.seq,
-                message.ts.to_rfc3339(),
+                message.emitted_at.to_rfc3339(),
+                message.observed_at.to_rfc3339(),
                 message.author_role.as_str(),
                 message.author_name,
                 message.message_type.as_str(),
                 message.content,
+                message.content_type.as_ref().map(|ct| ct.to_string()),
                 message.tool_name,
                 message.tool_input.as_ref().map(|v| v.to_string()),
                 message.tool_result,
@@ -729,21 +739,23 @@ impl Database {
         for message in messages {
             tx.execute(
                 r#"
-                INSERT INTO messages (session_id, thread_id, seq, ts, author_role, author_name,
-                                      message_type, content, tool_name, tool_input, tool_result,
+                INSERT INTO messages (session_id, thread_id, seq, emitted_at, observed_at, author_role, author_name,
+                                      message_type, content, content_type, tool_name, tool_input, tool_result,
                                       tokens_in, tokens_out, duration_ms, source_file_path,
                                       source_offset, source_line, raw_data, metadata)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
                 "#,
                 params![
                     message.session_id,
                     message.thread_id,
                     message.seq,
-                    message.ts.to_rfc3339(),
+                    message.emitted_at.to_rfc3339(),
+                    message.observed_at.to_rfc3339(),
                     message.author_role.as_str(),
                     message.author_name,
                     message.message_type.as_str(),
                     message.content,
+                    message.content_type.as_ref().map(|ct| ct.to_string()),
                     message.tool_name,
                     message.tool_input.as_ref().map(|v| v.to_string()),
                     message.tool_result,
@@ -766,8 +778,9 @@ impl Database {
     /// Get messages for a session
     pub fn get_session_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC LIMIT ?")?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY emitted_at ASC LIMIT ?",
+        )?;
 
         let messages = stmt
             .query_map(params![session_id, limit as i64], |row| {
@@ -828,12 +841,12 @@ impl Database {
         .map(|opt| opt.flatten())
     }
 
-    /// Get the last message timestamp for a thread.
+    /// Get the last activity timestamp for a thread.
     pub fn get_thread_last_activity(&self, thread_id: &str) -> Result<Option<DateTime<Utc>>> {
         let conn = self.conn.lock().unwrap();
         let result: Option<String> = conn
             .query_row(
-                "SELECT MAX(ts) FROM messages WHERE thread_id = ?",
+                "SELECT last_activity_at FROM threads WHERE id = ?",
                 [thread_id],
                 |row| row.get(0),
             )
@@ -841,8 +854,8 @@ impl Database {
             .map_err(Error::from)?
             .flatten();
 
-        Ok(result.and_then(|ts_str| {
-            DateTime::parse_from_rfc3339(&ts_str)
+        Ok(result.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
                 .map(|dt| dt.with_timezone(&Utc))
                 .ok()
         }))
@@ -850,16 +863,19 @@ impl Database {
 
     /// Get the latest message timestamp in the database.
     /// Used by TUI to detect when new data has been synced.
+    /// Note: Uses observed_at since we want to detect new ingestions, not event times.
     pub fn get_latest_message_ts(&self) -> Result<Option<DateTime<Utc>>> {
         let conn = self.conn.lock().unwrap();
         let result: Option<String> = conn
-            .query_row("SELECT MAX(ts) FROM messages", [], |row| row.get(0))
+            .query_row("SELECT MAX(observed_at) FROM messages", [], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(Error::from)?
             .flatten();
 
-        Ok(result.and_then(|ts_str| {
-            DateTime::parse_from_rfc3339(&ts_str)
+        Ok(result.and_then(|observed_at_str| {
+            DateTime::parse_from_rfc3339(&observed_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .ok()
         }))
@@ -871,7 +887,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let result: Option<String> = conn
             .query_row(
-                "SELECT MAX(ts) FROM messages WHERE session_id = ?",
+                "SELECT MAX(emitted_at) FROM messages WHERE session_id = ?",
                 [session_id],
                 |row| row.get(0),
             )
@@ -879,8 +895,8 @@ impl Database {
             .map_err(Error::from)?
             .flatten();
 
-        Ok(result.and_then(|ts_str| {
-            DateTime::parse_from_rfc3339(&ts_str)
+        Ok(result.and_then(|emitted_at_str| {
+            DateTime::parse_from_rfc3339(&emitted_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .ok()
         }))
@@ -1076,7 +1092,9 @@ impl Database {
     fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         let author_role_str: String = row.get("author_role")?;
         let message_type_str: String = row.get("message_type")?;
-        let ts_str: String = row.get("ts")?;
+        let emitted_at_str: String = row.get("emitted_at")?;
+        let observed_at_str: String = row.get("observed_at")?;
+        let content_type_str: Option<String> = row.get("content_type")?;
         let tool_input_str: Option<String> = row.get("tool_input")?;
         let raw_data_str: String = row.get("raw_data")?;
         let metadata_str: String = row.get("metadata")?;
@@ -1086,14 +1104,17 @@ impl Database {
             session_id: row.get("session_id")?,
             thread_id: row.get("thread_id")?,
             seq: row.get("seq")?,
-            ts: DateTime::parse_from_rfc3339(&ts_str)
+            emitted_at: DateTime::parse_from_rfc3339(&emitted_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            observed_at: DateTime::parse_from_rfc3339(&observed_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now()),
             author_role: author_role_str.parse().unwrap_or(AuthorRole::System),
             author_name: row.get("author_name")?,
             message_type: message_type_str.parse().unwrap_or(MessageType::Response),
             content: row.get("content")?,
-            content_type: None, // TODO: Add content_type column to database schema
+            content_type: content_type_str.and_then(|s| s.parse().ok()),
             tool_name: row.get("tool_name")?,
             tool_input: tool_input_str.and_then(|s| serde_json::from_str(&s).ok()),
             tool_result: row.get("tool_result")?,
@@ -1863,7 +1884,7 @@ impl Database {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT CAST(strftime('%H', ts) AS INTEGER) as hour, COUNT(*) as cnt
+            SELECT CAST(strftime('%H', emitted_at) AS INTEGER) as hour, COUNT(*) as cnt
             FROM messages m
             JOIN threads t ON m.thread_id = t.id
             JOIN sessions s ON t.session_id = s.id
@@ -1900,7 +1921,7 @@ impl Database {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT CAST(strftime('%w', ts) AS INTEGER) as dow, COUNT(*) as cnt
+            SELECT CAST(strftime('%w', emitted_at) AS INTEGER) as dow, COUNT(*) as cnt
             FROM messages m
             JOIN threads t ON m.thread_id = t.id
             JOIN sessions s ON t.session_id = s.id
@@ -2003,18 +2024,18 @@ impl Database {
                     SELECT
                         s.id as session_id,
                         p.name as project_name,
-                        date(m.ts) as session_date,
-                        MIN(m.ts) as first_msg,
-                        MAX(m.ts) as last_msg,
-                        (julianday(MAX(m.ts)) - julianday(MIN(m.ts))) * 86400 as duration_secs,
+                        date(m.emitted_at) as session_date,
+                        MIN(m.emitted_at) as first_msg,
+                        MAX(m.emitted_at) as last_msg,
+                        (julianday(MAX(m.emitted_at)) - julianday(MIN(m.emitted_at))) * 86400 as duration_secs,
                         COUNT(CASE WHEN m.message_type = 'tool_call' THEN 1 END) as tool_calls,
                         COALESCE(SUM(m.tokens_in + m.tokens_out), 0) as tokens
                     FROM messages m
                     JOIN threads t ON m.thread_id = t.id
                     JOIN sessions s ON t.session_id = s.id
                     LEFT JOIN projects p ON s.project_id = p.id
-                    WHERE m.ts >= ? AND m.ts < ?
-                    GROUP BY s.id, date(m.ts)
+                    WHERE m.emitted_at >= ? AND m.emitted_at < ?
+                    GROUP BY s.id, date(m.emitted_at)
                     HAVING COUNT(*) > 1
                 )
                 SELECT
@@ -2392,7 +2413,7 @@ impl Database {
         let mut hourly = [0i64; 24];
         let mut hourly_stmt = conn.prepare(
             r#"
-            SELECT CAST(strftime('%H', m.ts) AS INTEGER) as hour, COUNT(*) as cnt
+            SELECT CAST(strftime('%H', m.emitted_at) AS INTEGER) as hour, COUNT(*) as cnt
             FROM messages m
             JOIN threads t ON m.thread_id = t.id
             JOIN sessions s ON t.session_id = s.id
@@ -2414,7 +2435,7 @@ impl Database {
         let mut daily = [0i64; 7];
         let mut daily_stmt = conn.prepare(
             r#"
-            SELECT CAST(strftime('%w', m.ts) AS INTEGER) as dow, COUNT(*) as cnt
+            SELECT CAST(strftime('%w', m.emitted_at) AS INTEGER) as dow, COUNT(*) as cnt
             FROM messages m
             JOIN threads t ON m.thread_id = t.id
             JOIN sessions s ON t.session_id = s.id
@@ -2551,7 +2572,7 @@ impl Database {
         {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT CAST(strftime('%H', ts) AS INTEGER) as hour, COUNT(*) as cnt
+                SELECT CAST(strftime('%H', emitted_at) AS INTEGER) as hour, COUNT(*) as cnt
                 FROM messages m
                 JOIN threads t ON m.thread_id = t.id
                 JOIN sessions s ON t.session_id = s.id
@@ -2661,11 +2682,11 @@ impl Database {
             let mut stmt = conn.prepare(
                 r#"
                 SELECT
-                    CAST(julianday(date('now', 'localtime')) - julianday(DATE(ts)) AS INTEGER) as days_ago,
+                    CAST(julianday(date('now', 'localtime')) - julianday(DATE(emitted_at)) AS INTEGER) as days_ago,
                     COUNT(*) as count
                 FROM messages
-                WHERE ts >= datetime('now', '-28 days')
-                GROUP BY DATE(ts)
+                WHERE emitted_at >= datetime('now', '-28 days')
+                GROUP BY DATE(emitted_at)
                 "#,
             )?;
             let rows =
@@ -2688,7 +2709,7 @@ impl Database {
         let peak_hour: u8 = conn
             .query_row(
                 r#"
-                SELECT CAST(strftime('%H', ts) AS INTEGER) as hour
+                SELECT CAST(strftime('%H', emitted_at) AS INTEGER) as hour
                 FROM messages
                 GROUP BY hour
                 ORDER BY COUNT(*) DESC
@@ -2704,7 +2725,7 @@ impl Database {
         let busiest_day: u8 = conn
             .query_row(
                 r#"
-                SELECT CAST(strftime('%w', ts) AS INTEGER) as dow
+                SELECT CAST(strftime('%w', emitted_at) AS INTEGER) as dow
                 FROM messages
                 GROUP BY dow
                 ORDER BY COUNT(*) DESC
@@ -2751,14 +2772,14 @@ impl Database {
                 COALESCE(p.name, '(no project)') as project_name,
                 t.thread_type,
                 s.assistant,
-                MAX(m.ts) as last_activity,
+                MAX(m.emitted_at) as last_activity,
                 COUNT(m.id) as message_count,
                 t.parent_thread_id
             FROM threads t
             JOIN sessions s ON t.session_id = s.id
             LEFT JOIN projects p ON s.project_id = p.id
             JOIN messages m ON m.thread_id = t.id
-            WHERE m.ts >= datetime('now', ? || ' minutes')
+            WHERE m.emitted_at >= datetime('now', ? || ' minutes')
             GROUP BY t.id
             ORDER BY last_activity DESC
             "#,
@@ -2810,7 +2831,7 @@ impl Database {
                 COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) as total_tokens,
                 COALESCE(SUM(CASE WHEN message_type = 'tool_call' THEN 1 ELSE 0 END), 0) as total_tool_calls
             FROM messages
-            WHERE ts >= datetime('now', ? || ' minutes')
+            WHERE emitted_at >= datetime('now', ? || ' minutes')
             "#,
         )?;
 
@@ -2826,7 +2847,7 @@ impl Database {
             FROM threads t
             JOIN messages m ON m.thread_id = t.id
             WHERE t.thread_type = 'agent'
-              AND m.ts >= datetime('now', ? || ' minutes')
+              AND m.emitted_at >= datetime('now', ? || ' minutes')
             "#,
         )?;
 
@@ -2854,7 +2875,7 @@ impl Database {
             r#"
             SELECT
                 m.id,
-                m.ts,
+                m.emitted_at,
                 s.assistant,
                 COALESCE(p.name, '(no project)') as project_name,
                 CASE
@@ -2875,21 +2896,21 @@ impl Database {
             JOIN threads t ON m.thread_id = t.id
             JOIN sessions s ON t.session_id = s.id
             LEFT JOIN projects p ON s.project_id = p.id
-            ORDER BY m.ts DESC
+            ORDER BY m.emitted_at DESC
             LIMIT ?
             "#,
         )?;
 
         let messages: Vec<crate::types::MessageWithContext> = stmt
             .query_map([limit as i64], |row| {
-                let ts_str: String = row.get(1)?;
+                let emitted_at_str: String = row.get(1)?;
                 let assistant_str: String = row.get(2)?;
                 let author_role_str: String = row.get(5)?;
                 let message_type_str: String = row.get(6)?;
 
                 Ok(crate::types::MessageWithContext {
                     id: row.get(0)?,
-                    ts: chrono::DateTime::parse_from_rfc3339(&ts_str)
+                    emitted_at: chrono::DateTime::parse_from_rfc3339(&emitted_at_str)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now()),
                     assistant: assistant_str
@@ -2927,9 +2948,7 @@ impl Database {
 
     /// Get environment health stats for each assistant.
     /// Returns a list of (assistant, file_count, total_size_bytes, last_parsed_at).
-    pub fn get_assistant_source_stats(
-        &self,
-    ) -> Result<Vec<(Assistant, i64, i64, Option<DateTime<Utc>>)>> {
+    pub fn get_assistant_source_stats(&self) -> Result<Vec<AssistantSourceStats>> {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
@@ -3024,6 +3043,7 @@ mod tests {
             spawned_by_message_id: None,
             started_at: Utc::now(),
             ended_at: None,
+            last_activity_at: Some(Utc::now()),
             metadata: serde_json::json!({}),
         }
     }
@@ -3048,7 +3068,8 @@ mod tests {
             session_id: session_id.to_string(),
             thread_id: thread_id.to_string(),
             seq,
-            ts: Utc::now(),
+            emitted_at: Utc::now(),
+            observed_at: Utc::now(),
             author_role: AuthorRole::Human,
             author_name: None,
             message_type: MessageType::Prompt,

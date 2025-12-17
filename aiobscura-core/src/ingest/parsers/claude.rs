@@ -263,14 +263,22 @@ impl AssistantParser for ClaudeCodeParser {
         let mut model_id: Option<String> = None;
         let mut cwd: Option<String> = None;
         let mut git_branch: Option<String> = None;
-        let mut first_timestamp: Option<DateTime<Utc>> = None;
-        let mut last_timestamp: Option<DateTime<Utc>> = None;
+        // Capture observed_at once per parse invocation
+        let observed_at = Utc::now();
+        // Track first/last timestamps for session metadata; initialized to observed_at
+        // so records without timestamps can use the last seen value as approximation
+        let mut first_timestamp: DateTime<Utc> = observed_at;
+        let mut last_timestamp: DateTime<Utc> = observed_at;
 
         // Track plan slugs (sessions can have multiple plans)
         let mut slugs: Vec<String> = Vec::new();
 
         // Track uuid -> seq mapping for agent spawn linkage
         let mut uuid_to_seq: HashMap<String, i32> = HashMap::new();
+
+        // Track last activity per thread (for setting Thread.last_activity_at)
+        // Only tracks non-context messages (excludes summary, file-history-snapshot, etc.)
+        let mut thread_last_activity: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         let source_path = ctx.path.to_string_lossy().to_string();
 
@@ -362,18 +370,19 @@ impl AssistantParser for ClaudeCodeParser {
                 }
             }
 
-            // Parse timestamp
-            let ts = record
+            // Parse timestamp - use last seen if record has no timestamp (approximation)
+            let emitted_at = record
                 .timestamp
                 .as_ref()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
+                .unwrap_or(last_timestamp);
 
-            if first_timestamp.is_none() {
-                first_timestamp = Some(ts);
+            // Update first_timestamp only on first record (when it equals observed_at)
+            if first_timestamp == observed_at {
+                first_timestamp = emitted_at;
             }
-            last_timestamp = Some(ts);
+            last_timestamp = emitted_at;
 
             // Create thread on first message if needed
             if thread_id.is_none() {
@@ -390,8 +399,9 @@ impl AssistantParser for ClaudeCodeParser {
                     thread_type,
                     parent_thread_id: None,
                     spawned_by_message_id: None,
-                    started_at: ts,
+                    started_at: emitted_at,
                     ended_at: None,
+                    last_activity_at: None, // Set at the end of parsing
                     metadata: serde_json::json!({}),
                 });
             }
@@ -415,7 +425,8 @@ impl AssistantParser for ClaudeCodeParser {
                 thread_id.as_ref().unwrap_or(&String::new()),
                 thread_type,
                 &mut seq,
-                ts,
+                emitted_at,
+                observed_at,
                 &source_path,
                 record_offset as i64,
                 Some(line_number),
@@ -448,7 +459,24 @@ impl AssistantParser for ClaudeCodeParser {
                 }
             }
 
+            // Update thread's last activity for non-context messages
+            if let Some(ref tid) = thread_id {
+                for msg in &messages {
+                    if msg.message_type != MessageType::Context {
+                        thread_last_activity.insert(tid.clone(), emitted_at);
+                        break; // Only need to update once per record
+                    }
+                }
+            }
+
             result.messages.extend(messages);
+        }
+
+        // Set last_activity_at on threads before returning
+        for thread in &mut result.threads {
+            if let Some(&last_activity) = thread_last_activity.get(&thread.id) {
+                thread.last_activity_at = Some(last_activity);
+            }
         }
 
         // Create/update session and project
@@ -464,8 +492,8 @@ impl AssistantParser for ClaudeCodeParser {
                     id: proj_id.clone(),
                     path: PathBuf::from(cwd_path),
                     name: Some(proj_name),
-                    created_at: first_timestamp.unwrap_or_else(Utc::now),
-                    last_activity_at: last_timestamp,
+                    created_at: first_timestamp,
+                    last_activity_at: Some(last_timestamp),
                     metadata: serde_json::json!({}),
                 });
 
@@ -479,9 +507,9 @@ impl AssistantParser for ClaudeCodeParser {
                 assistant: Assistant::ClaudeCode,
                 backing_model_id: model_id.map(|m| format!("anthropic:{}", m)),
                 project_id,
-                started_at: first_timestamp.unwrap_or_else(Utc::now),
-                last_activity_at: last_timestamp,
-                status: SessionStatus::from_last_activity(last_timestamp),
+                started_at: first_timestamp,
+                last_activity_at: Some(last_timestamp),
+                status: SessionStatus::from_last_activity(Some(last_timestamp)),
                 source_file_path: source_path,
                 metadata: serde_json::json!({
                     "project_path": project_path,
@@ -620,7 +648,8 @@ impl ClaudeCodeParser {
         thread_id: &str,
         thread_type: ThreadType,
         seq: &mut i32,
-        ts: DateTime<Utc>,
+        emitted_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
         source_path: &str,
         source_offset: i64,
         source_line: Option<i32>,
@@ -656,7 +685,8 @@ impl ClaudeCodeParser {
                                         session_id: session_id.to_string(),
                                         thread_id: thread_id.to_string(),
                                         seq: *seq,
-                                        ts,
+                                        emitted_at,
+                                        observed_at,
                                         author_role: AuthorRole::Assistant,
                                         author_name: None,
                                         message_type: MessageType::Response,
@@ -687,7 +717,8 @@ impl ClaudeCodeParser {
                                                     session_id: session_id.to_string(),
                                                     thread_id: thread_id.to_string(),
                                                     seq: *seq,
-                                                    ts,
+                                                    emitted_at,
+                                                    observed_at,
                                                     author_role: AuthorRole::Assistant,
                                                     author_name: None,
                                                     message_type: MessageType::Response,
@@ -714,7 +745,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: AuthorRole::Assistant,
                                                 author_name: None,
                                                 message_type: MessageType::ToolCall,
@@ -748,7 +780,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: AuthorRole::Assistant,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
@@ -778,7 +811,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: AuthorRole::Assistant,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
@@ -810,7 +844,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: AuthorRole::Assistant,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
@@ -852,7 +887,8 @@ impl ClaudeCodeParser {
                                         session_id: session_id.to_string(),
                                         thread_id: thread_id.to_string(),
                                         seq: *seq,
-                                        ts,
+                                        emitted_at,
+                                        observed_at,
                                         author_role: user_role,
                                         author_name: None,
                                         message_type: MessageType::Prompt,
@@ -883,7 +919,8 @@ impl ClaudeCodeParser {
                                                     session_id: session_id.to_string(),
                                                     thread_id: thread_id.to_string(),
                                                     seq: *seq,
-                                                    ts,
+                                                    emitted_at,
+                                                    observed_at,
                                                     author_role: user_role,
                                                     author_name: None,
                                                     message_type: MessageType::Prompt,
@@ -918,7 +955,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: AuthorRole::Tool,
                                                 author_name: None,
                                                 message_type: if *is_error {
@@ -955,7 +993,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Prompt,
@@ -985,7 +1024,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
@@ -1017,7 +1057,8 @@ impl ClaudeCodeParser {
                                                 session_id: session_id.to_string(),
                                                 thread_id: thread_id.to_string(),
                                                 seq: *seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role: user_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
@@ -1055,7 +1096,8 @@ impl ClaudeCodeParser {
                     session_id: session_id.to_string(),
                     thread_id: thread_id.to_string(),
                     seq: *seq,
-                    ts,
+                    emitted_at,
+                    observed_at,
                     author_role: AuthorRole::System,
                     author_name: Some(record_type.to_string()),
                     message_type: MessageType::Context,

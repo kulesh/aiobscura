@@ -421,6 +421,8 @@ pub struct Thread {
     pub started_at: DateTime<Utc>,
     /// When the thread ended (if known)
     pub ended_at: Option<DateTime<Utc>>,
+    /// Last message timestamp for this thread (excluding context messages)
+    pub last_activity_at: Option<DateTime<Utc>>,
     /// Extensible metadata
     pub metadata: serde_json::Value,
 }
@@ -634,6 +636,52 @@ impl ContentType {
     }
 }
 
+impl std::fmt::Display for ContentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContentType::Text => write!(f, "text"),
+            ContentType::Image {
+                media_type,
+                encoding,
+            } => {
+                if let Some(enc) = encoding {
+                    write!(f, "image/{};{}", media_type, enc)
+                } else {
+                    write!(f, "image/{}", media_type)
+                }
+            }
+            ContentType::Unknown(s) => write!(f, "unknown:{}", s),
+        }
+    }
+}
+
+impl std::str::FromStr for ContentType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "text" {
+            Ok(ContentType::Text)
+        } else if let Some(rest) = s.strip_prefix("image/") {
+            // Parse "image/png" or "image/png;base64"
+            if let Some((media, enc)) = rest.split_once(';') {
+                Ok(ContentType::Image {
+                    media_type: media.to_string(),
+                    encoding: Some(enc.to_string()),
+                })
+            } else {
+                Ok(ContentType::Image {
+                    media_type: rest.to_string(),
+                    encoding: None,
+                })
+            }
+        } else if let Some(rest) = s.strip_prefix("unknown:") {
+            Ok(ContentType::Unknown(rest.to_string()))
+        } else {
+            Ok(ContentType::Unknown(s.to_string()))
+        }
+    }
+}
+
 /// A message within a session (the core unit of activity)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -645,8 +693,12 @@ pub struct Message {
     pub thread_id: String,
     /// Sequence number within the thread
     pub seq: i32,
-    /// Timestamp of this message
-    pub ts: DateTime<Utc>,
+
+    // Timestamps
+    /// When the event actually happened (from log file, or approximated from surrounding events)
+    pub emitted_at: DateTime<Utc>,
+    /// When we parsed/ingested this event
+    pub observed_at: DateTime<Utc>,
 
     // Who authored this message
     /// Author role
@@ -988,8 +1040,8 @@ pub type DiscoveredAgent = DiscoveredAssistant;
 pub struct MessageWithContext {
     /// Database ID
     pub id: i64,
-    /// Timestamp of this message
-    pub ts: DateTime<Utc>,
+    /// When the event actually happened
+    pub emitted_at: DateTime<Utc>,
     /// Which assistant produced this message
     pub assistant: Assistant,
     /// Project name (or "(no project)")

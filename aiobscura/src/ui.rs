@@ -231,8 +231,8 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
 
         // For non-main threads, calculate and show duration
         let duration_str = if !matches!(thread_type, ThreadType::Main) && !messages.is_empty() {
-            let first_ts = messages.first().unwrap().ts;
-            let last_ts = messages.last().unwrap().ts;
+            let first_ts = messages.first().unwrap().emitted_at;
+            let last_ts = messages.last().unwrap().emitted_at;
             format!(" ({})", format_group_duration(first_ts, last_ts))
         } else {
             String::new()
@@ -275,7 +275,7 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
             let content_preview = msg.preview(60);
 
             // Format timestamp (HH:MM in local time)
-            let time_str = format_message_time(msg.ts);
+            let time_str = format_message_time(msg.emitted_at);
 
             // Calculate padding for right-aligned timestamp
             let role_part = format!("{} ", role_prefix);
@@ -1107,7 +1107,7 @@ fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static
     let mut lines = Vec::new();
 
     // Format timestamp
-    let time_str = format_message_time(msg.ts);
+    let time_str = format_message_time(msg.emitted_at);
 
     // Header line with icon, label, index, and timestamp
     let counter = format!("[{}/{}]", index, total);
@@ -1157,7 +1157,7 @@ fn format_tool_message(
     let mut lines = Vec::new();
 
     // Format timestamp
-    let time_str = format_message_time(msg.ts);
+    let time_str = format_message_time(msg.emitted_at);
 
     let counter = format!("[{}/{}]", index, total);
     // Calculate padding: icon (2) + space + "Tool: " (6) + tool_name + space + counter
@@ -3959,7 +3959,11 @@ fn render_live_message_stream(frame: &mut Frame, app: &App, area: Rect) {
 /// Format a single message for the live stream.
 fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     // Format: HH:MM:SS [CC] [project/thread] role "preview..."
-    let time_str = msg.ts.with_timezone(&Local).format("%H:%M:%S").to_string();
+    let time_str = msg
+        .emitted_at
+        .with_timezone(&Local)
+        .format("%H:%M:%S")
+        .to_string();
 
     // Assistant badge with distinct colors
     let (assistant_badge, assistant_color) = match msg.assistant {
