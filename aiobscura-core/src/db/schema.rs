@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// SQL migrations, indexed by version number
 const MIGRATIONS: &[&str] = &[
@@ -436,6 +436,77 @@ const MIGRATIONS: &[&str] = &[
     -- Add index for efficient queries by plugin and entity
     CREATE INDEX IF NOT EXISTS idx_plugin_metrics_plugin ON plugin_metrics(plugin_name);
     CREATE INDEX IF NOT EXISTS idx_plugin_metrics_entity ON plugin_metrics(entity_type, entity_id);
+    "#,
+    // Version 6: Dual timestamp model - rename ts to emitted_at, add observed_at
+    r#"
+    -- Recreate messages table with proper timestamp semantics:
+    -- emitted_at: When the event actually happened (from log, or approximated)
+    -- observed_at: When we parsed/ingested the event
+
+    -- Drop old indexes
+    DROP INDEX IF EXISTS idx_messages_session;
+    DROP INDEX IF EXISTS idx_messages_thread;
+    DROP INDEX IF EXISTS idx_messages_ts;
+
+    -- Recreate messages table with new schema
+    DROP TABLE IF EXISTS messages;
+
+    CREATE TABLE messages (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id       TEXT NOT NULL REFERENCES sessions(id),
+        thread_id        TEXT NOT NULL REFERENCES threads(id),
+        seq              INTEGER NOT NULL,
+        emitted_at       DATETIME NOT NULL,   -- when event happened (from log or approximated)
+        observed_at      DATETIME NOT NULL,   -- when we ingested it
+
+        -- Author
+        author_role      TEXT NOT NULL,
+        author_name      TEXT,
+
+        -- Message classification
+        message_type     TEXT NOT NULL,
+
+        -- Content
+        content          TEXT,
+        content_type     TEXT,
+        tool_name        TEXT,
+        tool_input       JSON,
+        tool_result      TEXT,
+
+        -- Metrics
+        tokens_in        INTEGER,
+        tokens_out       INTEGER,
+        duration_ms      INTEGER,
+
+        -- Lineage
+        source_file_path TEXT NOT NULL REFERENCES source_files(path),
+        source_offset    INTEGER NOT NULL,
+        source_line      INTEGER,
+
+        -- Lossless
+        raw_data         JSON NOT NULL,
+        metadata         JSON
+    );
+
+    CREATE INDEX idx_messages_session ON messages(session_id);
+    CREATE INDEX idx_messages_thread ON messages(thread_id);
+    CREATE INDEX idx_messages_emitted_at ON messages(emitted_at);
+    CREATE INDEX idx_messages_observed_at ON messages(observed_at);
+    "#,
+    // Version 7: Add last_activity_at to threads for efficient queries
+    r#"
+    -- Add last_activity_at column to threads
+    ALTER TABLE threads ADD COLUMN last_activity_at DATETIME;
+
+    -- Backfill existing data, excluding context messages (like summary)
+    UPDATE threads SET last_activity_at = (
+        SELECT MAX(emitted_at) FROM messages 
+        WHERE messages.thread_id = threads.id 
+        AND message_type != 'context'
+    );
+
+    -- Add index for sorting by last_activity
+    CREATE INDEX idx_threads_last_activity ON threads(last_activity_at DESC);
     "#,
 ];
 

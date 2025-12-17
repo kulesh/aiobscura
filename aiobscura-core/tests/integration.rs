@@ -982,12 +982,14 @@ fn make_edit_msg(
     file_path: &str,
     source_file_path: &str,
 ) -> Message {
+    let now = chrono::Utc::now();
     Message {
         id: seq as i64,
         session_id: session_id.to_string(),
         thread_id: thread_id.to_string(),
         seq,
-        ts: chrono::Utc::now(),
+        emitted_at: now,
+        observed_at: now,
         author_role: AuthorRole::Tool,
         author_name: Some("Edit".to_string()),
         message_type: MessageType::ToolCall,

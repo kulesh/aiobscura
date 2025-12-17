@@ -67,7 +67,7 @@ struct WatchStats {
 #[derive(Serialize)]
 struct MessageOutput {
     seq: i32,
-    ts: chrono::DateTime<chrono::Utc>,
+    emitted_at: chrono::DateTime<chrono::Utc>,
     author_role: String,
     message_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -309,7 +309,7 @@ fn compute_stats(messages: &[Message]) -> WatchStats {
 fn message_to_output(msg: &Message) -> MessageOutput {
     MessageOutput {
         seq: msg.seq,
-        ts: msg.ts,
+        emitted_at: msg.emitted_at,
         author_role: msg.author_role.as_str().to_string(),
         message_type: msg.message_type.as_str().to_string(),
         content: msg.content.clone(),

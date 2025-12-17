@@ -331,7 +331,7 @@ impl EditChurnAnalyzer {
                     file_timestamps
                         .entry(file_path.clone())
                         .or_default()
-                        .push(msg.ts);
+                        .push(msg.emitted_at);
 
                     // Track by file extension
                     let ext = Self::extract_extension(&file_path).to_string();
@@ -598,12 +598,14 @@ mod tests {
     }
 
     fn make_edit_message(file_path: &str, seq: i32) -> Message {
+        let now = Utc::now();
         Message {
             id: seq as i64,
             session_id: "test".to_string(),
             thread_id: "test-main".to_string(),
             seq,
-            ts: Utc::now(),
+            emitted_at: now,
+            observed_at: now,
             author_role: AuthorRole::Tool,
             author_name: Some("Edit".to_string()),
             message_type: MessageType::ToolCall,
@@ -639,12 +641,14 @@ mod tests {
     }
 
     fn make_prompt_message(seq: i32) -> Message {
+        let now = Utc::now();
         Message {
             id: seq as i64,
             session_id: "test".to_string(),
             thread_id: "test-main".to_string(),
             seq,
-            ts: Utc::now(),
+            emitted_at: now,
+            observed_at: now,
             author_role: AuthorRole::Human,
             author_name: None,
             message_type: MessageType::Prompt,

@@ -60,7 +60,7 @@ struct MessageOutput {
     session_id: String,
     thread_id: String,
     seq: i32,
-    ts: chrono::DateTime<chrono::Utc>,
+    emitted_at: chrono::DateTime<chrono::Utc>,
     author_role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_name: Option<String>,
@@ -201,7 +201,7 @@ fn message_to_output(msg: &Message, include_raw: bool) -> MessageOutput {
         session_id: msg.session_id.clone(),
         thread_id: msg.thread_id.clone(),
         seq: msg.seq,
-        ts: msg.ts,
+        emitted_at: msg.emitted_at,
         author_role: msg.author_role.as_str().to_string(),
         author_name: msg.author_name.clone(),
         message_type: msg.message_type.as_str().to_string(),

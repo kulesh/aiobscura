@@ -266,9 +266,13 @@ impl AssistantParser for CodexParser {
         let mut model_id: Option<String> = None;
         let mut cwd: Option<String> = None;
         let mut git_info: Option<GitInfo> = None;
-        let mut first_timestamp: Option<DateTime<Utc>> = None;
-        let mut last_timestamp: Option<DateTime<Utc>> = None;
         let mut last_token_usage: Option<TokenUsage> = None;
+        // Capture observed_at once per parse invocation
+        let observed_at = Utc::now();
+        // Track first/last timestamps for session metadata; initialized to observed_at
+        // so records without timestamps can use the last seen value as approximation
+        let mut first_timestamp: DateTime<Utc> = observed_at;
+        let mut last_timestamp: DateTime<Utc> = observed_at;
 
         // Track if we've seen the first user prompt (the CLI invocation).
         // The first user message that isn't system-injected context is the
@@ -279,6 +283,10 @@ impl AssistantParser for CodexParser {
 
         // Track call_id -> message seq for tool result linking
         let mut call_id_to_seq: HashMap<String, i32> = HashMap::new();
+
+        // Track last activity per thread (for setting Thread.last_activity_at)
+        // Only tracks non-context messages
+        let mut thread_last_activity: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         let source_path = ctx.path.to_string_lossy().to_string();
 
@@ -329,18 +337,19 @@ impl AssistantParser for CodexParser {
                 }
             };
 
-            // Parse timestamp
-            let ts = event
+            // Parse timestamp - use last seen if record has no timestamp (approximation)
+            let emitted_at = event
                 .timestamp
                 .as_ref()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
+                .unwrap_or(last_timestamp);
 
-            if first_timestamp.is_none() {
-                first_timestamp = Some(ts);
+            // Update first_timestamp only on first record (when it equals observed_at)
+            if first_timestamp == observed_at {
+                first_timestamp = emitted_at;
             }
-            last_timestamp = Some(ts);
+            last_timestamp = emitted_at;
 
             let event_type = event.event_type.as_deref().unwrap_or("unknown");
 
@@ -377,8 +386,9 @@ impl AssistantParser for CodexParser {
                             thread_type: ThreadType::Main,
                             parent_thread_id: None,
                             spawned_by_message_id: None,
-                            started_at: ts,
+                            started_at: emitted_at,
                             ended_at: None,
+                            last_activity_at: None, // Set at the end of parsing
                             metadata: serde_json::json!({}),
                         });
                     }
@@ -414,7 +424,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::System,
                                 author_name: Some(msg_type.to_string()),
                                 message_type: MessageType::Context,
@@ -501,7 +512,8 @@ impl AssistantParser for CodexParser {
                                                 session_id: session_id.clone().unwrap_or_default(),
                                                 thread_id: thread_id.clone().unwrap_or_default(),
                                                 seq,
-                                                ts,
+                                                emitted_at,
+                                                observed_at,
                                                 author_role,
                                                 author_name: None,
                                                 message_type,
@@ -544,7 +556,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::Assistant,
                                 author_name: None,
                                 message_type: MessageType::ToolCall,
@@ -574,7 +587,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::Tool,
                                 author_name: None,
                                 message_type: MessageType::ToolResult,
@@ -624,7 +638,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::Assistant,
                                 author_name: None,
                                 message_type: MessageType::Context,
@@ -665,7 +680,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::System,
                                 author_name: Some("snapshot".to_string()),
                                 message_type: MessageType::Context,
@@ -701,7 +717,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::Assistant,
                                 author_name: None,
                                 message_type: MessageType::ToolCall,
@@ -735,7 +752,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::Tool,
                                 author_name: None,
                                 message_type: MessageType::ToolResult,
@@ -766,7 +784,8 @@ impl AssistantParser for CodexParser {
                                 session_id: session_id.clone().unwrap_or_default(),
                                 thread_id: thread_id.clone().unwrap_or_default(),
                                 seq,
-                                ts,
+                                emitted_at,
+                                observed_at,
                                 author_role: AuthorRole::System,
                                 author_name: Some(item_type.to_string()),
                                 message_type: MessageType::Context,
@@ -811,7 +830,8 @@ impl AssistantParser for CodexParser {
                         session_id: session_id.clone().unwrap_or_default(),
                         thread_id: thread_id.clone().unwrap_or_default(),
                         seq,
-                        ts,
+                        emitted_at,
+                        observed_at,
                         author_role: AuthorRole::System,
                         author_name: Some(event_type.to_string()),
                         message_type: MessageType::Context,
@@ -833,6 +853,27 @@ impl AssistantParser for CodexParser {
             }
         }
 
+        // Build thread_last_activity from all non-context messages
+        for msg in &result.messages {
+            if msg.message_type != MessageType::Context {
+                thread_last_activity
+                    .entry(msg.thread_id.clone())
+                    .and_modify(|t| {
+                        if msg.emitted_at > *t {
+                            *t = msg.emitted_at
+                        }
+                    })
+                    .or_insert(msg.emitted_at);
+            }
+        }
+
+        // Set last_activity_at on threads
+        for thread in &mut result.threads {
+            if let Some(&last_activity) = thread_last_activity.get(&thread.id) {
+                thread.last_activity_at = Some(last_activity);
+            }
+        }
+
         // Create session and project
         if let Some(sid) = session_id {
             // Create Project from cwd
@@ -844,8 +885,8 @@ impl AssistantParser for CodexParser {
                     id: proj_id.clone(),
                     path: PathBuf::from(cwd_path),
                     name: Some(proj_name),
-                    created_at: first_timestamp.unwrap_or_else(Utc::now),
-                    last_activity_at: last_timestamp,
+                    created_at: first_timestamp,
+                    last_activity_at: Some(last_timestamp),
                     metadata: serde_json::json!({}),
                 });
 
@@ -859,9 +900,9 @@ impl AssistantParser for CodexParser {
                 assistant: Assistant::Codex,
                 backing_model_id: model_id.map(|m| format!("openai:{}", m)),
                 project_id,
-                started_at: first_timestamp.unwrap_or_else(Utc::now),
-                last_activity_at: last_timestamp,
-                status: SessionStatus::from_last_activity(last_timestamp),
+                started_at: first_timestamp,
+                last_activity_at: Some(last_timestamp),
+                status: SessionStatus::from_last_activity(Some(last_timestamp)),
                 source_file_path: source_path,
                 metadata: serde_json::json!({
                     "cwd": cwd,
