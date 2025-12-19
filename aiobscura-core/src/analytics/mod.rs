@@ -61,6 +61,32 @@ pub struct SessionAnalytics {
     pub computed_at: DateTime<Utc>,
 }
 
+/// First-order analytics for a session.
+///
+/// Contains metrics from the `core.first_order` plugin that track
+/// basic session activity (tokens, tool calls, errors, duration).
+#[derive(Debug, Clone)]
+pub struct FirstOrderSessionMetrics {
+    /// Total input tokens
+    pub tokens_in: i64,
+    /// Total output tokens
+    pub tokens_out: i64,
+    /// Total tokens (input + output)
+    pub tokens_total: i64,
+    /// Total tool calls
+    pub tool_call_count: i64,
+    /// Tool calls by tool name
+    pub tool_call_breakdown: std::collections::HashMap<String, i64>,
+    /// Total error messages
+    pub error_count: i64,
+    /// Session duration in milliseconds
+    pub duration_ms: i64,
+    /// Tool result count divided by tool call count
+    pub tool_success_rate: f64,
+    /// When these metrics were computed
+    pub computed_at: DateTime<Utc>,
+}
+
 /// Pre-computed analytics for a thread.
 ///
 /// Contains the same metrics as SessionAnalytics but scoped to a single thread.

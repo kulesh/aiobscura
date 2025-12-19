@@ -1123,6 +1123,83 @@ impl Database {
         }))
     }
 
+    /// Get first-order session analytics from plugin_metrics table.
+    /// Returns None if no first-order metrics have been computed for this session.
+    pub fn get_session_first_order_metrics(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::analytics::FirstOrderSessionMetrics>> {
+        let metrics = self.get_session_plugin_metrics(session_id)?;
+
+        let first_order_metrics: Vec<_> = metrics
+            .iter()
+            .filter(|m| m.plugin_name == "core.first_order")
+            .collect();
+
+        if first_order_metrics.is_empty() {
+            return Ok(None);
+        }
+
+        let mut tokens_in: i64 = 0;
+        let mut tokens_out: i64 = 0;
+        let mut tokens_total: i64 = 0;
+        let mut tool_call_count: i64 = 0;
+        let mut tool_call_breakdown: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut error_count: i64 = 0;
+        let mut duration_ms: i64 = 0;
+        let mut tool_success_rate: f64 = 0.0;
+        let mut computed_at = chrono::Utc::now();
+
+        for metric in &first_order_metrics {
+            match metric.metric_name.as_str() {
+                "tokens_in" => {
+                    tokens_in = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "tokens_out" => {
+                    tokens_out = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "tokens_total" => {
+                    tokens_total = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "tool_call_count" => {
+                    tool_call_count = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "tool_call_breakdown" => {
+                    if let Some(obj) = metric.metric_value.as_object() {
+                        tool_call_breakdown = obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0)))
+                            .collect();
+                    }
+                }
+                "error_count" => {
+                    error_count = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "duration_ms" => {
+                    duration_ms = metric.metric_value.as_i64().unwrap_or(0);
+                }
+                "tool_success_rate" => {
+                    tool_success_rate = metric.metric_value.as_f64().unwrap_or(0.0);
+                }
+                _ => {}
+            }
+            computed_at = metric.computed_at;
+        }
+
+        Ok(Some(crate::analytics::FirstOrderSessionMetrics {
+            tokens_in,
+            tokens_out,
+            tokens_total,
+            tool_call_count,
+            tool_call_breakdown,
+            error_count,
+            duration_ms,
+            tool_success_rate,
+            computed_at,
+        }))
+    }
+
     /// Get all metrics for a thread across all plugins.
     pub fn get_thread_plugin_metrics(
         &self,
