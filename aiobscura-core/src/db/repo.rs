@@ -1902,9 +1902,9 @@ impl Database {
             last_activity_at: Option<String>,
         }
 
-        let conn = self.conn.lock().unwrap();
-        let result: Option<ThreadMetadataRow> = conn
-            .query_row(
+        let result: Option<ThreadMetadataRow> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
                 r#"
                 SELECT
                     t.session_id,
@@ -1930,7 +1930,8 @@ impl Database {
                     })
                 },
             )
-            .optional()?;
+            .optional()?
+        };
 
         let Some(row) = result else {
             return Ok(None);
