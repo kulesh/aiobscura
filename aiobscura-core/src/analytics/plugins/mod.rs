@@ -15,6 +15,7 @@
 //! Or use [`create_default_engine`] to get an engine with all built-in plugins.
 
 pub mod edit_churn;
+pub mod first_order;
 
 use super::AnalyticsEngine;
 
@@ -31,6 +32,7 @@ use super::AnalyticsEngine;
 pub fn create_default_engine() -> AnalyticsEngine {
     let mut engine = AnalyticsEngine::new();
     engine.register(Box::new(edit_churn::EditChurnAnalyzer::new()));
+    engine.register(Box::new(first_order::FirstOrderMetrics::new()));
     engine
 }
 
@@ -47,6 +49,10 @@ mod tests {
         assert!(
             names.contains(&"core.edit_churn"),
             "Should include edit_churn plugin"
+        );
+        assert!(
+            names.contains(&"core.first_order"),
+            "Should include first_order plugin"
         );
     }
 }

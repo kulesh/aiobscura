@@ -499,6 +499,50 @@ impl AnalyticsEngine {
             .ok_or_else(|| Error::Config("Failed to compute session analytics".to_string()))
     }
 
+    /// Ensure first-order session metrics are computed and up-to-date.
+    ///
+    /// This method mirrors `ensure_session_analytics`, but uses the
+    /// `core.first_order` plugin and typed wrapper.
+    pub fn ensure_first_order_metrics(
+        &self,
+        session_id: &str,
+        db: &Database,
+    ) -> Result<crate::analytics::FirstOrderSessionMetrics> {
+        if let Some(existing) = db.get_session_first_order_metrics(session_id)? {
+            if let Some(last_msg_ts) = db.get_session_last_message_ts(session_id)? {
+                if existing.computed_at >= last_msg_ts {
+                    tracing::debug!(
+                        session_id,
+                        computed_at = %existing.computed_at,
+                        "Using cached first-order metrics"
+                    );
+                    return Ok(existing);
+                }
+                tracing::debug!(
+                    session_id,
+                    computed_at = %existing.computed_at,
+                    last_msg_ts = %last_msg_ts,
+                    "First-order metrics are stale, recomputing"
+                );
+            } else {
+                return Ok(existing);
+            }
+        }
+
+        tracing::info!(session_id, "Computing first-order metrics");
+
+        let session = db
+            .get_session(session_id)?
+            .ok_or_else(|| Error::Config(format!("Session not found: {}", session_id)))?;
+
+        let messages = db.get_session_messages(session_id, 100_000)?;
+
+        self.run_plugin("core.first_order", &session, &messages, db)?;
+
+        db.get_session_first_order_metrics(session_id)?
+            .ok_or_else(|| Error::Config("Failed to compute first-order metrics".to_string()))
+    }
+
     /// Run all registered plugins on all sessions in the database.
     ///
     /// This is useful for batch processing. Returns the total number of

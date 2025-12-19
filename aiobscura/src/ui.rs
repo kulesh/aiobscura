@@ -143,7 +143,7 @@ fn render_session_detail_view(frame: &mut Frame, app: &mut App, session_name: St
     // Layout: header, analytics, messages, footer
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
-        Constraint::Length(5), // Analytics panel
+        Constraint::Length(6), // Analytics panel
         Constraint::Min(5),    // Messages
         Constraint::Length(1), // Footer
     ])
@@ -158,24 +158,30 @@ fn render_session_detail_view(frame: &mut Frame, app: &mut App, session_name: St
 /// Render session-level analytics panel (no toggle, just session stats).
 fn render_session_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
     // Check for error state
-    if let Some(ref error) = app.session_analytics_error {
-        let error_line = Line::from(vec![
-            Span::styled("Error: ", Style::default().fg(Color::Red)),
-            Span::styled(
-                truncate_string(error, 60),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        let paragraph = Paragraph::new(error_line).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Red))
-                .title(" Session Analytics ")
-                .title_style(Style::default().fg(Color::Red)),
-        );
-        frame.render_widget(paragraph, area);
-        return;
+    let error = app
+        .session_analytics_error
+        .as_ref()
+        .or(app.session_first_order_error.as_ref());
+    if app.session_analytics.is_none() && app.session_first_order_metrics.is_none() {
+        if let Some(error) = error {
+            let error_line = Line::from(vec![
+                Span::styled("Error: ", Style::default().fg(Color::Red)),
+                Span::styled(
+                    truncate_string(error, 60),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            let paragraph = Paragraph::new(error_line).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Red))
+                    .title(" Session Analytics ")
+                    .title_style(Style::default().fg(Color::Red)),
+            );
+            frame.render_widget(paragraph, area);
+            return;
+        }
     }
 
     let lines = build_session_analytics_lines(app);
@@ -580,80 +586,135 @@ fn render_analytics_panel(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Build lines for session analytics display.
 fn build_session_analytics_lines(app: &App) -> Vec<Line<'static>> {
-    let analytics = match &app.session_analytics {
-        Some(a) => a,
-        None => return vec![Line::from("No data")],
-    };
-
     let mut lines = Vec::new();
 
-    // Line 1: Edits, files, churn
-    let mut line1_spans: Vec<Span> = Vec::new();
-    line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
-    line1_spans.push(Span::styled(
-        format!("{}", analytics.edit_count),
-        Style::default().fg(Color::White),
-    ));
-    line1_spans.push(Span::styled(
-        format!(" ({} files)", analytics.unique_files),
-        Style::default().fg(Color::DarkGray),
-    ));
-    line1_spans.push(Span::raw("  "));
-
-    let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
-    let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
-    line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
-    line1_spans.push(Span::styled(
-        format!("{}%", churn_pct),
-        Style::default().fg(churn_color),
-    ));
-    line1_spans.push(Span::styled(
-        format!(" [{}]", churn_label),
-        Style::default()
-            .fg(churn_color)
-            .add_modifier(Modifier::BOLD),
-    ));
-    lines.push(Line::from(line1_spans));
-
-    // Line 2: Hot files
-    let mut line2_spans: Vec<Span> = Vec::new();
-    if !analytics.high_churn_files.is_empty() {
-        line2_spans.push(Span::styled(
-            "Hot files: ",
-            Style::default().fg(LABEL_COLOR),
+    if let Some(analytics) = &app.session_analytics {
+        // Line 1: Edits, files, churn
+        let mut line1_spans: Vec<Span> = Vec::new();
+        line1_spans.push(Span::styled("Edits: ", Style::default().fg(LABEL_COLOR)));
+        line1_spans.push(Span::styled(
+            format!("{}", analytics.edit_count),
+            Style::default().fg(Color::White),
         ));
-        let max_files = 4;
-        let files_to_show: Vec<&str> = analytics
-            .high_churn_files
-            .iter()
-            .take(max_files)
-            .map(|p| extract_basename(p))
-            .collect();
-        line2_spans.push(Span::styled(
-            files_to_show.join(", "),
-            Style::default().fg(Color::Yellow),
+        line1_spans.push(Span::styled(
+            format!(" ({} files)", analytics.unique_files),
+            Style::default().fg(Color::DarkGray),
         ));
-        let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
-        if remaining > 0 {
+        line1_spans.push(Span::raw("  "));
+
+        let (churn_color, churn_label) = churn_level(analytics.churn_ratio);
+        let churn_pct = (analytics.churn_ratio * 100.0).round() as i64;
+        line1_spans.push(Span::styled("Churn: ", Style::default().fg(LABEL_COLOR)));
+        line1_spans.push(Span::styled(
+            format!("{}%", churn_pct),
+            Style::default().fg(churn_color),
+        ));
+        line1_spans.push(Span::styled(
+            format!(" [{}]", churn_label),
+            Style::default()
+                .fg(churn_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(line1_spans));
+
+        // Line 2: Hot files
+        let mut line2_spans: Vec<Span> = Vec::new();
+        if !analytics.high_churn_files.is_empty() {
             line2_spans.push(Span::styled(
-                format!(" +{}", remaining),
+                "Hot files: ",
+                Style::default().fg(LABEL_COLOR),
+            ));
+            let max_files = 4;
+            let files_to_show: Vec<&str> = analytics
+                .high_churn_files
+                .iter()
+                .take(max_files)
+                .map(|p| extract_basename(p))
+                .collect();
+            line2_spans.push(Span::styled(
+                files_to_show.join(", "),
+                Style::default().fg(Color::Yellow),
+            ));
+            let remaining = analytics.high_churn_files.len().saturating_sub(max_files);
+            if remaining > 0 {
+                line2_spans.push(Span::styled(
+                    format!(" +{}", remaining),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        } else {
+            line2_spans.push(Span::styled(
+                "No hot files detected",
                 Style::default().fg(Color::DarkGray),
             ));
         }
-    } else {
-        line2_spans.push(Span::styled(
-            "No hot files detected",
+        lines.push(Line::from(line2_spans));
+    }
+
+    if let Some(metrics) = &app.session_first_order_metrics {
+        let mut line3_spans: Vec<Span> = Vec::new();
+        line3_spans.push(Span::styled("Tokens: ", Style::default().fg(LABEL_COLOR)));
+        line3_spans.push(Span::styled(
+            format_tokens(metrics.tokens_total),
+            Style::default().fg(Color::White),
+        ));
+        line3_spans.push(Span::styled(
+            format!(
+                " ({} in / {} out)",
+                format_tokens(metrics.tokens_in),
+                format_tokens(metrics.tokens_out)
+            ),
             Style::default().fg(Color::DarkGray),
         ));
-    }
-    lines.push(Line::from(line2_spans));
+        line3_spans.push(Span::raw("  "));
+        line3_spans.push(Span::styled("Duration: ", Style::default().fg(LABEL_COLOR)));
+        line3_spans.push(Span::styled(
+            format_duration_ms(metrics.duration_ms),
+            Style::default().fg(Color::Cyan),
+        ));
+        lines.push(Line::from(line3_spans));
 
-    // Line 3: Additional session info
-    let line3_spans = vec![Span::styled(
-        "Session-level aggregate across all threads",
-        Style::default().fg(Color::DarkGray).italic(),
-    )];
-    lines.push(Line::from(line3_spans));
+        let mut line4_spans: Vec<Span> = Vec::new();
+        line4_spans.push(Span::styled("Tools: ", Style::default().fg(LABEL_COLOR)));
+        line4_spans.push(Span::styled(
+            format!("{}", metrics.tool_call_count),
+            Style::default().fg(Color::White),
+        ));
+        line4_spans.push(Span::raw("  "));
+        line4_spans.push(Span::styled("Errors: ", Style::default().fg(LABEL_COLOR)));
+        let error_color = if metrics.error_count > 0 {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        line4_spans.push(Span::styled(
+            format!("{}", metrics.error_count),
+            Style::default().fg(error_color),
+        ));
+        line4_spans.push(Span::raw("  "));
+        line4_spans.push(Span::styled("Success: ", Style::default().fg(LABEL_COLOR)));
+        if metrics.tool_call_count == 0 {
+            line4_spans.push(Span::styled("n/a", Style::default().fg(Color::DarkGray)));
+        } else {
+            let success_pct = (metrics.tool_success_rate * 100.0).round() as i64;
+            let success_color = if success_pct >= 90 {
+                Color::Green
+            } else if success_pct >= 60 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            line4_spans.push(Span::styled(
+                format!("{}%", success_pct),
+                Style::default().fg(success_color),
+            ));
+        }
+        lines.push(Line::from(line4_spans));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from("No data"));
+    }
 
     lines
 }
@@ -854,6 +915,15 @@ fn format_duration(secs: i64) -> String {
         } else {
             format!("{}d", days)
         }
+    }
+}
+
+/// Format duration in milliseconds for display.
+fn format_duration_ms(ms: i64) -> String {
+    if ms < 1000 {
+        "<1s".to_string()
+    } else {
+        format_duration(ms / 1000)
     }
 }
 

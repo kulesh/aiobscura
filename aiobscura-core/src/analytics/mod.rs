@@ -19,6 +19,7 @@
 
 pub mod dashboard;
 pub mod engine;
+pub mod metrics_registry;
 pub mod personality;
 pub mod plugins;
 pub mod project;
@@ -30,6 +31,10 @@ use crate::Result;
 pub use engine::{
     AnalyticsContext, AnalyticsEngine, AnalyticsPlugin, AnalyticsTrigger, MetricOutput,
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
+};
+pub use metrics_registry::{
+    list_metrics, list_metrics_for_entity, list_metrics_for_plugin, search_metrics,
+    search_metrics_with_scoring, MetricDescriptor, MetricSearchResult, MetricValueType,
 };
 pub use plugins::create_default_engine;
 
@@ -52,6 +57,32 @@ pub struct SessionAnalytics {
     pub churn_ratio: f64,
     /// Files edited 3+ times, sorted by edit count descending
     pub high_churn_files: Vec<String>,
+    /// When these metrics were computed
+    pub computed_at: DateTime<Utc>,
+}
+
+/// First-order analytics for a session.
+///
+/// Contains metrics from the `core.first_order` plugin that track
+/// basic session activity (tokens, tool calls, errors, duration).
+#[derive(Debug, Clone)]
+pub struct FirstOrderSessionMetrics {
+    /// Total input tokens
+    pub tokens_in: i64,
+    /// Total output tokens
+    pub tokens_out: i64,
+    /// Total tokens (input + output)
+    pub tokens_total: i64,
+    /// Total tool calls
+    pub tool_call_count: i64,
+    /// Tool calls by tool name
+    pub tool_call_breakdown: std::collections::HashMap<String, i64>,
+    /// Total error messages
+    pub error_count: i64,
+    /// Session duration in milliseconds
+    pub duration_ms: i64,
+    /// Tool result count divided by tool call count
+    pub tool_success_rate: f64,
     /// When these metrics were computed
     pub computed_at: DateTime<Utc>,
 }
@@ -97,6 +128,15 @@ pub use wrapped::{
 pub fn ensure_session_analytics(session_id: &str, db: &Database) -> Result<SessionAnalytics> {
     let engine = create_default_engine();
     engine.ensure_session_analytics(session_id, db)
+}
+
+/// Ensure first-order metrics using the default analytics engine.
+pub fn ensure_first_order_metrics(
+    session_id: &str,
+    db: &Database,
+) -> Result<FirstOrderSessionMetrics> {
+    let engine = create_default_engine();
+    engine.ensure_first_order_metrics(session_id, db)
 }
 
 /// Ensure thread analytics using the default analytics engine.
