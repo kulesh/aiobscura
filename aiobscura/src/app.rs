@@ -6,43 +6,16 @@ use aiobscura_core::analytics::{
     generate_wrapped, DashboardStats, ProjectRow, ProjectStats, SessionAnalytics, ThreadAnalytics,
     WrappedConfig, WrappedPeriod, WrappedStats,
 };
-use aiobscura_core::db::{FileStats, ToolStats};
+use chrono::Datelike;
+use aiobscura_core::db::{EnvironmentHealth, ThreadMetadata};
 use aiobscura_core::{
-    ActiveSession, Assistant, Database, LiveStats, Message, MessageWithContext, Plan,
-    SessionFilter, Thread, ThreadType,
+    ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, Thread, ThreadType,
 };
 use anyhow::Result;
-use chrono::{DateTime, Datelike, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use crate::thread_row::{SessionRow, ThreadRow};
-
-/// Environment health statistics for a single assistant.
-#[derive(Debug, Clone)]
-pub struct AssistantHealth {
-    /// The assistant type
-    pub assistant: Assistant,
-    /// Number of source files tracked
-    pub file_count: i64,
-    /// Total size of source files in bytes
-    pub total_size_bytes: i64,
-    /// Last time files were parsed/synced
-    pub last_synced: Option<DateTime<Utc>>,
-}
-
-/// Overall environment health stats.
-#[derive(Debug, Clone, Default)]
-pub struct EnvironmentHealth {
-    /// Database size in bytes
-    pub database_size_bytes: u64,
-    /// Per-assistant health stats
-    pub assistants: Vec<AssistantHealth>,
-    /// Total session count
-    pub total_sessions: i64,
-    /// Total message count
-    pub total_messages: i64,
-}
 
 /// Sub-tab within Project detail view.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -101,31 +74,6 @@ pub enum ViewMode {
         session_id: String,
         session_name: String,
     },
-}
-
-/// Metadata for the detail view header.
-#[derive(Debug, Clone)]
-pub struct ThreadMetadata {
-    /// Source file path
-    pub source_path: Option<String>,
-    /// Working directory
-    pub cwd: Option<String>,
-    /// Git branch
-    pub git_branch: Option<String>,
-    /// Model display name
-    pub model_name: Option<String>,
-    /// Session duration in seconds
-    pub duration_secs: i64,
-    /// Total message count
-    pub message_count: i64,
-    /// Agent thread count
-    pub agent_count: i64,
-    /// Tool usage stats
-    pub tool_stats: ToolStats,
-    /// Plan count
-    pub plan_count: i64,
-    /// File modification stats
-    pub file_stats: FileStats,
 }
 
 /// Main application state.
@@ -300,32 +248,7 @@ impl App {
 
     /// Load environment health stats from the database.
     fn load_environment_health(&mut self) {
-        // Get database size
-        let database_size_bytes = self.db.get_database_size().unwrap_or(0);
-
-        // Get per-assistant stats
-        let assistant_stats = self.db.get_assistant_source_stats().unwrap_or_default();
-        let assistants: Vec<AssistantHealth> = assistant_stats
-            .into_iter()
-            .map(
-                |(assistant, file_count, total_size_bytes, last_synced)| AssistantHealth {
-                    assistant,
-                    file_count,
-                    total_size_bytes,
-                    last_synced,
-                },
-            )
-            .collect();
-
-        // Get total counts
-        let (total_sessions, total_messages, _) = self.db.get_total_counts().unwrap_or((0, 0, 0));
-
-        self.environment_health = EnvironmentHealth {
-            database_size_bytes,
-            assistants,
-            total_sessions,
-            total_messages,
-        };
+        self.environment_health = self.db.get_environment_health().unwrap_or_default();
     }
 
     /// Tick the animation state (call each frame).
@@ -384,41 +307,31 @@ impl App {
 
     /// Load threads from the database with hierarchy.
     pub fn load_threads(&mut self) -> Result<()> {
-        let sessions = self.db.list_sessions(&SessionFilter::default())?;
+        let summaries = self.db.list_threads_with_counts()?;
         self.threads.clear();
 
         // Collect all threads with their session info
         struct ThreadInfo {
             thread: Thread,
-            session_id: String,
             project_name: String,
             assistant_name: String,
+            message_count: i64,
         }
 
         let mut all_threads: Vec<ThreadInfo> = Vec::new();
 
-        for session in sessions {
-            // Get project name
-            let project_name = session
-                .project_id
-                .as_ref()
-                .and_then(|id| self.db.get_project(id).ok().flatten())
-                .and_then(|p| p.name)
+        for summary in summaries {
+            let project_name = summary
+                .project_name
                 .unwrap_or_else(|| "(no project)".to_string());
+            let assistant_name = summary.assistant.display_name().to_string();
 
-            let assistant_name = session.assistant.display_name().to_string();
-
-            // Get all threads for this session
-            let threads = self.db.get_session_threads(&session.id).unwrap_or_default();
-
-            for thread in threads {
-                all_threads.push(ThreadInfo {
-                    thread,
-                    session_id: session.id.clone(),
-                    project_name: project_name.clone(),
-                    assistant_name: assistant_name.clone(),
-                });
-            }
+            all_threads.push(ThreadInfo {
+                thread: summary.thread,
+                project_name,
+                assistant_name,
+                message_count: summary.message_count,
+            });
         }
 
         // Build a map of thread_id -> children for hierarchy
@@ -467,23 +380,16 @@ impl App {
             // Add main threads with their children
             for main_info in main_threads {
                 // Add main thread
-                let message_count = self
-                    .db
-                    .count_thread_messages(&main_info.thread.id)
-                    .unwrap_or(0);
-
-                // Get actual last message timestamp, fall back to thread timestamps
-                let last_activity = self
-                    .db
-                    .get_thread_last_activity(&main_info.thread.id)
-                    .ok()
-                    .flatten()
+                let message_count = main_info.message_count;
+                let last_activity = main_info
+                    .thread
+                    .last_activity_at
                     .or(main_info.thread.ended_at)
                     .or(Some(main_info.thread.started_at));
 
                 self.threads.push(ThreadRow {
                     id: main_info.thread.id.clone(),
-                    session_id: main_info.session_id.clone(),
+                    session_id: main_info.thread.session_id.clone(),
                     thread_type: main_info.thread.thread_type,
                     parent_thread_id: None,
                     last_activity,
@@ -503,23 +409,16 @@ impl App {
 
                     let child_count = children.len();
                     for (child_idx, child_info) in children.into_iter().enumerate() {
-                        let message_count = self
-                            .db
-                            .count_thread_messages(&child_info.thread.id)
-                            .unwrap_or(0);
-
-                        // Get actual last message timestamp, fall back to thread timestamps
-                        let last_activity = self
-                            .db
-                            .get_thread_last_activity(&child_info.thread.id)
-                            .ok()
-                            .flatten()
+                        let message_count = child_info.message_count;
+                        let last_activity = child_info
+                            .thread
+                            .last_activity_at
                             .or(child_info.thread.ended_at)
                             .or(Some(child_info.thread.started_at));
 
                         self.threads.push(ThreadRow {
                             id: child_info.thread.id.clone(),
-                            session_id: child_info.session_id.clone(),
+                            session_id: child_info.thread.session_id.clone(),
                             thread_type: child_info.thread.thread_type,
                             parent_thread_id: child_info.thread.parent_thread_id.clone(),
                             last_activity,
@@ -536,23 +435,16 @@ impl App {
             // Add orphan agents at the end of this project group
             orphan_agents.sort_by(|a, b| b.thread.started_at.cmp(&a.thread.started_at));
             for orphan_info in orphan_agents {
-                let message_count = self
-                    .db
-                    .count_thread_messages(&orphan_info.thread.id)
-                    .unwrap_or(0);
-
-                // Get actual last message timestamp, fall back to thread timestamps
-                let last_activity = self
-                    .db
-                    .get_thread_last_activity(&orphan_info.thread.id)
-                    .ok()
-                    .flatten()
+                let message_count = orphan_info.message_count;
+                let last_activity = orphan_info
+                    .thread
+                    .last_activity_at
                     .or(orphan_info.thread.ended_at)
                     .or(Some(orphan_info.thread.started_at));
 
                 self.threads.push(ThreadRow {
                     id: orphan_info.thread.id.clone(),
-                    session_id: orphan_info.session_id.clone(),
+                    session_id: orphan_info.thread.session_id.clone(),
                     thread_type: orphan_info.thread.thread_type,
                     parent_thread_id: None,
                     last_activity,
@@ -672,7 +564,7 @@ impl App {
                     self.scroll_offset = 0;
 
                     // Load metadata for the header
-                    self.thread_metadata = self.load_thread_metadata(&thread_id, &session_id);
+                    self.thread_metadata = self.load_thread_metadata(&thread_id);
 
                     // Load/compute analytics (both session and thread)
                     self.load_session_analytics(&session_id);
@@ -688,78 +580,13 @@ impl App {
     }
 
     /// Load metadata for the detail view header.
-    fn load_thread_metadata(&self, thread_id: &str, session_id: &str) -> Option<ThreadMetadata> {
-        // Get source path
-        let source_path = self.db.get_session_source_path(session_id).ok().flatten();
-
-        // Get model name
-        let model_name = self.db.get_session_model_name(session_id).ok().flatten();
-
-        // Get session metadata (cwd, git_branch) from JSON
-        let (cwd, git_branch) = self
-            .db
-            .get_session_metadata(session_id)
-            .ok()
-            .flatten()
-            .map(|json| {
-                let cwd = json.get("cwd").and_then(|v| v.as_str()).map(String::from);
-                let git_branch = json
-                    .get("git_branch")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                (cwd, git_branch)
-            })
-            .unwrap_or((None, None));
-
-        // Get timestamps and calculate duration
-        let duration_secs = self
-            .db
-            .get_session_timestamps(session_id)
-            .ok()
-            .flatten()
-            .map(|(started, last_activity)| {
-                // Use last_activity if available, otherwise use started (0 duration)
-                last_activity
-                    .map(|last| last.signed_duration_since(started).num_seconds().max(0))
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-
-        // Get message count for this thread
-        let message_count = self.db.count_thread_messages(thread_id).unwrap_or(0);
-
-        // Get agent count for this session
-        let agent_count = self.db.count_session_agents(session_id).unwrap_or(0);
-
-        // Get tool stats for this thread
-        let tool_stats = self.db.get_thread_tool_stats(thread_id).unwrap_or_default();
-
-        // Get plan count for this session
-        let plan_count = self.db.count_session_plans(session_id).unwrap_or(0);
-
-        // Get file stats for this thread
-        let file_stats = self.db.get_thread_file_stats(thread_id).unwrap_or_default();
-
-        Some(ThreadMetadata {
-            source_path,
-            cwd,
-            git_branch,
-            model_name,
-            duration_secs,
-            message_count,
-            agent_count,
-            tool_stats,
-            plan_count,
-            file_stats,
-        })
+    fn load_thread_metadata(&self, thread_id: &str) -> Option<ThreadMetadata> {
+        self.db.get_thread_metadata(thread_id).ok().flatten()
     }
 
     /// Load or compute session analytics for the detail view.
     fn load_session_analytics(&mut self, session_id: &str) {
-        use aiobscura_core::analytics::create_default_engine;
-
-        let engine = create_default_engine();
-        match engine.ensure_session_analytics(session_id, &self.db) {
+        match aiobscura_core::analytics::ensure_session_analytics(session_id, &self.db) {
             Ok(analytics) => {
                 self.session_analytics = Some(analytics);
                 self.session_analytics_error = None;
@@ -774,10 +601,7 @@ impl App {
 
     /// Load or compute thread analytics for the detail view.
     fn load_thread_analytics(&mut self, thread_id: &str) {
-        use aiobscura_core::analytics::create_default_engine;
-
-        let engine = create_default_engine();
-        match engine.ensure_thread_analytics(thread_id, &self.db) {
+        match aiobscura_core::analytics::ensure_thread_analytics(thread_id, &self.db) {
             Ok(analytics) => {
                 self.thread_analytics = Some(analytics);
                 self.thread_analytics_error = None;
@@ -1853,20 +1677,7 @@ impl App {
 
     /// Load plans for all sessions in a project.
     fn load_project_plans(&mut self, project_id: &str) -> Result<()> {
-        let sessions = self.db.list_sessions(&SessionFilter::default())?;
-        self.project_plans.clear();
-
-        for session in sessions {
-            // Skip sessions that don't belong to this project
-            if session.project_id.as_ref() != Some(&project_id.to_string()) {
-                continue;
-            }
-
-            // Get plans for this session
-            if let Ok(plans) = self.db.get_plans_for_session(&session.id) {
-                self.project_plans.extend(plans);
-            }
-        }
+        self.project_plans = self.db.list_project_plans(project_id)?;
 
         // Sort by modified_at (most recent first)
         self.project_plans

@@ -71,6 +71,70 @@ pub struct SessionSummary {
     pub model_name: Option<String>,
 }
 
+/// Thread summary with session and project context for list views.
+#[derive(Debug, Clone)]
+pub struct ThreadSummary {
+    /// Thread record
+    pub thread: Thread,
+    /// Which assistant this thread belongs to
+    pub assistant: Assistant,
+    /// Project display name (if known)
+    pub project_name: Option<String>,
+    /// Total message count for the thread
+    pub message_count: i64,
+}
+
+/// Metadata for a thread detail view.
+#[derive(Debug, Clone)]
+pub struct ThreadMetadata {
+    /// Source file path
+    pub source_path: Option<String>,
+    /// Working directory
+    pub cwd: Option<String>,
+    /// Git branch
+    pub git_branch: Option<String>,
+    /// Model display name
+    pub model_name: Option<String>,
+    /// Session duration in seconds
+    pub duration_secs: i64,
+    /// Total message count
+    pub message_count: i64,
+    /// Total agent threads in the session
+    pub agent_count: i64,
+    /// Tool usage stats
+    pub tool_stats: ToolStats,
+    /// Plan count for the session
+    pub plan_count: i64,
+    /// File modification stats
+    pub file_stats: FileStats,
+}
+
+/// Environment health statistics for a single assistant.
+#[derive(Debug, Clone)]
+pub struct AssistantHealth {
+    /// The assistant type
+    pub assistant: Assistant,
+    /// Number of source files tracked
+    pub file_count: i64,
+    /// Total size of source files in bytes
+    pub total_size_bytes: i64,
+    /// Last time files were parsed/synced
+    pub last_synced: Option<DateTime<Utc>>,
+}
+
+/// Overall environment health stats.
+#[derive(Debug, Clone, Default)]
+pub struct EnvironmentHealth {
+    /// Database size in bytes
+    pub database_size_bytes: u64,
+    /// Per-assistant health stats
+    pub assistants: Vec<AssistantHealth>,
+    /// Total session count
+    pub total_sessions: i64,
+    /// Total message count
+    pub total_messages: i64,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -576,6 +640,43 @@ impl Database {
 
         let threads = stmt
             .query_map([session_id], Self::row_to_thread)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(threads)
+    }
+
+    /// List all threads with message counts and session/project context.
+    pub fn list_threads_with_counts(&self) -> Result<Vec<ThreadSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                t.*,
+                s.assistant,
+                p.name as project_name,
+                COALESCE(mc.message_count, 0) as message_count
+            FROM threads t
+            JOIN sessions s ON s.id = t.session_id
+            LEFT JOIN projects p ON p.id = s.project_id
+            LEFT JOIN (
+                SELECT thread_id, COUNT(*) as message_count
+                FROM messages
+                GROUP BY thread_id
+            ) mc ON mc.thread_id = t.id
+            ORDER BY t.started_at ASC
+            "#,
+        )?;
+
+        let threads = stmt
+            .query_map([], |row| {
+                let assistant_str: String = row.get("assistant")?;
+                Ok(ThreadSummary {
+                    thread: Self::row_to_thread(row)?,
+                    assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
+                    project_name: row.get("project_name")?,
+                    message_count: row.get("message_count")?,
+                })
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(threads)
@@ -1253,6 +1354,60 @@ impl Database {
         Ok(plans)
     }
 
+    /// List plans for a project (latest version per plan slug).
+    pub fn list_project_plans(&self, project_id: &str) -> Result<Vec<Plan>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                sp.session_id,
+                pv.plan_slug,
+                pv.title,
+                pv.content,
+                pv.captured_at,
+                pv.source_file
+            FROM session_plans sp
+            JOIN sessions s ON s.id = sp.session_id
+            JOIN (
+                SELECT plan_slug, MAX(captured_at) as max_captured_at
+                FROM plan_versions
+                GROUP BY plan_slug
+            ) latest ON latest.plan_slug = sp.plan_slug
+            JOIN plan_versions pv
+              ON pv.plan_slug = latest.plan_slug
+             AND pv.captured_at = latest.max_captured_at
+            WHERE s.project_id = ?
+            ORDER BY pv.captured_at DESC
+            "#,
+        )?;
+
+        let plans = stmt
+            .query_map([project_id], |row| {
+                let captured_at_str: String = row.get("captured_at")?;
+                let captured_at = DateTime::parse_from_rfc3339(&captured_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let source_file: String = row.get("source_file")?;
+
+                Ok(Plan {
+                    id: row.get("plan_slug")?,
+                    session_id: row.get("session_id")?,
+                    path: PathBuf::from(&source_file),
+                    title: row.get("title")?,
+                    created_at: captured_at,
+                    modified_at: captured_at,
+                    status: PlanStatus::Unknown,
+                    content: row.get("content")?,
+                    source_file_path: source_file,
+                    raw_data: serde_json::json!({}),
+                    metadata: serde_json::json!({}),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(plans)
+    }
+
     // ============================================
     // Statistics
     // ============================================
@@ -1673,6 +1828,96 @@ impl Database {
             total_files,
             breakdown,
         })
+    }
+
+    /// Get thread metadata for detail views.
+    pub fn get_thread_metadata(&self, thread_id: &str) -> Result<Option<ThreadMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        )> = conn
+            .query_row(
+                r#"
+                SELECT
+                    t.session_id,
+                    s.source_file_path,
+                    bm.display_name as model_name,
+                    s.metadata,
+                    s.started_at,
+                    s.last_activity_at
+                FROM threads t
+                JOIN sessions s ON s.id = t.session_id
+                LEFT JOIN backing_models bm ON bm.id = s.backing_model_id
+                WHERE t.id = ?
+                "#,
+                [thread_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((session_id, source_path, model_name, metadata_str, started_str, last_str)) =
+            result
+        else {
+            return Ok(None);
+        };
+
+        let metadata: serde_json::Value = metadata_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::json!({}));
+        let cwd = metadata
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let git_branch = metadata
+            .get("git_branch")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let started_at = DateTime::parse_from_rfc3339(&started_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let last_activity = last_str.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        });
+        let duration_secs = last_activity
+            .map(|last| last.signed_duration_since(started_at).num_seconds().max(0))
+            .unwrap_or(0);
+
+        let message_count = self.count_thread_messages(thread_id).unwrap_or(0);
+        let agent_count = self.count_session_agents(&session_id).unwrap_or(0);
+        let tool_stats = self.get_thread_tool_stats(thread_id).unwrap_or_default();
+        let plan_count = self.count_session_plans(&session_id).unwrap_or(0);
+        let file_stats = self.get_thread_file_stats(thread_id).unwrap_or_default();
+
+        Ok(Some(ThreadMetadata {
+            source_path: Some(source_path),
+            cwd,
+            git_branch,
+            model_name,
+            duration_secs,
+            message_count,
+            agent_count,
+            tool_stats,
+            plan_count,
+            file_stats,
+        }))
     }
 
     /// Get session timestamps for duration calculation
@@ -2999,6 +3244,32 @@ impl Database {
             conn.query_row("SELECT COUNT(*) FROM source_files", [], |row| row.get(0))?;
 
         Ok((session_count, message_count, source_file_count))
+    }
+
+    /// Get aggregated environment health stats.
+    pub fn get_environment_health(&self) -> Result<EnvironmentHealth> {
+        let database_size_bytes = self.get_database_size()?;
+        let assistant_stats = self.get_assistant_source_stats()?;
+        let assistants = assistant_stats
+            .into_iter()
+            .map(
+                |(assistant, file_count, total_size_bytes, last_synced)| AssistantHealth {
+                    assistant,
+                    file_count,
+                    total_size_bytes,
+                    last_synced,
+                },
+            )
+            .collect();
+
+        let (total_sessions, total_messages, _) = self.get_total_counts()?;
+
+        Ok(EnvironmentHealth {
+            database_size_bytes,
+            assistants,
+            total_sessions,
+            total_messages,
+        })
     }
 }
 

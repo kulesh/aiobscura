@@ -30,6 +30,8 @@ pub use engine::{
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
 };
 pub use plugins::create_default_engine;
+use crate::db::Database;
+use crate::Result;
 
 // Session analytics struct
 use chrono::{DateTime, Utc};
@@ -90,3 +92,15 @@ pub use wrapped::{
     generate_wrapped, MarathonSession, ProjectRanking, StreakStats, TimePatterns, ToolRankings,
     TotalStats, TrendComparison, WrappedConfig, WrappedPeriod, WrappedStats,
 };
+
+/// Ensure session analytics using the default analytics engine.
+pub fn ensure_session_analytics(session_id: &str, db: &Database) -> Result<SessionAnalytics> {
+    let engine = create_default_engine();
+    engine.ensure_session_analytics(session_id, db)
+}
+
+/// Ensure thread analytics using the default analytics engine.
+pub fn ensure_thread_analytics(thread_id: &str, db: &Database) -> Result<ThreadAnalytics> {
+    let engine = create_default_engine();
+    engine.ensure_thread_analytics(thread_id, db)
+}

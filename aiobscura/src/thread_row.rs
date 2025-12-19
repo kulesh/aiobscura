@@ -1,5 +1,6 @@
 //! Row data structs for TUI display.
 
+use aiobscura_core::format::format_relative_time_opt;
 use aiobscura_core::ThreadType;
 use chrono::{DateTime, Utc};
 
@@ -41,27 +42,7 @@ impl ThreadRow {
 
     /// Returns relative time since last activity (e.g., "2m ago", "1h ago").
     pub fn relative_time(&self) -> String {
-        match self.last_activity {
-            Some(ts) => {
-                let now = Utc::now();
-                let duration = now.signed_duration_since(ts);
-
-                if duration.num_seconds() < 0 {
-                    "just now".to_string()
-                } else if duration.num_seconds() < 60 {
-                    format!("{}s ago", duration.num_seconds())
-                } else if duration.num_minutes() < 60 {
-                    format!("{}m ago", duration.num_minutes())
-                } else if duration.num_hours() < 24 {
-                    format!("{}h ago", duration.num_hours())
-                } else if duration.num_days() < 7 {
-                    format!("{}d ago", duration.num_days())
-                } else {
-                    ts.format("%b %d").to_string()
-                }
-            }
-            None => "—".to_string(),
-        }
+        format_relative_time_opt(self.last_activity)
     }
 }
 
@@ -94,27 +75,7 @@ impl SessionRow {
 
     /// Returns relative time since last activity (e.g., "2m ago", "1h ago").
     pub fn relative_time(&self) -> String {
-        match self.last_activity {
-            Some(ts) => {
-                let now = Utc::now();
-                let duration = now.signed_duration_since(ts);
-
-                if duration.num_seconds() < 0 {
-                    "just now".to_string()
-                } else if duration.num_seconds() < 60 {
-                    format!("{}s ago", duration.num_seconds())
-                } else if duration.num_minutes() < 60 {
-                    format!("{}m ago", duration.num_minutes())
-                } else if duration.num_hours() < 24 {
-                    format!("{}h ago", duration.num_hours())
-                } else if duration.num_days() < 7 {
-                    format!("{}d ago", duration.num_days())
-                } else {
-                    ts.format("%b %d").to_string()
-                }
-            }
-            None => "—".to_string(),
-        }
+        format_relative_time_opt(self.last_activity)
     }
 
     /// Returns formatted duration (e.g., "5m", "1h 30m", "2h").
