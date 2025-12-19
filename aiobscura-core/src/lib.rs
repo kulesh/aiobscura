@@ -40,6 +40,7 @@ pub mod analytics;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod format;
 pub mod ingest;
 pub mod logging;
 pub mod types;

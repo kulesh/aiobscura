@@ -1,6 +1,7 @@
 //! UI rendering for the TUI.
 
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
+use aiobscura_core::format::format_relative_time;
 use aiobscura_core::{
     ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus,
     ThreadType,
@@ -18,7 +19,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, EnvironmentHealth, ProjectSubTab, ViewMode};
+use crate::app::{App, ProjectSubTab, ViewMode};
+use aiobscura_core::db::EnvironmentHealth;
 
 // ========== Wrapped Color Palette ==========
 // Vibrant colors for a Spotify Wrapped-inspired experience
@@ -1531,26 +1533,6 @@ fn format_plan_status(status: &PlanStatus) -> String {
         PlanStatus::Completed => "Completed".to_string(),
         PlanStatus::Abandoned => "Abandoned".to_string(),
         PlanStatus::Unknown => "Unknown".to_string(),
-    }
-}
-
-/// Format a timestamp as relative time.
-fn format_relative_time(ts: chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(ts);
-
-    if duration.num_seconds() < 0 {
-        "just now".to_string()
-    } else if duration.num_seconds() < 60 {
-        format!("{}s ago", duration.num_seconds())
-    } else if duration.num_minutes() < 60 {
-        format!("{}m ago", duration.num_minutes())
-    } else if duration.num_hours() < 24 {
-        format!("{}h ago", duration.num_hours())
-    } else if duration.num_days() < 7 {
-        format!("{}d ago", duration.num_days())
-    } else {
-        ts.format("%b %d").to_string()
     }
 }
 

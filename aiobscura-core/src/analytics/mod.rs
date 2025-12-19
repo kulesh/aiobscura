@@ -25,6 +25,8 @@ pub mod project;
 pub mod wrapped;
 
 // Engine exports
+use crate::db::Database;
+use crate::Result;
 pub use engine::{
     AnalyticsContext, AnalyticsEngine, AnalyticsPlugin, AnalyticsTrigger, MetricOutput,
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
@@ -90,3 +92,15 @@ pub use wrapped::{
     generate_wrapped, MarathonSession, ProjectRanking, StreakStats, TimePatterns, ToolRankings,
     TotalStats, TrendComparison, WrappedConfig, WrappedPeriod, WrappedStats,
 };
+
+/// Ensure session analytics using the default analytics engine.
+pub fn ensure_session_analytics(session_id: &str, db: &Database) -> Result<SessionAnalytics> {
+    let engine = create_default_engine();
+    engine.ensure_session_analytics(session_id, db)
+}
+
+/// Ensure thread analytics using the default analytics engine.
+pub fn ensure_thread_analytics(thread_id: &str, db: &Database) -> Result<ThreadAnalytics> {
+    let engine = create_default_engine();
+    engine.ensure_thread_analytics(thread_id, db)
+}
