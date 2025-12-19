@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use aiobscura_core::analytics::{
-    generate_wrapped, DashboardStats, ProjectRow, ProjectStats, SessionAnalytics, ThreadAnalytics,
-    WrappedConfig, WrappedPeriod, WrappedStats,
+    generate_wrapped, DashboardStats, FirstOrderSessionMetrics, ProjectRow, ProjectStats,
+    SessionAnalytics, ThreadAnalytics, WrappedConfig, WrappedPeriod, WrappedStats,
 };
 use aiobscura_core::db::{EnvironmentHealth, ThreadMetadata};
 use aiobscura_core::{
@@ -104,6 +104,10 @@ pub struct App {
     pub session_analytics: Option<SessionAnalytics>,
     /// Error message if session analytics computation failed
     pub session_analytics_error: Option<String>,
+    /// First-order metrics for current session (detail view)
+    pub session_first_order_metrics: Option<FirstOrderSessionMetrics>,
+    /// Error message if first-order metrics computation failed
+    pub session_first_order_error: Option<String>,
     /// Analytics for current thread (detail view)
     pub thread_analytics: Option<ThreadAnalytics>,
     /// Error message if thread analytics computation failed
@@ -203,6 +207,8 @@ impl App {
             thread_metadata: None,
             session_analytics: None,
             session_analytics_error: None,
+            session_first_order_metrics: None,
+            session_first_order_error: None,
             thread_analytics: None,
             thread_analytics_error: None,
 
@@ -571,6 +577,7 @@ impl App {
 
                     // Load/compute analytics (both session and thread)
                     self.load_session_analytics(&session_id);
+                    self.load_first_order_metrics(&session_id);
                     self.load_thread_analytics(&thread_id);
 
                     self.view_mode = ViewMode::Detail {
@@ -598,6 +605,21 @@ impl App {
                 self.session_analytics = None;
                 self.session_analytics_error = Some(e.to_string());
                 tracing::warn!(session_id, error = %e, "Failed to compute session analytics");
+            }
+        }
+    }
+
+    /// Load or compute first-order session metrics for the detail view.
+    fn load_first_order_metrics(&mut self, session_id: &str) {
+        match aiobscura_core::analytics::ensure_first_order_metrics(session_id, &self.db) {
+            Ok(metrics) => {
+                self.session_first_order_metrics = Some(metrics);
+                self.session_first_order_error = None;
+            }
+            Err(e) => {
+                self.session_first_order_metrics = None;
+                self.session_first_order_error = Some(e.to_string());
+                tracing::warn!(session_id, error = %e, "Failed to compute first-order metrics");
             }
         }
     }
@@ -634,6 +656,8 @@ impl App {
         self.thread_metadata = None;
         self.session_analytics = None;
         self.session_analytics_error = None;
+        self.session_first_order_metrics = None;
+        self.session_first_order_error = None;
         self.thread_analytics = None;
         self.thread_analytics_error = None;
     }
@@ -1436,6 +1460,8 @@ impl App {
         self.session_scroll_offset = 0;
         self.session_analytics = None;
         self.session_analytics_error = None;
+        self.session_first_order_metrics = None;
+        self.session_first_order_error = None;
     }
 
     /// Close project list and switch to thread list.
@@ -1892,6 +1918,7 @@ impl App {
 
                                 // Load session analytics
                                 self.load_session_analytics(&session_id);
+                                self.load_first_order_metrics(&session_id);
 
                                 self.view_mode = ViewMode::SessionDetail {
                                     session_id,
