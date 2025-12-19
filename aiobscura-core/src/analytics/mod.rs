@@ -130,6 +130,15 @@ pub fn ensure_session_analytics(session_id: &str, db: &Database) -> Result<Sessi
     engine.ensure_session_analytics(session_id, db)
 }
 
+/// Ensure first-order metrics using the default analytics engine.
+pub fn ensure_first_order_metrics(
+    session_id: &str,
+    db: &Database,
+) -> Result<FirstOrderSessionMetrics> {
+    let engine = create_default_engine();
+    engine.ensure_first_order_metrics(session_id, db)
+}
+
 /// Ensure thread analytics using the default analytics engine.
 pub fn ensure_thread_analytics(thread_id: &str, db: &Database) -> Result<ThreadAnalytics> {
     let engine = create_default_engine();
