@@ -220,16 +220,21 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         // Determine thread type, badge, and color
-        let (thread_type, thread_color, badge) =
-            if let Some(thread) = app.session_threads.iter().find(|t| t.id == thread_id) {
-                match thread.thread_type {
-                    ThreadType::Main => (ThreadType::Main, BADGE_MAIN, "●"),
-                    ThreadType::Agent => (ThreadType::Agent, BADGE_AGENT, "◎"),
-                    ThreadType::Background => (ThreadType::Background, BADGE_BG, "◇"),
-                }
-            } else {
-                (ThreadType::Main, Color::DarkGray, "●")
-            };
+        let (thread_type, thread_color, badge, subtype_suffix) = if let Some(thread) =
+            app.session_threads.iter().find(|t| t.id == thread_id)
+        {
+            let suffix = thread
+                .agent_subtype()
+                .map(|subtype| format!(" ({})", subtype))
+                .unwrap_or_default();
+            match thread.thread_type {
+                ThreadType::Main => (ThreadType::Main, BADGE_MAIN, "●", String::new()),
+                ThreadType::Agent => (ThreadType::Agent, BADGE_AGENT, "◎", suffix),
+                ThreadType::Background => (ThreadType::Background, BADGE_BG, "◇", String::new()),
+            }
+        } else {
+            (ThreadType::Main, Color::DarkGray, "●", String::new())
+        };
 
         // For non-main threads, calculate and show duration
         let duration_str = if !matches!(thread_type, ThreadType::Main) && !messages.is_empty() {
@@ -244,7 +249,10 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("─── ", Style::default().fg(thread_color)),
             Span::styled(format!("{} ", badge), Style::default().fg(thread_color)),
-            Span::styled(thread_label, Style::default().fg(thread_color).bold()),
+            Span::styled(
+                format!("{}{}", thread_label, subtype_suffix),
+                Style::default().fg(thread_color).bold(),
+            ),
             Span::styled(duration_str, Style::default().fg(thread_color)),
             Span::styled(
                 " ───────────────────────────────────",
@@ -965,9 +973,16 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.threads.iter().map(|thread| {
         // Create styled type cell with badge and tree chars
         let (badge, type_text, color) = match thread.thread_type {
-            ThreadType::Main => ("●", "main", BADGE_MAIN),
-            ThreadType::Agent => ("◎", "agent", BADGE_AGENT),
-            ThreadType::Background => ("◇", "bg", BADGE_BG),
+            ThreadType::Main => ("●", "main".to_string(), BADGE_MAIN),
+            ThreadType::Agent => {
+                let label = thread
+                    .agent_subtype
+                    .as_deref()
+                    .map(|subtype| format!("agent {}", subtype))
+                    .unwrap_or_else(|| "agent".to_string());
+                ("◎", label, BADGE_AGENT)
+            }
+            ThreadType::Background => ("◇", "bg".to_string(), BADGE_BG),
         };
 
         // Use tree-drawing characters for hierarchy (single space indent)

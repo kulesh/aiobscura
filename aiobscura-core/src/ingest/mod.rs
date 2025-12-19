@@ -41,7 +41,7 @@ pub use parser::{AssistantParser, ParseContext, ParseResult, SourcePattern};
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::types::{Checkpoint, SourceFile};
+use crate::types::{Checkpoint, Message, SourceFile};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 
@@ -425,6 +425,23 @@ impl IngestCoordinator {
                             spawn_info.spawning_message_seq,
                             &spawn_info.session_id,
                         )?;
+
+                        if let Some(spawn_message) = self.db.get_main_thread_message_by_seq(
+                            &spawn_info.session_id,
+                            spawn_info.spawning_message_seq,
+                        )? {
+                            if let Some(subtype) = derive_agent_subtype(&spawn_message) {
+                                let mut metadata = self
+                                    .db
+                                    .get_thread(&thread.id)?
+                                    .map(|t| t.metadata)
+                                    .unwrap_or_else(|| thread.metadata.clone());
+                                if metadata.get("agent_subtype").is_none() {
+                                    metadata["agent_subtype"] = serde_json::Value::String(subtype);
+                                    self.db.update_thread_metadata(&thread.id, &metadata)?;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -538,6 +555,37 @@ fn extract_agent_id(path: &Path) -> Option<String> {
     // Strip "agent-" prefix and ".jsonl" suffix
     let stem = path.file_stem()?.to_str()?;
     stem.strip_prefix("agent-").map(|s| s.to_string())
+}
+
+fn derive_agent_subtype(spawn_message: &Message) -> Option<String> {
+    let tool_input = spawn_message.tool_input.as_ref();
+    if let Some(input) = tool_input {
+        for key in [
+            "subtype",
+            "task_type",
+            "agent_type",
+            "mode",
+            "kind",
+            "intent",
+            "type",
+        ] {
+            if let Some(value) = input.get(key).and_then(|v| v.as_str()) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(tool_name) = spawn_message.tool_name.as_deref() {
+        let trimmed = tool_name.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("task") {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

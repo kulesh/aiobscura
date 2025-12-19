@@ -741,6 +741,24 @@ impl Database {
         Ok(())
     }
 
+    /// Update thread metadata JSON.
+    pub fn update_thread_metadata(
+        &self,
+        thread_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE threads
+            SET metadata = ?1
+            WHERE id = ?2
+            "#,
+            params![metadata.to_string(), thread_id],
+        )?;
+        Ok(())
+    }
+
     // ============================================
     // Agent spawn operations
     // ============================================
@@ -927,6 +945,31 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(messages)
+    }
+
+    /// Get a message from the main thread by session and sequence number.
+    pub fn get_main_thread_message_by_seq(
+        &self,
+        session_id: &str,
+        seq: i64,
+    ) -> Result<Option<Message>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+            r#"
+            SELECT m.*
+            FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            WHERE m.session_id = ?1
+              AND m.seq = ?2
+              AND t.thread_type = 'main'
+            ORDER BY m.id ASC
+            LIMIT 1
+            "#,
+            params![session_id, seq],
+            Self::row_to_message,
+        )
+        .optional()?)
     }
 
     /// Get the last sequence number for a thread
