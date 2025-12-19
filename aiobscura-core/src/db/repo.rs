@@ -1833,14 +1833,16 @@ impl Database {
     /// Get thread metadata for detail views.
     pub fn get_thread_metadata(&self, thread_id: &str) -> Result<Option<ThreadMetadata>> {
         let conn = self.conn.lock().unwrap();
-        let result: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<String>,
-        )> = conn
+        struct ThreadMetadataRow {
+            session_id: String,
+            source_path: String,
+            model_name: Option<String>,
+            metadata: Option<String>,
+            started_at: String,
+            last_activity_at: Option<String>,
+        }
+
+        let result: Option<ThreadMetadataRow> = conn
             .query_row(
                 r#"
                 SELECT
@@ -1857,25 +1859,24 @@ impl Database {
                 "#,
                 [thread_id],
                 |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
+                    Ok(ThreadMetadataRow {
+                        session_id: row.get(0)?,
+                        source_path: row.get(1)?,
+                        model_name: row.get(2)?,
+                        metadata: row.get(3)?,
+                        started_at: row.get(4)?,
+                        last_activity_at: row.get(5)?,
+                    })
                 },
             )
             .optional()?;
 
-        let Some((session_id, source_path, model_name, metadata_str, started_str, last_str)) =
-            result
-        else {
+        let Some(row) = result else {
             return Ok(None);
         };
 
-        let metadata: serde_json::Value = metadata_str
+        let metadata: serde_json::Value = row
+            .metadata
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or(serde_json::json!({}));
@@ -1888,10 +1889,10 @@ impl Database {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let started_at = DateTime::parse_from_rfc3339(&started_str)
+        let started_at = DateTime::parse_from_rfc3339(&row.started_at)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
-        let last_activity = last_str.and_then(|s| {
+        let last_activity = row.last_activity_at.and_then(|s| {
             DateTime::parse_from_rfc3339(&s)
                 .map(|dt| dt.with_timezone(&Utc))
                 .ok()
@@ -1901,16 +1902,16 @@ impl Database {
             .unwrap_or(0);
 
         let message_count = self.count_thread_messages(thread_id).unwrap_or(0);
-        let agent_count = self.count_session_agents(&session_id).unwrap_or(0);
+        let agent_count = self.count_session_agents(&row.session_id).unwrap_or(0);
         let tool_stats = self.get_thread_tool_stats(thread_id).unwrap_or_default();
-        let plan_count = self.count_session_plans(&session_id).unwrap_or(0);
+        let plan_count = self.count_session_plans(&row.session_id).unwrap_or(0);
         let file_stats = self.get_thread_file_stats(thread_id).unwrap_or_default();
 
         Ok(Some(ThreadMetadata {
-            source_path: Some(source_path),
+            source_path: Some(row.source_path),
             cwd,
             git_branch,
-            model_name,
+            model_name: row.model_name,
             duration_secs,
             message_count,
             agent_count,
