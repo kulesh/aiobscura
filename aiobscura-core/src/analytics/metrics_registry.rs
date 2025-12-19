@@ -188,3 +188,30 @@ fn fallback_score(metric: &MetricDescriptor, query: &str) -> Option<f64> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_metrics_for_plugin() {
+        let metrics = list_metrics_for_plugin("core.first_order");
+        assert_eq!(metrics.len(), 8);
+        assert!(metrics.iter().any(|m| m.name == "tokens_in"));
+    }
+
+    #[test]
+    fn test_list_metrics_for_entity() {
+        let metrics = list_metrics_for_entity("session");
+        assert!(metrics.iter().any(|m| m.name == "tool_call_breakdown"));
+    }
+
+    #[test]
+    fn test_search_metrics_matches_tokens() {
+        let results = search_metrics("token");
+        let names: Vec<_> = results.iter().map(|r| r.metric.name).collect();
+        assert!(names.contains(&"tokens_in"));
+        assert!(names.contains(&"tokens_out"));
+        assert!(names.contains(&"tokens_total"));
+    }
+}
