@@ -19,6 +19,7 @@
 
 pub mod dashboard;
 pub mod engine;
+pub mod metrics_registry;
 pub mod personality;
 pub mod plugins;
 pub mod project;
@@ -30,6 +31,10 @@ use crate::Result;
 pub use engine::{
     AnalyticsContext, AnalyticsEngine, AnalyticsPlugin, AnalyticsTrigger, MetricOutput,
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
+};
+pub use metrics_registry::{
+    list_metrics, list_metrics_for_entity, list_metrics_for_plugin, MetricDescriptor,
+    MetricValueType,
 };
 pub use plugins::create_default_engine;
 
