@@ -6,12 +6,12 @@ use aiobscura_core::analytics::{
     generate_wrapped, DashboardStats, ProjectRow, ProjectStats, SessionAnalytics, ThreadAnalytics,
     WrappedConfig, WrappedPeriod, WrappedStats,
 };
-use chrono::Datelike;
 use aiobscura_core::db::{EnvironmentHealth, ThreadMetadata};
 use aiobscura_core::{
     ActiveSession, Database, LiveStats, Message, MessageWithContext, Plan, Thread, ThreadType,
 };
 use anyhow::Result;
+use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 

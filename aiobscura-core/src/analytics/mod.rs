@@ -25,13 +25,13 @@ pub mod project;
 pub mod wrapped;
 
 // Engine exports
+use crate::db::Database;
+use crate::Result;
 pub use engine::{
     AnalyticsContext, AnalyticsEngine, AnalyticsPlugin, AnalyticsTrigger, MetricOutput,
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
 };
 pub use plugins::create_default_engine;
-use crate::db::Database;
-use crate::Result;
 
 // Session analytics struct
 use chrono::{DateTime, Utc};
