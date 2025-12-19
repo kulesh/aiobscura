@@ -33,6 +33,13 @@ pub struct MetricDescriptor {
     pub description: &'static str,
 }
 
+/// Ranked search result for metric discovery.
+#[derive(Debug, Clone)]
+pub struct MetricSearchResult {
+    pub metric: MetricDescriptor,
+    pub score: f64,
+}
+
 const FIRST_ORDER_METRICS: &[MetricDescriptor] = &[
     MetricDescriptor {
         plugin: "core.first_order",
@@ -123,4 +130,61 @@ pub fn list_metrics_for_entity(entity_type: &str) -> Vec<MetricDescriptor> {
         .filter(|m| m.entity_type == entity_type)
         .cloned()
         .collect()
+}
+
+/// Search metrics using a fallback string matcher.
+///
+/// This is a deterministic, dependency-free fallback when no semantic scorer
+/// is available. For semantic search, use `search_metrics_with_scoring`.
+pub fn search_metrics(query: &str) -> Vec<MetricSearchResult> {
+    search_metrics_with_scoring(query, fallback_score)
+}
+
+/// Search metrics using a caller-provided semantic scorer.
+///
+/// The scorer should return `Some(score)` for matches, or `None` to skip.
+pub fn search_metrics_with_scoring<F>(query: &str, scorer: F) -> Vec<MetricSearchResult>
+where
+    F: Fn(&MetricDescriptor, &str) -> Option<f64>,
+{
+    let mut results: Vec<MetricSearchResult> = ALL_METRICS
+        .iter()
+        .filter_map(|metric| {
+            scorer(metric, query).map(|score| MetricSearchResult {
+                metric: metric.clone(),
+                score,
+            })
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.score.total_cmp(&a.score));
+    results
+}
+
+fn fallback_score(metric: &MetricDescriptor, query: &str) -> Option<f64> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+
+    let name = metric.name.to_lowercase();
+    let summary = metric.summary.to_lowercase();
+    let description = metric.description.to_lowercase();
+    let mut score = 0.0;
+
+    if name.contains(&query) {
+        score += 3.0;
+    }
+    if summary.contains(&query) {
+        score += 2.0;
+    }
+    if description.contains(&query) {
+        score += 1.0;
+    }
+
+    if score > 0.0 {
+        Some(score)
+    } else {
+        None
+    }
 }

@@ -33,8 +33,8 @@ pub use engine::{
     PluginRunResult, PluginRunStatus, METRIC_VERSION,
 };
 pub use metrics_registry::{
-    list_metrics, list_metrics_for_entity, list_metrics_for_plugin, MetricDescriptor,
-    MetricValueType,
+    list_metrics, list_metrics_for_entity, list_metrics_for_plugin, search_metrics,
+    search_metrics_with_scoring, MetricDescriptor, MetricSearchResult, MetricValueType,
 };
 pub use plugins::create_default_engine;
 
