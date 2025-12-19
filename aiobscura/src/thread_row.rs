@@ -13,6 +13,8 @@ pub struct ThreadRow {
     pub session_id: String,
     /// Thread type (Main, Agent, Background)
     pub thread_type: ThreadType,
+    /// Optional agent subtype (e.g., "plan", "explore")
+    pub agent_subtype: Option<String>,
     /// Parent thread ID (None for main threads and orphan agents)
     #[allow(dead_code)]
     pub parent_thread_id: Option<String>,

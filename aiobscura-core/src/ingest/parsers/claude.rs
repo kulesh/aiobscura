@@ -661,6 +661,11 @@ impl ClaudeCodeParser {
         } else {
             AuthorRole::Human
         };
+        let assistant_role = if thread_type == ThreadType::Agent {
+            AuthorRole::Agent
+        } else {
+            AuthorRole::Assistant
+        };
         let mut messages = Vec::new();
         let record_type = record.record_type.as_deref().unwrap_or("unknown");
 
@@ -687,7 +692,7 @@ impl ClaudeCodeParser {
                                         seq: *seq,
                                         emitted_at,
                                         observed_at,
-                                        author_role: AuthorRole::Assistant,
+                                        author_role: assistant_role,
                                         author_name: None,
                                         message_type: MessageType::Response,
                                         content: Some(text.clone()),
@@ -719,7 +724,7 @@ impl ClaudeCodeParser {
                                                     seq: *seq,
                                                     emitted_at,
                                                     observed_at,
-                                                    author_role: AuthorRole::Assistant,
+                                                    author_role: assistant_role,
                                                     author_name: None,
                                                     message_type: MessageType::Response,
                                                     content: Some(text.clone()),
@@ -747,7 +752,7 @@ impl ClaudeCodeParser {
                                                 seq: *seq,
                                                 emitted_at,
                                                 observed_at,
-                                                author_role: AuthorRole::Assistant,
+                                                author_role: assistant_role,
                                                 author_name: None,
                                                 message_type: MessageType::ToolCall,
                                                 content: None,
@@ -782,7 +787,7 @@ impl ClaudeCodeParser {
                                                 seq: *seq,
                                                 emitted_at,
                                                 observed_at,
-                                                author_role: AuthorRole::Assistant,
+                                                author_role: assistant_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
                                                 content: None,
@@ -813,7 +818,7 @@ impl ClaudeCodeParser {
                                                 seq: *seq,
                                                 emitted_at,
                                                 observed_at,
-                                                author_role: AuthorRole::Assistant,
+                                                author_role: assistant_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
                                                 content: Some(
@@ -846,7 +851,7 @@ impl ClaudeCodeParser {
                                                 seq: *seq,
                                                 emitted_at,
                                                 observed_at,
-                                                author_role: AuthorRole::Assistant,
+                                                author_role: assistant_role,
                                                 author_name: None,
                                                 message_type: MessageType::Context,
                                                 content: Some(

@@ -427,6 +427,13 @@ pub struct Thread {
     pub metadata: serde_json::Value,
 }
 
+impl Thread {
+    /// Returns the agent subtype if recorded in metadata.
+    pub fn agent_subtype(&self) -> Option<&str> {
+        self.metadata.get("agent_subtype").and_then(|v| v.as_str())
+    }
+}
+
 // ============================================
 // Authors
 // ============================================

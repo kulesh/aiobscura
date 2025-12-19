@@ -454,7 +454,7 @@ impl Database {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 backing_model_id = excluded.backing_model_id,
-                project_id = excluded.project_id,
+                project_id = COALESCE(excluded.project_id, sessions.project_id),
                 last_activity_at = excluded.last_activity_at,
                 status = excluded.status,
                 metadata = excluded.metadata
@@ -741,6 +741,42 @@ impl Database {
         Ok(())
     }
 
+    /// Update thread metadata JSON.
+    pub fn update_thread_metadata(
+        &self,
+        thread_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE threads
+            SET metadata = ?1
+            WHERE id = ?2
+            "#,
+            params![metadata.to_string(), thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the last_activity_at timestamp for a thread.
+    pub fn update_thread_last_activity(
+        &self,
+        thread_id: &str,
+        last_activity_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE threads
+            SET last_activity_at = ?1
+            WHERE id = ?2
+            "#,
+            params![last_activity_at.to_rfc3339(), thread_id],
+        )?;
+        Ok(())
+    }
+
     // ============================================
     // Agent spawn operations
     // ============================================
@@ -927,6 +963,31 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(messages)
+    }
+
+    /// Get a message from the main thread by session and sequence number.
+    pub fn get_main_thread_message_by_seq(
+        &self,
+        session_id: &str,
+        seq: i64,
+    ) -> Result<Option<Message>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                r#"
+            SELECT m.*
+            FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            WHERE m.session_id = ?1
+              AND m.seq = ?2
+              AND t.thread_type = 'main'
+            ORDER BY m.id ASC
+            LIMIT 1
+            "#,
+                params![session_id, seq],
+                Self::row_to_message,
+            )
+            .optional()?)
     }
 
     /// Get the last sequence number for a thread
@@ -1832,7 +1893,6 @@ impl Database {
 
     /// Get thread metadata for detail views.
     pub fn get_thread_metadata(&self, thread_id: &str) -> Result<Option<ThreadMetadata>> {
-        let conn = self.conn.lock().unwrap();
         struct ThreadMetadataRow {
             session_id: String,
             source_path: String,
@@ -1842,8 +1902,9 @@ impl Database {
             last_activity_at: Option<String>,
         }
 
-        let result: Option<ThreadMetadataRow> = conn
-            .query_row(
+        let result: Option<ThreadMetadataRow> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
                 r#"
                 SELECT
                     t.session_id,
@@ -1869,7 +1930,8 @@ impl Database {
                     })
                 },
             )
-            .optional()?;
+            .optional()?
+        };
 
         let Some(row) = result else {
             return Ok(None);
