@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2024-12-19
+
+### Added
+
+- First-order metrics registry and semantic discovery API
+- `core.first_order` analytics plugin with typed wrapper and ensure helper
+- Session detail view now surfaces first-order metrics (tokens, duration, tools, errors)
+
+### Fixed
+
+- Thread activity updates now reflect newly ingested messages
+- TUI thread detail view deadlock when opening thread metadata
+
 ## [0.1.4] - 2024-12-17
 
 ### Added
@@ -108,7 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/kulesh/aiobscura/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/kulesh/aiobscura/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/kulesh/aiobscura/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kulesh/aiobscura/compare/v0.1.1...v0.1.2
