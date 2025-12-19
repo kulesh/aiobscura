@@ -454,7 +454,7 @@ impl Database {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 backing_model_id = excluded.backing_model_id,
-                project_id = excluded.project_id,
+                project_id = COALESCE(excluded.project_id, sessions.project_id),
                 last_activity_at = excluded.last_activity_at,
                 status = excluded.status,
                 metadata = excluded.metadata
@@ -759,6 +759,24 @@ impl Database {
         Ok(())
     }
 
+    /// Update the last_activity_at timestamp for a thread.
+    pub fn update_thread_last_activity(
+        &self,
+        thread_id: &str,
+        last_activity_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE threads
+            SET last_activity_at = ?1
+            WHERE id = ?2
+            "#,
+            params![last_activity_at.to_rfc3339(), thread_id],
+        )?;
+        Ok(())
+    }
+
     // ============================================
     // Agent spawn operations
     // ============================================
@@ -956,7 +974,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         Ok(conn
             .query_row(
-            r#"
+                r#"
             SELECT m.*
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
@@ -966,10 +984,10 @@ impl Database {
             ORDER BY m.id ASC
             LIMIT 1
             "#,
-            params![session_id, seq],
-            Self::row_to_message,
-        )
-        .optional()?)
+                params![session_id, seq],
+                Self::row_to_message,
+            )
+            .optional()?)
     }
 
     /// Get the last sequence number for a thread
@@ -1875,7 +1893,6 @@ impl Database {
 
     /// Get thread metadata for detail views.
     pub fn get_thread_metadata(&self, thread_id: &str) -> Result<Option<ThreadMetadata>> {
-        let conn = self.conn.lock().unwrap();
         struct ThreadMetadataRow {
             session_id: String,
             source_path: String,
@@ -1885,6 +1902,7 @@ impl Database {
             last_activity_at: Option<String>,
         }
 
+        let conn = self.conn.lock().unwrap();
         let result: Option<ThreadMetadataRow> = conn
             .query_row(
                 r#"

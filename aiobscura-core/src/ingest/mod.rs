@@ -41,8 +41,10 @@ pub use parser::{AssistantParser, ParseContext, ParseResult, SourcePattern};
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::types::{Checkpoint, Message, SourceFile};
+use crate::types::{Checkpoint, Message, MessageType, Project, SourceFile};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Result of a full sync operation across all assistants.
@@ -322,7 +324,7 @@ impl IngestCoordinator {
         };
 
         // Parse the file
-        let parse_result = parser.parse(&ctx)?;
+        let mut parse_result = parser.parse(&ctx)?;
 
         // Check if there's anything new
         if parse_result.messages.is_empty()
@@ -393,7 +395,8 @@ impl IngestCoordinator {
         let session_id = parse_result.session.as_ref().map(|s| s.id.clone());
         let is_new_session = existing.is_none() && parse_result.session.is_some();
 
-        if let Some(session) = &parse_result.session {
+        if let Some(session) = &mut parse_result.session {
+            self.hydrate_session_project(session)?;
             self.db.upsert_session(session)?;
         }
 
@@ -412,6 +415,9 @@ impl IngestCoordinator {
             let existing_threads = self.db.get_session_threads(&thread.session_id)?;
             if !existing_threads.iter().any(|t| t.id == thread.id) {
                 self.db.insert_thread(thread)?;
+            } else if let Some(last_activity) = thread.last_activity_at {
+                self.db
+                    .update_thread_last_activity(&thread.id, last_activity)?;
             }
         }
 
@@ -439,6 +445,19 @@ impl IngestCoordinator {
                                 if metadata.get("agent_subtype").is_none() {
                                     metadata["agent_subtype"] = serde_json::Value::String(subtype);
                                     self.db.update_thread_metadata(&thread.id, &metadata)?;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(ref agent_session_id) = session_id {
+                        if let Some(mut agent_session) = self.db.get_session(agent_session_id)? {
+                            if agent_session.project_id.is_none() {
+                                if let Some(parent_session) =
+                                    self.db.get_session(&spawn_info.session_id)?
+                                {
+                                    agent_session.project_id = parent_session.project_id;
+                                    self.db.upsert_session(&agent_session)?;
                                 }
                             }
                         }
@@ -478,6 +497,27 @@ impl IngestCoordinator {
 
         if !parse_result.messages.is_empty() {
             self.db.insert_messages(&parse_result.messages)?;
+
+            let mut thread_last_activity: HashMap<String, chrono::DateTime<chrono::Utc>> =
+                HashMap::new();
+            for msg in &parse_result.messages {
+                if msg.message_type == MessageType::Context {
+                    continue;
+                }
+                thread_last_activity
+                    .entry(msg.thread_id.clone())
+                    .and_modify(|t| {
+                        if msg.emitted_at > *t {
+                            *t = msg.emitted_at;
+                        }
+                    })
+                    .or_insert(msg.emitted_at);
+            }
+
+            for (thread_id, last_activity) in thread_last_activity {
+                self.db
+                    .update_thread_last_activity(&thread_id, last_activity)?;
+            }
         }
 
         // Store plans and link to session
@@ -506,6 +546,54 @@ impl IngestCoordinator {
             skip_reason: None,
             message_summaries,
         })
+    }
+
+    fn hydrate_session_project(&self, session: &mut crate::types::Session) -> Result<()> {
+        if session.project_id.is_none() {
+            if let Some(existing) = self.db.get_session(&session.id)? {
+                if existing.project_id.is_some() {
+                    session.project_id = existing.project_id;
+                }
+            }
+        }
+
+        if session.project_id.is_none() {
+            if let Some(cwd) = session.metadata.get("cwd").and_then(|v| v.as_str()) {
+                if let Some(project) = self.db.get_project_by_path(Path::new(cwd))? {
+                    session.project_id = Some(project.id);
+                } else {
+                    let project_id = Self::generate_project_id(cwd);
+                    let project_name = Self::extract_dir_name(cwd);
+                    let project = Project {
+                        id: project_id.clone(),
+                        path: PathBuf::from(cwd),
+                        name: Some(project_name),
+                        created_at: session.started_at,
+                        last_activity_at: session.last_activity_at,
+                        metadata: serde_json::json!({}),
+                    };
+                    self.db.upsert_project(&project)?;
+                    session.project_id = Some(project_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn generate_project_id(path: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        let hash = hasher.finalize();
+        format!("{:x}", hash)[..16].to_string()
+    }
+
+    fn extract_dir_name(path: &str) -> String {
+        Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
     }
 
     /// Update thread spawn info after parsing an agent file.
