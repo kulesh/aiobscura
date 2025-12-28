@@ -564,6 +564,169 @@ pub enum BackgroundKind {
 
 ---
 
+## Part 7B: Schema-Type-Documentation Parity Analysis
+
+This section identifies concrete discrepancies between the three sources of truth:
+1. **types.rs** - Rust type definitions
+2. **schema.rs** - SQLite database schema
+3. **aiobscura-requirements.md** - Original specification
+
+### Terminology Drift Map
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        TERMINOLOGY EVOLUTION                                  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Requirements Doc (v1.3)    →    types.rs (Current)    →    Schema (v7)      │
+│  ──────────────────────          ─────────────────          ────────────     │
+│                                                                               │
+│  "agent" (column)           →    assistant             →    assistant        │
+│  "events" (table)           →    Message               →    messages         │
+│  "event_type"               →    MessageType           →    message_type     │
+│  "ts" (timestamp)           →    emitted_at            →    emitted_at       │
+│  "session_type"             →    (removed)             →    (removed)        │
+│  —                          →    Thread                →    threads          │
+│  —                          →    BackingModel          →    backing_models   │
+│  —                          →    Project               →    projects         │
+│                                                                               │
+│  Legend: ✓ = aligned, ⚠ = drift, ✗ = missing                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Specific Discrepancies
+
+#### 1. Requirements Doc Uses "agent" for Assistant Column
+
+**Requirements (line 183):**
+```sql
+CREATE TABLE sessions (
+    agent            TEXT NOT NULL,  -- "agent" column name
+    ...
+```
+
+**Schema & Types (current):**
+```sql
+assistant        TEXT NOT NULL,      -- "assistant" column name
+```
+
+**Status:** ✓ Fixed in code, requirements doc is stale
+
+#### 2. Requirements Doc Still References "events" Table
+
+**Requirements (line 207-234):**
+```sql
+CREATE TABLE events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ...
+);
+```
+
+**Current Code:** Uses `messages` table and `Message` type
+
+**Status:** ⚠ Requirements doc needs update to match current terminology
+
+#### 3. Session Type Removed Without Documentation
+
+**Requirements (line 200-204):**
+```
+Session types:
+- **agent_task** — Full agent coding session (human + AI + tools)
+- **conversation** — Pure human-AI conversation (no tool use)
+- **file_operation** — Batch file operations
+```
+
+**Current Code:** `session_type` field removed entirely from both types.rs and schema.rs
+
+**Status:** ⚠ Requirements doc describes a feature that was removed. Either:
+- Update requirements to remove session_type
+- Or reintroduce it if still needed
+
+#### 4. Thread Concept Not in Requirements
+
+The `Thread` entity (with ThreadType::Main, Agent, Background) is a significant architectural addition not reflected in requirements.
+
+**Impact:** The requirements describe a flat Session→Events model, but actual implementation has Session→Thread→Message hierarchy.
+
+**Status:** ⚠ Requirements doc needs Thread documentation
+
+#### 5. AuthorRole::Agent Marked as Unused
+
+**types.rs (line 445):**
+```rust
+/// Subprocess spawned by assistant (Task agent, etc.)
+/// Note: Currently unused by parsers; reserved for unified timeline views
+Agent,
+```
+
+**Observation:** The parser uses `ThreadType::Agent` to detect agent files, but assigns `AuthorRole::Assistant` to their messages (not `AuthorRole::Agent`).
+
+**Question:** Should agent thread messages have `author_role: Agent` instead of `Assistant`?
+
+### Schema Tables Without Rust Types
+
+The schema defines several tables that have no corresponding Rust types:
+
+| Table | Purpose | Rust Type Needed? |
+|-------|---------|-------------------|
+| `agent_spawns` | Links agent_id → spawning_message_seq | Yes - currently uses HashMap in ParseResult |
+| `session_plans` | M:N join table | Optional - could be derived |
+| `plan_versions` | Content versioning | Yes - for plan history tracking |
+| `source_files` | Checkpoint tracking | Partial - SourceFile exists but Checkpoint in types.rs |
+
+### Parser-Type Usage Analysis
+
+The Claude parser demonstrates correct usage of the type system:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    PARSER TYPE MAPPING                          │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Raw Log Field        Parser Decision           Assigned Type   │
+│  ──────────────       ─────────────────         ─────────────   │
+│                                                                 │
+│  type: "user"    ──►  In main thread?                          │
+│                       ├── Yes ──────────► AuthorRole::Human     │
+│                       └── No (agent) ───► AuthorRole::Caller    │
+│                                                                 │
+│  type: "assistant" ─────────────────────► AuthorRole::Assistant │
+│                                                                 │
+│  content: tool_use ─────────────────────► MessageType::ToolCall │
+│                                                                 │
+│  content: tool_result ──────────────────► MessageType::ToolResult│
+│                              or if is_error: MessageType::Error │
+│                                                                 │
+│  File: agent-*.jsonl ───────────────────► ThreadType::Agent     │
+│  File: *.jsonl ─────────────────────────► ThreadType::Main      │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Key Finding:** The `AuthorRole::Caller` is correctly used for "user" messages in agent threads, maintaining the Human vs Caller distinction.
+
+---
+
+## Part 7C: Concrete Fixes Checklist
+
+### Documentation Fixes (No Code Changes)
+
+- [ ] **Update requirements doc:** Replace "events" with "messages" throughout
+- [ ] **Update requirements doc:** Replace "agent" column with "assistant"
+- [ ] **Update requirements doc:** Remove session_type or document its removal
+- [ ] **Add to requirements:** Thread concept and ThreadType enum
+- [ ] **Add to requirements:** Dual timestamp model (emitted_at/observed_at)
+- [ ] **Add to requirements:** Project entity and project_id foreign key
+
+### Code Considerations
+
+- [ ] **Decide:** Should agent thread messages use `AuthorRole::Agent`?
+- [ ] **Add type:** `AgentSpawn` struct for the agent_spawns table
+- [ ] **Add type:** `PlanVersion` struct for plan_versions table
+- [ ] **Consider:** Removing the deprecated type aliases after migration period
+
+---
+
 ## Part 8: Terminology Alignment Check
 
 ### Correct Usage Examples
@@ -592,13 +755,25 @@ pub enum BackgroundKind {
 
 ### Current Strengths
 
-1. **Clear role taxonomy** (Human/Assistant/Agent/Tool/System)
+1. **Clear role taxonomy** (Human/Caller/Assistant/Agent/Tool/System)
 2. **Product vs LLM separation** (Assistant vs BackingModel)
 3. **Hierarchical threads** supporting agent conversations
 4. **Lossless data capture** for future-proofing
 5. **Dual timestamp model** for accurate timeline reconstruction
+6. **Caller role for agents** - Parser correctly distinguishes Human from Caller in agent threads
 
-### Key Gaps
+### Documentation Drift (Requires Sync)
+
+1. **Requirements doc stale** - Still uses "events", "agent" column, session_type
+2. **Thread concept undocumented** - Major architectural feature not in requirements
+3. **AuthorRole::Agent unused** - Defined but never assigned by parsers
+
+### Schema-Type Gaps
+
+1. **Missing types for tables:** agent_spawns, session_plans, plan_versions
+2. **SourceFile partial:** Checkpoint enum exists but not fully integrated
+
+### Conceptual Gaps (Future Work)
 
 1. **No Developer entity** - Human is implicit
 2. **No Workflow concept** - Sessions are isolated
@@ -608,10 +783,23 @@ pub enum BackgroundKind {
 
 ### Recommended Next Steps
 
-1. **Immediate:** Add `AgentSubtype` to `ThreadType::Agent` (minimal change, high value)
-2. **Short-term:** Introduce `Outcome` entity for success tracking
-3. **Medium-term:** Add `Workflow` entity for cross-session analysis
-4. **Long-term:** Consider `Developer` entity for personalization
+#### Immediate (Documentation Sync)
+1. Update requirements doc to match current terminology (messages, assistant, Thread)
+2. Remove or document session_type decision
+3. Add Thread hierarchy to requirements
+
+#### Short-Term (Code)
+1. Add `AgentSubtype` to `ThreadType::Agent` (minimal change, high value)
+2. Decide: Should agent thread responses use `AuthorRole::Agent`?
+3. Add missing types: `AgentSpawn`, `PlanVersion`
+
+#### Medium-Term (Features)
+1. Introduce `Outcome` entity for success tracking
+2. Add `Workflow` entity for cross-session analysis
+
+#### Long-Term (Enhancements)
+1. Consider `Developer` entity for personalization
+2. Formal Tool taxonomy for deeper analytics
 
 ---
 
