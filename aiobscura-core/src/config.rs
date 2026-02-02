@@ -57,6 +57,10 @@ pub struct Config {
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Catsyphon collector configuration (optional)
+    #[serde(default)]
+    pub collector: CollectorConfig,
 }
 
 /// LLM provider configuration
@@ -182,6 +186,112 @@ fn default_max_log_files() -> usize {
     5
 }
 
+/// Catsyphon collector configuration
+///
+/// When enabled, aiobscura will push events to a Catsyphon server
+/// in addition to storing them locally in SQLite.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CollectorConfig {
+    /// Enable/disable Catsyphon integration
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Catsyphon server URL (e.g., "https://catsyphon.example.com")
+    pub server_url: Option<String>,
+
+    /// Collector ID (UUID from registration)
+    pub collector_id: Option<String>,
+
+    /// API key (from registration, format: "cs_live_xxxx")
+    pub api_key: Option<String>,
+
+    /// Events per API call (max 50, default 20)
+    #[serde(default = "default_collector_batch_size")]
+    pub batch_size: usize,
+
+    /// Max seconds before flushing incomplete batch
+    #[serde(default = "default_collector_flush_interval")]
+    pub flush_interval_secs: u64,
+
+    /// HTTP request timeout in seconds
+    #[serde(default = "default_collector_timeout")]
+    pub timeout_secs: u64,
+
+    /// Max retry attempts for transient failures
+    #[serde(default = "default_collector_max_retries")]
+    pub max_retries: usize,
+}
+
+impl Default for CollectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server_url: None,
+            collector_id: None,
+            api_key: None,
+            batch_size: default_collector_batch_size(),
+            flush_interval_secs: default_collector_flush_interval(),
+            timeout_secs: default_collector_timeout(),
+            max_retries: default_collector_max_retries(),
+        }
+    }
+}
+
+impl CollectorConfig {
+    /// Check if collector is properly configured and enabled
+    pub fn is_ready(&self) -> bool {
+        self.enabled
+            && self.server_url.is_some()
+            && self.collector_id.is_some()
+            && self.api_key.is_some()
+    }
+
+    /// Validate configuration, returning error message if invalid
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if self.server_url.is_none() {
+            return Err(Error::Config(
+                "collector.server_url is required when collector is enabled".to_string(),
+            ));
+        }
+        if self.collector_id.is_none() {
+            return Err(Error::Config(
+                "collector.collector_id is required when collector is enabled".to_string(),
+            ));
+        }
+        if self.api_key.is_none() {
+            return Err(Error::Config(
+                "collector.api_key is required when collector is enabled".to_string(),
+            ));
+        }
+        if self.batch_size == 0 || self.batch_size > 50 {
+            return Err(Error::Config(
+                "collector.batch_size must be between 1 and 50".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_collector_batch_size() -> usize {
+    20
+}
+
+fn default_collector_flush_interval() -> u64 {
+    5
+}
+
+fn default_collector_timeout() -> u64 {
+    30
+}
+
+fn default_collector_max_retries() -> usize {
+    3
+}
+
 impl Config {
     /// Load configuration from the default path
     pub fn load() -> Result<Self> {
@@ -287,5 +397,55 @@ level = "debug"
             LlmProvider::Claude.default_endpoint(),
             "https://api.anthropic.com"
         );
+    }
+
+    #[test]
+    fn test_collector_config_defaults() {
+        let config = CollectorConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.batch_size, 20);
+        assert_eq!(config.flush_interval_secs, 5);
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.max_retries, 3);
+        assert!(!config.is_ready());
+    }
+
+    #[test]
+    fn test_collector_config_validation() {
+        // Disabled config is always valid
+        let config = CollectorConfig::default();
+        assert!(config.validate().is_ok());
+
+        // Enabled without credentials should fail
+        let mut config = CollectorConfig::default();
+        config.enabled = true;
+        assert!(config.validate().is_err());
+
+        // Enabled with all credentials should pass
+        config.server_url = Some("https://catsyphon.example.com".to_string());
+        config.collector_id = Some("test-id".to_string());
+        config.api_key = Some("cs_live_test".to_string());
+        assert!(config.validate().is_ok());
+        assert!(config.is_ready());
+    }
+
+    #[test]
+    fn test_parse_collector_config() {
+        let toml = r#"
+[collector]
+enabled = true
+server_url = "https://catsyphon.example.com"
+collector_id = "550e8400-e29b-41d4-a716-446655440000"
+api_key = "cs_live_xxxxxxxxxxxx"
+batch_size = 30
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.collector.enabled);
+        assert_eq!(
+            config.collector.server_url.as_deref(),
+            Some("https://catsyphon.example.com")
+        );
+        assert_eq!(config.collector.batch_size, 30);
+        assert!(config.collector.is_ready());
     }
 }
