@@ -24,6 +24,8 @@
 
 mod client;
 mod events;
+mod publisher;
 
 pub use client::CollectorClient;
-pub use events::CollectorEvent;
+pub use events::{CollectorEvent, EventBatch};
+pub use publisher::{PublishStats, Publisher, SyncPublisher};

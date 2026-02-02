@@ -1064,6 +1064,91 @@ impl Database {
         }))
     }
 
+    /// Get messages observed after a given timestamp.
+    ///
+    /// Used by the collector to find newly ingested messages for publishing.
+    /// Returns messages ordered by observed_at ascending.
+    pub fn get_messages_since(&self, after: DateTime<Utc>, limit: usize) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                id, session_id, thread_id, seq,
+                emitted_at, observed_at,
+                author_role, author_name,
+                message_type,
+                content, content_type,
+                tool_name, tool_input, tool_result,
+                tokens_in, tokens_out, duration_ms,
+                source_file_path, source_offset, source_line,
+                raw_data, metadata
+            FROM messages
+            WHERE observed_at > ?
+            ORDER BY observed_at ASC
+            LIMIT ?
+            "#,
+        )?;
+
+        let after_str = after.to_rfc3339();
+        let messages = stmt
+            .query_map([&after_str, &limit.to_string()], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    seq: row.get(3)?,
+                    emitted_at: row
+                        .get::<_, String>(4)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    observed_at: row
+                        .get::<_, String>(5)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    author_role: row
+                        .get::<_, String>(6)?
+                        .parse()
+                        .unwrap_or(crate::types::AuthorRole::System),
+                    author_name: row.get(7)?,
+                    message_type: row
+                        .get::<_, String>(8)?
+                        .parse()
+                        .unwrap_or(crate::types::MessageType::Context),
+                    content: row.get(9)?,
+                    content_type: row
+                        .get::<_, Option<String>>(10)?
+                        .and_then(|s| s.parse().ok()),
+                    tool_name: row.get(11)?,
+                    tool_input: row
+                        .get::<_, Option<String>>(12)?
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    tool_result: row.get(13)?,
+                    tokens_in: row.get(14)?,
+                    tokens_out: row.get(15)?,
+                    duration_ms: row.get(16)?,
+                    source_file_path: row.get(17)?,
+                    source_offset: row.get(18)?,
+                    source_line: row.get(19)?,
+                    raw_data: row
+                        .get::<_, Option<String>>(20)?
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    metadata: row
+                        .get::<_, Option<String>>(21)?
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_else(|| serde_json::json!({})),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(messages)
+    }
+
     /// Get pre-computed session analytics from plugin_metrics table.
     /// Returns None if no analytics have been computed for this session.
     pub fn get_session_analytics(

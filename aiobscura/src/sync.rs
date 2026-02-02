@@ -8,6 +8,7 @@
 //! - Logs: $XDG_STATE_HOME/aiobscura/aiobscura.log (~/.local/state/aiobscura/aiobscura.log)
 //! - Config: $XDG_CONFIG_HOME/aiobscura/config.toml (~/.config/aiobscura/config.toml)
 
+use aiobscura_core::collector::SyncPublisher;
 use aiobscura_core::ingest::IngestCoordinator;
 use aiobscura_core::{Config, Database};
 use anyhow::{Context, Result};
@@ -134,17 +135,76 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.watch {
+    // Initialize Catsyphon publisher if configured
+    let mut publisher = SyncPublisher::new(&config.collector)
+        .context("failed to create publisher")?;
+
+    if publisher.is_some() {
+        println!("Catsyphon collector: enabled");
+        tracing::info!(
+            server_url = %config.collector.server_url.as_deref().unwrap_or(""),
+            "Catsyphon collector enabled"
+        );
+    }
+
+    // Open a second database connection for publishing queries
+    // (coordinator owns the first connection)
+    let publish_db = if publisher.is_some() {
+        Some(Database::open(&db_path).context("failed to open publish database")?)
+    } else {
+        None
+    };
+
+    let result = if args.watch {
         // Watch mode - continuous polling
-        run_watch_mode(&coordinator, &args)
+        run_watch_mode(&coordinator, &args, publish_db.as_ref(), &mut publisher)
     } else {
         // One-shot sync
-        run_single_sync(&coordinator, &args)
+        run_single_sync(&coordinator, &args, publish_db.as_ref(), &mut publisher)
+    };
+
+    // Flush any pending events on shutdown
+    if let Some(ref mut pub_instance) = publisher {
+        if pub_instance.has_pending() {
+            println!("Flushing {} pending events...", pub_instance.pending_count());
+            match pub_instance.flush_all() {
+                Ok(sent) => {
+                    if sent > 0 {
+                        println!("Sent {} events to Catsyphon", sent);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to flush events on shutdown");
+                }
+            }
+        }
+
+        // Print collector stats
+        let stats = pub_instance.stats();
+        if stats.api_calls > 0 {
+            tracing::info!(
+                events_sent = stats.events_sent,
+                events_rejected = stats.events_rejected,
+                api_calls = stats.api_calls,
+                api_failures = stats.api_failures,
+                "Catsyphon collector stats"
+            );
+        }
     }
+
+    result
 }
 
 /// Run a single sync operation with progress bar
-fn run_single_sync(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
+fn run_single_sync(
+    coordinator: &IngestCoordinator,
+    args: &Args,
+    publish_db: Option<&Database>,
+    publisher: &mut Option<SyncPublisher>,
+) -> Result<()> {
+    // Track time before sync for publishing
+    let sync_start = chrono::Utc::now();
+
     let pb = ProgressBar::new(0);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -170,6 +230,11 @@ fn run_single_sync(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
 
     pb.finish_and_clear();
 
+    // Publish newly synced messages to Catsyphon
+    if result.messages_inserted > 0 {
+        publish_new_messages(publish_db, publisher, sync_start, result.messages_inserted);
+    }
+
     print_sync_result(&result, args.verbose);
 
     tracing::info!(
@@ -182,7 +247,12 @@ fn run_single_sync(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
 }
 
 /// Run continuous watch mode
-fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
+fn run_watch_mode(
+    coordinator: &IngestCoordinator,
+    args: &Args,
+    publish_db: Option<&Database>,
+    publisher: &mut Option<SyncPublisher>,
+) -> Result<()> {
     // Set up signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -206,6 +276,9 @@ fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
     while running.load(Ordering::SeqCst) {
         iteration += 1;
 
+        // Track time before sync for publishing
+        let sync_start = chrono::Utc::now();
+
         // Run sync (checkpoints ensure incremental parsing)
         let result = coordinator
             .sync_all_with_progress(|_current, _total, _path| {
@@ -215,6 +288,9 @@ fn run_watch_mode(coordinator: &IngestCoordinator, args: &Args) -> Result<()> {
 
         // Only print if there were changes
         if result.messages_inserted > 0 {
+            // Publish newly synced messages to Catsyphon
+            publish_new_messages(publish_db, publisher, sync_start, result.messages_inserted);
+
             let timestamp = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "[{}] Synced: {} files, {} messages, {} sessions",
@@ -322,4 +398,47 @@ fn shorten_path(path: &std::path::Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+/// Publish newly synced messages to Catsyphon
+fn publish_new_messages(
+    publish_db: Option<&Database>,
+    publisher: &mut Option<SyncPublisher>,
+    sync_start: chrono::DateTime<chrono::Utc>,
+    expected_count: usize,
+) {
+    let Some(db) = publish_db else { return };
+    let Some(ref mut pub_instance) = publisher else { return };
+
+    // Query for messages observed after sync started
+    // Add a small buffer to avoid missing messages due to timing
+    let query_after = sync_start - chrono::Duration::seconds(1);
+
+    match db.get_messages_since(query_after, expected_count + 100) {
+        Ok(messages) => {
+            if messages.is_empty() {
+                return;
+            }
+
+            tracing::debug!(
+                count = messages.len(),
+                expected = expected_count,
+                "Publishing new messages to Catsyphon"
+            );
+
+            match pub_instance.queue(&messages) {
+                Ok(sent) => {
+                    if sent > 0 {
+                        tracing::debug!(sent, "Sent events to Catsyphon");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to queue messages for publishing");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query messages for publishing");
+        }
+    }
 }
