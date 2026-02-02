@@ -124,19 +124,34 @@ impl CollectorClient {
         session_id: &str,
     ) -> Result<Option<SessionStatus>>;
 
-    /// Mark session as complete
-    pub async fn complete_session(
-        &self,
-        session_id: &str,
-        outcome: SessionOutcome,
-        summary: Option<&str>,
-    ) -> Result<()>;
+    // NOTE: No complete_session() method - session lifecycle is managed
+    // by Catsyphon server based on inactivity, not by collectors.
 }
 ```
 
 ### 3. Event Transformation (`collector/events.rs`)
 
 Convert aiobscura `Message` to Catsyphon `CollectorEvent`.
+
+#### Timestamp Semantics
+
+Events flow through a three-stage pipeline, with each stage recording its observation time:
+
+```
+Source (Claude Code logs) → Collector (aiobscura) → Catsyphon Server
+        emitted_at                observed_at         server_received_at
+```
+
+| Timestamp | Set By | Definition |
+|-----------|--------|------------|
+| `emitted_at` | Source log file | When the event was originally produced by the AI assistant |
+| `observed_at` | aiobscura parser | When aiobscura first parsed/ingested this event from the log file |
+| `server_received_at` | Catsyphon server | When the API received the event (set automatically by server) |
+
+This enables end-to-end latency measurement across the ingestion pipeline.
+
+**aiobscura already captures both timestamps correctly** in `Message` (see `types.rs:704-708`),
+so the mapping is direct: `msg.emitted_at` → `event.emitted_at`, `msg.observed_at` → `event.observed_at`.
 
 ```rust
 /// Catsyphon event envelope
@@ -145,7 +160,9 @@ pub struct CollectorEvent {
     pub sequence: u32,
     #[serde(rename = "type")]
     pub event_type: String,
+    /// When the event was originally produced (from source log)
     pub emitted_at: DateTime<Utc>,
+    /// When aiobscura parsed this event
     pub observed_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_hash: Option<String>,
@@ -252,12 +269,7 @@ impl Publisher {
     /// Resume incomplete sessions after restart
     pub async fn resume_incomplete(&mut self, db: &Database) -> Result<()>;
 
-    /// Mark session complete on server
-    pub async fn complete_session(
-        &mut self,
-        session_id: &str,
-        outcome: SessionOutcome,
-    ) -> Result<()>;
+    // NOTE: No complete_session() - Catsyphon manages session lifecycle
 }
 ```
 
@@ -546,14 +558,18 @@ aiobscura collector stats
 2. **Credential Storage**: Store in config file or separate credentials file?
    - Recommendation: Config file for simplicity; separate file later if security concerns arise
 
-3. **Session Completion**: When should we mark a session complete on Catsyphon?
-   - Option A: When session goes stale locally (>60min inactive)
-   - Option B: Explicit user action
-   - Option C: Never auto-complete, let Catsyphon infer from inactivity
-   - Recommendation: Option A with configurable threshold
-
-4. **Backpressure**: What if Catsyphon is slow and buffers grow large?
+3. **Backpressure**: What if Catsyphon is slow and buffers grow large?
    - Recommendation: Cap buffer size, drop oldest events with warning log
+
+## Resolved Decisions
+
+1. **Session Completion**: Keep the collector "dumb" - Catsyphon server manages session
+   lifecycle based on inactivity. The collector only pushes events; it never marks
+   sessions as complete. This simplifies the client and centralizes lifecycle logic.
+
+2. **Timestamp Semantics**: Direct 1:1 mapping from aiobscura's existing timestamps:
+   - `Message.emitted_at` → `CollectorEvent.emitted_at` (when event occurred in source)
+   - `Message.observed_at` → `CollectorEvent.observed_at` (when aiobscura parsed it)
 
 ---
 
