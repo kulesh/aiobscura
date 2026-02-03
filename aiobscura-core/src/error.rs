@@ -36,6 +36,10 @@ pub enum Error {
     /// Plan not found
     #[error("plan not found: {0}")]
     PlanNotFound(String),
+
+    /// Collector/API error
+    #[error("collector error: {0}")]
+    Collector(String),
 }
 
 /// Result type alias for aiobscura-core

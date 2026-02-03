@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 /// SQL migrations, indexed by version number
 const MIGRATIONS: &[&str] = &[
@@ -500,13 +500,29 @@ const MIGRATIONS: &[&str] = &[
 
     -- Backfill existing data, excluding context messages (like summary)
     UPDATE threads SET last_activity_at = (
-        SELECT MAX(emitted_at) FROM messages 
-        WHERE messages.thread_id = threads.id 
+        SELECT MAX(emitted_at) FROM messages
+        WHERE messages.thread_id = threads.id
         AND message_type != 'context'
     );
 
     -- Add index for sorting by last_activity
     CREATE INDEX idx_threads_last_activity ON threads(last_activity_at DESC);
+    "#,
+    // Version 8: Add collector_publish_state for tracking Catsyphon publish progress
+    r#"
+    -- Track per-session publish state for Catsyphon collector
+    -- Enables crash recovery and sequence-based resumption
+    CREATE TABLE IF NOT EXISTS collector_publish_state (
+        session_id       TEXT PRIMARY KEY,
+        last_published_seq INTEGER NOT NULL DEFAULT 0,
+        last_published_at TEXT,
+        status           TEXT NOT NULL DEFAULT 'active',
+        error_message    TEXT,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collector_publish_status ON collector_publish_state(status);
     "#,
 ];
 
@@ -586,6 +602,7 @@ mod tests {
             "agent_spawns",
             "session_plans",
             "plan_versions",
+            "collector_publish_state",
         ];
 
         for table in tables {
