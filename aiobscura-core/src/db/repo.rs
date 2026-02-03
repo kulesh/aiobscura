@@ -135,6 +135,28 @@ pub struct EnvironmentHealth {
     pub total_messages: i64,
 }
 
+/// Publish state for Catsyphon collector.
+///
+/// Tracks the last published sequence number for each session,
+/// enabling crash recovery and sequence-based resumption.
+#[derive(Debug, Clone)]
+pub struct CollectorPublishState {
+    /// Session ID this state tracks
+    pub session_id: String,
+    /// Last successfully published sequence number
+    pub last_published_seq: i64,
+    /// When the last publish occurred
+    pub last_published_at: Option<DateTime<Utc>>,
+    /// Status: 'active', 'completed', 'failed'
+    pub status: String,
+    /// Error message if status is 'failed'
+    pub error_message: Option<String>,
+    /// When this record was created
+    pub created_at: DateTime<Utc>,
+    /// When this record was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -3495,6 +3517,234 @@ impl Database {
             total_sessions,
             total_messages,
         })
+    }
+
+    // ========================================================================
+    // Collector Publish State
+    // ========================================================================
+
+    /// Get the publish state for a session.
+    ///
+    /// Returns None if no publish state exists for this session.
+    pub fn get_collector_publish_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CollectorPublishState>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                r#"
+                SELECT session_id, last_published_seq, last_published_at, status,
+                       error_message, created_at, updated_at
+                FROM collector_publish_state
+                WHERE session_id = ?
+                "#,
+                [session_id],
+                |row| {
+                    Ok(CollectorPublishState {
+                        session_id: row.get(0)?,
+                        last_published_seq: row.get(1)?,
+                        last_published_at: row
+                            .get::<_, Option<String>>(2)?
+                            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                            .map(|dt| dt.with_timezone(&Utc)),
+                        status: row.get(3)?,
+                        error_message: row.get(4)?,
+                        created_at: row
+                            .get::<_, String>(5)
+                            .ok()
+                            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now),
+                        updated_at: row
+                            .get::<_, String>(6)
+                            .ok()
+                            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    /// Update or insert the publish state for a session.
+    ///
+    /// Uses UPSERT semantics - creates if not exists, updates if exists.
+    pub fn upsert_collector_publish_state(&self, state: &CollectorPublishState) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO collector_publish_state
+                (session_id, last_published_seq, last_published_at, status, error_message, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(session_id) DO UPDATE SET
+                last_published_seq = excluded.last_published_seq,
+                last_published_at = excluded.last_published_at,
+                status = excluded.status,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                state.session_id,
+                state.last_published_seq,
+                state.last_published_at.map(|dt| dt.to_rfc3339()),
+                state.status,
+                state.error_message,
+                state.created_at.to_rfc3339(),
+                state.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all sessions with incomplete publish state.
+    ///
+    /// Returns sessions where there are messages with seq > last_published_seq.
+    /// Used for crash recovery to resume publishing.
+    pub fn get_incomplete_publish_states(&self) -> Result<Vec<CollectorPublishState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT ps.session_id, ps.last_published_seq, ps.last_published_at,
+                   ps.status, ps.error_message, ps.created_at, ps.updated_at
+            FROM collector_publish_state ps
+            WHERE ps.status = 'active'
+              AND EXISTS (
+                  SELECT 1 FROM messages m
+                  WHERE m.session_id = ps.session_id
+                    AND m.seq > ps.last_published_seq
+              )
+            "#,
+        )?;
+
+        let states = stmt
+            .query_map([], |row| {
+                Ok(CollectorPublishState {
+                    session_id: row.get(0)?,
+                    last_published_seq: row.get(1)?,
+                    last_published_at: row
+                        .get::<_, Option<String>>(2)?
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    status: row.get(3)?,
+                    error_message: row.get(4)?,
+                    created_at: row
+                        .get::<_, String>(5)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    updated_at: row
+                        .get::<_, String>(6)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(states)
+    }
+
+    /// Get messages for a session that haven't been published yet.
+    ///
+    /// Returns messages with seq > last_published_seq, ordered by seq.
+    pub fn get_unpublished_messages(
+        &self,
+        session_id: &str,
+        last_published_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                id, session_id, thread_id, seq,
+                emitted_at, observed_at,
+                author_role, author_name,
+                message_type,
+                content, content_type,
+                tool_name, tool_input, tool_result,
+                tokens_in, tokens_out, duration_ms,
+                source_file_path, source_offset, source_line,
+                raw_data, metadata
+            FROM messages
+            WHERE session_id = ?1 AND seq > ?2
+            ORDER BY seq ASC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let messages = stmt
+            .query_map(
+                params![session_id, last_published_seq, limit as i64],
+                Self::row_to_message,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(messages)
+    }
+
+    /// Mark a session's publish state as failed with an error message.
+    pub fn mark_publish_failed(&self, session_id: &str, error: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE collector_publish_state
+            SET status = 'failed', error_message = ?, updated_at = datetime('now')
+            WHERE session_id = ?
+            "#,
+            params![error, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all active publish states.
+    ///
+    /// Returns all sessions that are currently being tracked for publishing.
+    pub fn get_active_publish_states(&self) -> Result<Vec<CollectorPublishState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT session_id, last_published_seq, last_published_at,
+                   status, error_message, created_at, updated_at
+            FROM collector_publish_state
+            WHERE status = 'active'
+            ORDER BY updated_at DESC
+            "#,
+        )?;
+
+        let states = stmt
+            .query_map([], |row| {
+                Ok(CollectorPublishState {
+                    session_id: row.get(0)?,
+                    last_published_seq: row.get(1)?,
+                    last_published_at: row
+                        .get::<_, Option<String>>(2)?
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    status: row.get(3)?,
+                    error_message: row.get(4)?,
+                    created_at: row
+                        .get::<_, String>(5)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    updated_at: row
+                        .get::<_, String>(6)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(states)
     }
 }
 

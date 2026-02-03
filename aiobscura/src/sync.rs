@@ -136,8 +136,8 @@ fn main() -> Result<()> {
     }
 
     // Initialize Catsyphon publisher if configured
-    let mut publisher = SyncPublisher::new(&config.collector)
-        .context("failed to create publisher")?;
+    let mut publisher =
+        SyncPublisher::new(&config.collector).context("failed to create publisher")?;
 
     if publisher.is_some() {
         println!("Catsyphon collector: enabled");
@@ -166,7 +166,10 @@ fn main() -> Result<()> {
     // Flush any pending events on shutdown
     if let Some(ref mut pub_instance) = publisher {
         if pub_instance.has_pending() {
-            println!("Flushing {} pending events...", pub_instance.pending_count());
+            println!(
+                "Flushing {} pending events...",
+                pub_instance.pending_count()
+            );
             match pub_instance.flush_all() {
                 Ok(sent) => {
                     if sent > 0 {
@@ -408,7 +411,9 @@ fn publish_new_messages(
     expected_count: usize,
 ) {
     let Some(db) = publish_db else { return };
-    let Some(ref mut pub_instance) = publisher else { return };
+    let Some(ref mut pub_instance) = publisher else {
+        return;
+    };
 
     // Query for messages observed after sync started
     // Add a small buffer to avoid missing messages due to timing

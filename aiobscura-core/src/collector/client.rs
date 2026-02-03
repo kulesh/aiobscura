@@ -124,7 +124,10 @@ impl CollectorClient {
                 .map_err(|e| Error::Collector(format!("failed to parse response: {}", e)))?;
             Ok(result)
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
             Err(Error::Collector(format!(
                 "API error ({}): {}",
                 status, error_text
@@ -198,7 +201,10 @@ impl CollectorClient {
         } else if status == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
             Err(Error::Collector(format!(
                 "API error ({}): {}",
                 status, error_text
