@@ -196,7 +196,7 @@ pub struct CollectorConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Catsyphon server URL (e.g., "https://catsyphon.example.com")
+    /// Catsyphon server URL (e.g., `https://catsyphon.example.com`)
     pub server_url: Option<String>,
 
     /// Collector ID (UUID from registration)
@@ -417,14 +417,20 @@ level = "debug"
         assert!(config.validate().is_ok());
 
         // Enabled without credentials should fail
-        let mut config = CollectorConfig::default();
-        config.enabled = true;
+        let config = CollectorConfig {
+            enabled: true,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
 
         // Enabled with all credentials should pass
-        config.server_url = Some("https://catsyphon.example.com".to_string());
-        config.collector_id = Some("test-id".to_string());
-        config.api_key = Some("cs_live_test".to_string());
+        let config = CollectorConfig {
+            enabled: true,
+            server_url: Some("https://catsyphon.example.com".to_string()),
+            collector_id: Some("test-id".to_string()),
+            api_key: Some("cs_live_test".to_string()),
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
         assert!(config.is_ready());
     }
