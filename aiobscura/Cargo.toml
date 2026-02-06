@@ -40,3 +40,5 @@ crossterm = "0.28"
 ctrlc = "3.4"
 
 [dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

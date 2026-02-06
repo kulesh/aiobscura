@@ -6,10 +6,11 @@
 
 ## Overview
 
-aiobscura is structured as a **Rust workspace** with two crates:
+aiobscura is structured as a **Rust workspace** with three crates:
 
 1. **aiobscura-core** — Library containing all business logic, data access, and analytics
-2. **aiobscura-tui** — Binary crate for the terminal UI (v1 frontend)
+2. **aiobscura** — Terminal UI and operational CLI binaries (`aiobscura`, `aiobscura-sync`, `aiobscura-analyze`, `aiobscura-collector`)
+3. **aiobscura-wrapped** — Wrapped summary CLI
 
 This separation ensures future frontends (macOS GUI, web) can link against the same core library.
 
@@ -25,56 +26,33 @@ aiobscura/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs             # Public API exports
-│       ├── config.rs          # Configuration loading
-│       ├── discovery.rs       # Agent auto-discovery
-│       ├── types.rs           # Domain types (Session, Event, Plan, etc.)
-│       │
-│       ├── db/                # Storage layer
-│       │   ├── mod.rs
-│       │   ├── schema.rs      # Table definitions, migrations
-│       │   └── repo.rs        # Query/insert operations
-│       │
-│       ├── ingest/            # Ingestion layer
-│       │   ├── mod.rs         # Coordinator
-│       │   ├── checkpoint.rs  # Watermark tracking
-│       │   ├── watcher.rs     # File system watching
-│       │   └── parsers/       # Agent-specific parsers
-│       │       ├── mod.rs     # Parser trait
-│       │       ├── claude.rs
-│       │       ├── codex.rs
-│       │       ├── aider.rs
-│       │       └── cursor.rs
-│       │
-│       ├── analytics/         # Analytics layer
-│       │   ├── mod.rs
-│       │   ├── first_order.rs # SQL aggregations
-│       │   ├── higher_order.rs# Derived metrics
-│       │   ├── assessor.rs    # LLM assessment engine
-│       │   └── triggers.rs    # Assessment trigger logic
-│       │
-│       └── api/               # Core API
-│           ├── mod.rs
-│           ├── queries.rs     # Sync query methods
-│           ├── commands.rs    # Action triggers
-│           └── events.rs      # Event bus for subscriptions
+│       ├── config.rs          # XDG config/path helpers
+│       ├── types.rs           # Domain types (Project, Session, Thread, Message, Plan, ...)
+│       ├── format.rs          # Shared formatting helpers
+│       ├── logging.rs         # Tracing/logging setup
+│       ├── db/                # SQLite schema + repository
+│       ├── ingest/            # Ingest coordinator + assistant parsers
+│       ├── analytics/         # Plugin engine + built-in plugins + wrapped stats
+│       └── collector/         # Catsyphon client/publisher integration
 │
-├── aiobscura-tui/             # TUI binary crate
+├── aiobscura/                 # TUI + operational CLI crate
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs            # Entry point, CLI parsing
-│       ├── app.rs             # Application state machine
-│       ├── input.rs           # Keyboard handling
-│       ├── views/
-│       │   ├── mod.rs
-│       │   ├── live.rs        # Live view
-│       │   ├── history.rs     # History view
-│       │   ├── detail.rs      # Session detail view
-│       │   └── analytics.rs   # Analytics view
-│       └── widgets/
-│           ├── mod.rs
-│           ├── session_table.rs
-│           ├── event_list.rs
-│           └── metrics_panel.rs
+│       ├── main.rs            # aiobscura (TUI)
+│       ├── app.rs             # TUI application state + data loading
+│       ├── ui.rs              # TUI rendering
+│       ├── thread_row.rs      # TUI row view models
+│       ├── sync.rs            # aiobscura-sync
+│       ├── analyze.rs         # aiobscura-analyze
+│       ├── collector.rs       # aiobscura-collector
+│       ├── debug_claude.rs    # parser debug CLI
+│       ├── debug_codex.rs     # parser debug CLI
+│       ├── debug_claude_watch.rs
+│       └── debug_codex_watch.rs
+│
+├── aiobscura-wrapped/         # Wrapped summary CLI crate
+│   ├── Cargo.toml
+│   └── src/main.rs
 │
 └── README.md
 ```
@@ -90,10 +68,10 @@ aiobscura/
 - Provide defaults for missing values
 - Validate LLM configuration
 
-#### `discovery`
-- Scan known paths for installed agents
-- Return `Vec<DiscoveredAgent>` with path, agent type, session count
-- Used at startup and for `aiobscura status` command
+#### `ingest`
+- Discover source files using parser-specific glob patterns
+- Parse assistant logs incrementally with checkpoints
+- Normalize parsed data into canonical Layer 1 tables
 
 #### `types`
 Core domain types shared across modules:
@@ -240,108 +218,42 @@ pub enum AgentType {
 ```
 
 #### `db`
-- SQLite via `rusqlite` (or `sqlx` for async)
+- SQLite via `rusqlite`
 - Schema migrations on startup
 - Repository pattern for queries and inserts
 
 #### `ingest`
-- **Coordinator:** Orchestrates parsing across all discovered agents
-- **Checkpoint:** Tracks processed files (byte offset, hash)
-- **Watcher:** File system notifications via `notify` crate
-- **Parsers:** Agent-specific parsing logic (see Parser Trait below)
+- **Coordinator:** orchestrates parser execution and sync bookkeeping
+- **Checkpointing:** byte-offset based incremental parsing for append-only logs
+- **Parsers:** `claude.rs` and `codex.rs` (Aider/Cursor planned)
 
 #### `analytics`
-- **First-order:** SQL-based aggregations, writes to `session_metrics`
-- **Higher-order:** Rust logic for edit churn, recovery rate, etc.
-- **Assessor:** Builds prompts, calls LLM, parses responses
-- **Triggers:** Monitors for inactivity timeout and event thresholds
+- **Engine:** plugin runtime (`AnalyticsEngine`) with per-plugin run tracking
+- **Built-ins:** `core.first_order` and `core.edit_churn`
+- **Outputs:** writes plugin metrics to Layer 2 derived tables
+- **Wrapped:** year/month summary generation used by TUI and wrapped CLI
 
-#### `api`
-The public interface consumed by frontends:
+#### `collector`
+- Optional Catsyphon integration with batching/retry
+- Local-first flow: local DB write first, publish after
+- Supports resume/flush/status workflows through `aiobscura-collector`
 
-```rust
-pub struct AiobscuraCore {
-    db: Database,
-    ingest: IngestCoordinator,
-    analytics: AnalyticsEngine,
-    event_tx: broadcast::Sender<CoreEvent>,
-}
+### aiobscura
 
-impl AiobscuraCore {
-    // Lifecycle
-    pub fn new(config: Config) -> Result<Self>;
-    pub fn start(&mut self) -> Result<()>;  // Start file watchers, timers
-    pub fn stop(&mut self);
+#### `main` + `app` + `ui`
+- TUI event loop, state machine, rendering, and navigation
+- Reads canonical/derived data via `aiobscura-core` repository APIs
 
-    // Session queries
-    pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>>;
-    pub fn get_session(&self, id: &str) -> Result<Option<Session>>;
-    pub fn get_session_events(&self, id: &str, limit: usize) -> Result<Vec<Event>>;
-    pub fn get_session_metrics(&self, id: &str) -> Result<Option<SessionMetrics>>;
-    pub fn get_session_assessments(&self, id: &str) -> Result<Vec<Assessment>>;
-    pub fn search_events(&self, query: EventQuery) -> Result<Vec<Event>>;
+#### `sync`
+- `aiobscura-sync`: one-shot or polling sync mode
+- Displays progress and summary counts per run
 
-    // Plan queries
-    pub fn list_plans(&self, filter: PlanFilter) -> Result<Vec<Plan>>;
-    pub fn get_plan(&self, id: &str) -> Result<Option<Plan>>;
+#### `analyze`
+- `aiobscura-analyze`: plugin execution and metrics reporting
+- Supports plugin listing and JSON/text output modes
 
-    // Aggregate metrics
-    pub fn get_aggregate_metrics(&self, filter: MetricFilter) -> Result<AggregateMetrics>;
-
-    // Commands
-    pub fn sync(&mut self) -> Result<SyncResult>;  // Manual full sync
-    pub fn refresh_metrics(&mut self, session_id: &str) -> Result<()>;
-    pub fn trigger_assessment(&mut self, session_id: &str) -> Result<()>;
-
-    // Subscriptions
-    pub fn subscribe(&self) -> broadcast::Receiver<CoreEvent>;
-}
-
-pub enum CoreEvent {
-    // Session events
-    SessionCreated(Session),
-    SessionUpdated(Session),
-    NewEvent(Event),
-    MetricsComputed(String),      // session_id
-    AssessmentComplete(String),   // session_id
-
-    // Plan events
-    PlanCreated(Plan),
-    PlanUpdated(Plan),
-
-    // Sync events
-    SyncStarted,
-    SyncCompleted(SyncResult),
-
-    Error(String),
-}
-```
-
-### aiobscura-tui
-
-#### `main`
-- Parse CLI args (`clap`)
-- Initialize `AiobscuraCore`
-- Run TUI event loop
-
-#### `app`
-- Manage current view, selection state, filters
-- Handle transitions between views
-- Subscribe to `CoreEvent` and update state
-
-#### `views`
-Each view implements a common trait:
-
-```rust
-pub trait View {
-    fn update(&mut self, event: &AppEvent);
-    fn render(&self, frame: &mut Frame, area: Rect);
-    fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction>;
-}
-```
-
-#### `widgets`
-Reusable ratatui components for tables, lists, status bars.
+#### `collector`
+- `aiobscura-collector`: collector status/resume/flush/session diagnostics
 
 ---
 
@@ -1023,25 +935,39 @@ fn analyze_session(&self, session: &Session, events: &[Event], ctx: &AnalyticsCo
 
 ```
 aiobscura/
+├── Cargo.toml
 ├── aiobscura-core/
 │   └── src/
 │       ├── ingest/
-│       │   └── parsers/          # Layer 0 → Layer 1
+│       │   ├── mod.rs            # IngestCoordinator
+│       │   └── parsers/          # Layer 0 -> Layer 1 parsers
 │       │
 │       ├── db/
-│       │   ├── canonical.rs      # Layer 1 tables
-│       │   └── derived.rs        # Layer 2 tables
+│       │   ├── schema.rs         # migrations and table definitions
+│       │   └── repo.rs           # query/insert operations
 │       │
 │       └── analytics/
-│           ├── mod.rs            # AnalyticsEngine
-│           ├── plugin.rs         # AnalyticsPlugin trait
-│           ├── triggers.rs       # Trigger evaluation
+│           ├── mod.rs            # public exports + wrapped helpers
+│           ├── engine.rs         # AnalyticsEngine + AnalyticsPlugin trait
+│           ├── dashboard.rs      # dashboard aggregates
+│           ├── project.rs        # project-level analytics
+│           ├── wrapped.rs        # year/month wrapped stats
+│           ├── personality.rs    # wrapped personality model
+│           ├── metrics_registry.rs
 │           │
 │           └── plugins/          # Built-in plugins
-│               ├── first_order.rs
-│               ├── edit_churn.rs
-│               ├── recovery_rate.rs
-│               └── llm_assessment.rs
+│               ├── first_order/
+│               └── edit_churn/
+├── aiobscura/
+│   └── src/
+│       ├── main.rs
+│       ├── app.rs
+│       ├── ui.rs
+│       ├── sync.rs
+│       ├── analyze.rs
+│       └── collector.rs
+└── aiobscura-wrapped/
+    └── src/main.rs
 ```
 
 ### Startup Sequence
@@ -1058,72 +984,56 @@ aiobscura/
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  2. Open/create SQLite DB at ~/.local/share/aiobscura/data.db   │
-│     Run migrations if needed                                    │
+│  2. Resolve DB path and acquire process lock(s) for that DB      │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  3. Run agent discovery                                         │
-│     Print discovered agents to stderr                           │
+│  3. Open/create SQLite DB and run migrations                     │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  4. Initial sync (batch ingest of new data)                     │
+│  4. Decide runtime mode from locks:                              │
+│     - ingest owner (can parse+insert)                            │
+│     - read-only (sync lock held by aiobscura-sync)              │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  5. Start file watchers for discovered agent directories        │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  6. Start assessment trigger timer                              │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  7. Initialize TUI, subscribe to CoreEvents, enter event loop   │
+│  5. Initialize TUI and enter polling event loop                  │
+│     (refresh DB views; ingest only when owner)                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Live Ingestion Flow
 
 ```
-┌──────────────┐
-│ File System  │
-│   (change)   │
-└──────┬───────┘
-       │ inotify/kqueue
-       ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Watcher    │────▶│   Parser     │────▶│  Checkpoint  │
-│              │     │ (agent-      │     │   Manager    │
-│              │     │  specific)   │     │              │
-└──────────────┘     └──────┬───────┘     └──────────────┘
-                            │
-                            │ Vec<Event>
-                            ▼
-                     ┌──────────────┐
-                     │   Database   │
-                     │   (insert)   │
-                     └──────┬───────┘
-                            │
-                            │ CoreEvent::NewEvent
-                            ▼
-                     ┌──────────────┐
-                     │  Event Bus   │──────┐
-                     └──────────────┘      │
-                            │              │
-              ┌─────────────┼──────────────┤
-              │             │              │
-              ▼             ▼              ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────┐
-        │   TUI    │  │ Triggers │  │ Metrics  │
-        │ (update) │  │ (check)  │  │ (update) │
-        └──────────┘  └──────────┘  └──────────┘
+┌─────────────────────────────┐
+│ Is sync lock currently held │
+│ by another process?         │
+└──────────────┬──────────────┘
+               │
+         yes   │   no
+               │
+               ▼
+┌─────────────────────────────┐      ┌─────────────────────────────┐
+│ aiobscura read-only mode    │      │ aiobscura ingest-owner mode │
+│ - no parser execution        │      │ - periodic sync_all()       │
+│ - DB polling refresh only    │      │ - parser + DB writes        │
+└──────────────┬──────────────┘      └──────────────┬──────────────┘
+               │                                     │
+               └─────────────────┬───────────────────┘
+                                 ▼
+                       ┌──────────────────┐
+                       │ SQLite canonical │
+                       │ + derived tables │
+                       └────────┬─────────┘
+                                ▼
+                        ┌──────────────┐
+                        │ TUI refresh  │
+                        │ live/project │
+                        └──────────────┘
 ```
 
 ### Assessment Flow
@@ -1295,120 +1205,44 @@ impl AgentParser for ClaudeCodeParser {
 
 ## Concurrency Model
 
-Since v1 is an embedded library (not a daemon), we use a single-process async model:
+Current v1 uses **process-level coordination** scoped to a database path.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Main Thread                              │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    Tokio Runtime                         │   │
-│  │                                                          │   │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────────────┐ │   │
-│  │  │  Watcher   │  │  Trigger   │  │    TUI Event       │ │   │
-│  │  │   Task     │  │   Timer    │  │      Loop          │ │   │
-│  │  └─────┬──────┘  └─────┬──────┘  └─────────┬──────────┘ │   │
-│  │        │               │                   │            │   │
-│  │        └───────────────┼───────────────────┘            │   │
-│  │                        │                                │   │
-│  │                        ▼                                │   │
-│  │              ┌──────────────────┐                       │   │
-│  │              │  broadcast chan  │                       │   │
-│  │              │   (CoreEvent)    │                       │   │
-│  │              └──────────────────┘                       │   │
-│  │                                                          │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │            SQLite (sync access via mutex)               │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐
+│ aiobscura (TUI)              │
+│ acquires ui lock             │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ Try sync lock                               │
+│ - success: TUI can ingest                   │
+│ - busy: TUI runs read-only                  │
+└─────────────────────────────────────────────┘
+
+┌──────────────────────────────┐
+│ aiobscura-sync               │
+│ probes ui lock, then sync    │
+│ exits if ui lock is held     │
+└──────────────────────────────┘
 ```
-
-### Why Tokio Broadcast Channels (v1)
-
-**What is Tokio?**
-Tokio is Rust's most popular async runtime. It lets you write concurrent code that can do multiple things "at once" (watch files, run timers, handle UI) without threads for each task.
-
-**What is a broadcast channel?**
-Think of it like a pub/sub system inside your program:
-- The core library **publishes** events (new data ingested, assessment complete, etc.)
-- Any number of **subscribers** receive those events (the TUI, the analytics engine, etc.)
-
-**Why this works for v1 (embedded library):**
-```
-┌──────────────────────────────────────┐
-│           Single Process             │
-│                                      │
-│  ┌────────────┐    ┌────────────┐   │
-│  │   Core     │───▶│    TUI     │   │
-│  │  Library   │    │            │   │
-│  └────────────┘    └────────────┘   │
-│        │                            │
-│        └── broadcast channel ───────┘
-│            (in-memory, fast)         │
-└──────────────────────────────────────┘
-```
-
-Everything runs in one process. The broadcast channel is just passing pointers to data in memory—very fast, very simple.
-
-**Why this changes for daemon mode (v2):**
-```
-┌──────────────────┐         ┌──────────────────┐
-│  Daemon Process  │         │   GUI Process    │
-│                  │   IPC   │                  │
-│  ┌────────────┐  │◄───────▶│  ┌────────────┐  │
-│  │   Core     │  │         │  │  macOS GUI │  │
-│  │  Library   │  │         │  └────────────┘  │
-│  └────────────┘  │         │                  │
-└──────────────────┘         └──────────────────┘
-```
-
-When the core runs as a separate daemon process:
-- Can't share memory between processes
-- Need **IPC** (inter-process communication): Unix sockets, gRPC, or similar
-- More complexity, but enables multiple UIs connecting simultaneously
-
-**Bottom line for v1:**
-Broadcast channels are the right choice—simple, fast, no network overhead. The API we design now (`subscribe() -> Receiver<CoreEvent>`) maps cleanly to IPC later; we'd just swap the transport layer.
 
 ### Key Concurrency Points
 
-1. **Async runtime:** Tokio handles file watching, timers, and LLM HTTP calls concurrently
-2. **Event bus:** `tokio::sync::broadcast` channel distributes `CoreEvent`s to all subscribers
-3. **Database:** Synchronous SQLite behind a mutex (local DB doesn't need async)
-4. **TUI loop:** Polls for terminal input and `CoreEvent`s in a unified loop
+1. **Mutual exclusion at process level:** lock files prevent concurrent ingest writers for one DB.
+2. **Role split:** `aiobscura-sync` is dedicated ingest owner; `aiobscura` can ingest only when sync lock is free.
+3. **Read-only fallback:** TUI remains usable when sync is active, but parsing/inserts are disabled.
+4. **SQLite concurrency model:** WAL allows concurrent read + write with one active writer process.
 
 ---
 
 ## File Watching Strategy
 
-Use the `notify` crate with **debouncing**:
+Current implementation uses polling-driven ingestion:
+- `aiobscura-sync --watch`: periodic `sync_all()` loop.
+- `aiobscura` TUI: periodic `sync_all()` only when it owns sync lock; otherwise DB refresh only.
 
-```rust
-let (tx, rx) = std::sync::mpsc::channel();
-
-let mut watcher = notify::recommended_watcher(move |res| {
-    if let Ok(event) = res {
-        tx.send(event).ok();
-    }
-})?;
-
-// Watch agent directories
-for agent in discovered_agents {
-    watcher.watch(&agent.root_path, RecursiveMode::Recursive)?;
-}
-```
-
-**Debounce strategy:**
-- Collect file change events for 500ms before processing
-- Deduplicate by path
-- Helps handle editors that write files multiple times on save
-
-**Fallback:**
-- If watcher fails (e.g., too many files), fall back to polling every 5s
-- Log warning to user
+No OS file watcher is required for correctness in v1.
 
 ---
 
@@ -1707,15 +1541,29 @@ glob = "0.3"   # for source pattern matching
 dirs = "5"     # for home directory
 ```
 
-### aiobscura-tui
+### aiobscura
 
 ```toml
 [dependencies]
 aiobscura-core = { path = "../aiobscura-core" }
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.29"
+crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+indicatif = "0.17"
+notify = "6"
+notify-debouncer-mini = "0.4"
+```
+
+### aiobscura-wrapped
+
+```toml
+[dependencies]
+aiobscura-core = { path = "../aiobscura-core" }
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
 ```
 
 ---

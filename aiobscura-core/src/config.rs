@@ -350,6 +350,26 @@ impl Config {
     pub fn log_path() -> PathBuf {
         Self::state_dir().join("aiobscura.log")
     }
+
+    /// Ensure XDG base directory environment variables are set.
+    ///
+    /// This is mainly for CLI binaries that want explicit, stable path behavior
+    /// before invoking other components that read these env vars.
+    pub fn ensure_xdg_env() {
+        let home = home_dir();
+
+        if std::env::var("XDG_DATA_HOME").is_err() {
+            std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+        }
+
+        if std::env::var("XDG_STATE_HOME").is_err() {
+            std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+        }
+
+        if std::env::var("XDG_CONFIG_HOME").is_err() {
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+        }
+    }
 }
 
 #[cfg(test)]

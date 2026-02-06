@@ -94,15 +94,15 @@ The binary will be at `target/release/aiobscura`.
 ### Running
 
 ```bash
-# First, sync your AI agent logs to the database
+# Option 1: run sync once, then launch the TUI
 aiobscura-sync
-
-# Then launch the TUI
 aiobscura
 
-# Or run sync in watch mode (background) to keep data fresh
-aiobscura-sync --watch &
+# Option 2: run only the TUI (it can ingest itself when sync is not active)
 aiobscura
+
+# Option 3: run sync continuously (watch mode) without the TUI
+aiobscura-sync --watch
 ```
 
 The sync command will:
@@ -110,7 +110,9 @@ The sync command will:
 2. Create a SQLite database at `~/.local/share/aiobscura/data.db`
 3. Ingest available session logs (incremental - only new data)
 
-The TUI reads from this database to display your activity.
+Process coordination rules:
+- `aiobscura-sync` exits if `aiobscura` is already running.
+- If `aiobscura-sync` is already running, `aiobscura` starts in read-only mode and only reads from the database.
 
 ## Supported Agents
 
@@ -126,7 +128,8 @@ The TUI reads from this database to display your activity.
 ```
 aiobscura/
 ├── aiobscura-core/     # Core library (parsing, storage, analytics)
-├── aiobscura/          # Terminal UI and sync binaries
+├── aiobscura/          # Terminal UI and CLI binaries
+├── aiobscura-wrapped/  # Wrapped summary CLI
 ├── docs/               # Architecture and requirements
 └── tests/              # Integration tests
 ```

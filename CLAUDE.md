@@ -1,69 +1,65 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working in this repository.
 
-**Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads)
-for issue tracking. Use `bd` commands instead of markdown TODOs.
-See AGENTS.md for workflow details.
+Note: this project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking.
+Use `bd` commands instead of markdown TODO lists.
+
+## Primary Guidance
+
+`AGENTS.md` is the source of truth for workflow and standards.
 
 ## Project Overview
 
-**aiobscura** is an AI agent activity monitor - a unified tool to observe, query, and analyze logs from multiple AI coding agents (Claude Code, Codex, Aider, Cursor).
+`aiobscura` is an AI agent activity monitor that ingests logs from coding assistants and provides storage, analytics, and a TUI.
 
-See `docs/aiobscura-requirements.md` for full requirements and `docs/aiobscura-architecture.md` for architecture details.
+Core references:
 
-**Workspace structure:**
-- `aiobscura-core/` - Core library (types, DB, ingestion, analytics, API)
-- `aiobscura/` - Terminal UI and sync binaries (using ratatui)
+- `docs/aiobscura-requirements.md`
+- `docs/aiobscura-architecture.md`
 
-Tooling: mise (Rust toolchain), cargo-nextest (tests), cargo-watch (dev), clippy, rustfmt
+## Crate Layout
 
-## Key Commands
+- `aiobscura-core/`: domain types, config, ingest, db, analytics, collector
+- `aiobscura/`: TUI and CLI binaries
+- `aiobscura-wrapped/`: wrapped summary CLI
+
+## Build, Test, and Quality
+
+Prefer CI-equivalent commands:
 
 ```bash
-# Build
-cargo build                    # Debug build
-cargo build --release          # Optimized release build
-
-# Run
-cargo run                      # Run the TUI
-
-# Test
-cargo nextest run              # Run all tests (preferred)
-cargo nextest run <test_name>  # Run specific test
-cargo nextest run -p aiobscura-core  # Test core library only
-cargo test --doc               # Run doctests
-
-# Code quality
-cargo fmt                      # Format code
-cargo clippy                   # Lint
-cargo check --all-targets      # Quick syntax check
-
-# Development
-cargo watch -x run             # Auto-rebuild and run on changes
-cargo doc --workspace --open   # Build and view docs
+cargo build --all-targets
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo doc --no-deps --all-features
 ```
 
-## Architecture
+## Useful Run Commands
 
-```
-aiobscura/
-├── aiobscura-core/src/   # Core library
-│   ├── types.rs          # Domain types (Session, Event, Plan)
-│   ├── db/               # SQLite storage layer
-│   ├── ingest/           # Parser framework
-│   │   └── parsers/      # Agent-specific parsers
-│   ├── analytics/        # Metrics and assessments
-│   └── api/              # Public API for UIs
-├── aiobscura/src/        # Terminal UI and sync
-│   ├── main.rs           # TUI entry point
-│   └── sync.rs           # Sync daemon entry point
-├── tests/                # Integration tests
-├── examples/             # Usage examples
-└── benches/              # Performance benchmarks
+```bash
+# TUI
+cargo run -p aiobscura --bin aiobscura
+
+# Sync
+cargo run -p aiobscura --bin aiobscura-sync -- --help
+
+# Analytics
+cargo run -p aiobscura --bin aiobscura-analyze -- --help
+
+# Collector
+cargo run -p aiobscura --bin aiobscura-collector -- --help
+
+# Wrapped
+cargo run -p aiobscura-wrapped -- --help
 ```
 
-**Error handling pattern:**
-- Core library: Custom `Error` enum with `thiserror`, exposes `Result<T>` alias
-- TUI binary: Uses `anyhow::Result` with `?` operator for ergonomic error propagation
-- When you come across @HeyClaude in plan files the subsequent comment is for you Claude Code. Multi-line comments will end with two empty lines.
+Runtime coordination (same DB path):
+- `aiobscura-sync` exits if `aiobscura` is already running.
+- `aiobscura` starts in read-only mode if `aiobscura-sync` already holds the sync lock.
+
+## Error Handling Pattern
+
+- `aiobscura-core`: custom `Error` + `Result<T>` alias
+- binaries: `anyhow::Result` for top-level orchestration

@@ -138,7 +138,12 @@ The core exposes a UI-agnostic interface:
 | Mode      | Trigger        | Behavior                                    |
 |-----------|----------------|---------------------------------------------|
 | **Batch** | `aiobscura sync`   | Scan all sources, process new/changed files |
-| **Live**  | `aiobscura`        | File watchers + periodic sync               |
+| **Live**  | `aiobscura`        | Poll DB for updates; ingest only if it owns sync lock |
+
+Process coordination rules:
+- `aiobscura-sync` and `aiobscura` do not ingest concurrently for the same database.
+- If `aiobscura-sync` is running, `aiobscura` runs read-only and only reads from SQLite.
+- If `aiobscura` is running, `aiobscura-sync` exits with an error.
 
 ---
 

@@ -8,13 +8,15 @@
 //! - Logs: $XDG_STATE_HOME/aiobscura/aiobscura.log (~/.local/state/aiobscura/aiobscura.log)
 //! - Config: $XDG_CONFIG_HOME/aiobscura/config.toml (~/.config/aiobscura/config.toml)
 
+mod process_lock;
+
 use aiobscura_core::collector::SyncPublisher;
 use aiobscura_core::ingest::IngestCoordinator;
 use aiobscura_core::{Config, Database};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::PathBuf;
+use process_lock::acquire_sync_guard;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -42,46 +44,11 @@ struct Args {
     poll: u64,
 }
 
-/// Returns $HOME or panics
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .expect("HOME environment variable not set")
-}
-
-/// Returns the XDG-compliant database path
-fn database_path() -> PathBuf {
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".local/share"));
-    data_home.join("aiobscura/data.db")
-}
-
-/// Sets XDG environment variables to ensure the core library uses XDG paths
-fn ensure_xdg_env() {
-    let home = home_dir();
-
-    // Set XDG_DATA_HOME if not set
-    if std::env::var("XDG_DATA_HOME").is_err() {
-        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
-    }
-
-    // Set XDG_STATE_HOME if not set
-    if std::env::var("XDG_STATE_HOME").is_err() {
-        std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
-    }
-
-    // Set XDG_CONFIG_HOME if not set
-    if std::env::var("XDG_CONFIG_HOME").is_err() {
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-    }
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
 
     // Ensure XDG environment variables are set before using core library
-    ensure_xdg_env();
+    Config::ensure_xdg_env();
 
     // Load configuration
     let config = Config::load().context("failed to load configuration")?;
@@ -92,8 +59,11 @@ fn main() -> Result<()> {
 
     tracing::info!("aiobscura-sync starting");
 
+    // Resolve database path and enforce process-level exclusivity for it.
+    let db_path = Config::database_path();
+    let _sync_guard = acquire_sync_guard(&db_path).context("failed to acquire process lock")?;
+
     // Open database at XDG-compliant path
-    let db_path = database_path();
     tracing::info!(path = %db_path.display(), "Opening database");
 
     let db = Database::open(&db_path).context("failed to open database")?;

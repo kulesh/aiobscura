@@ -24,8 +24,17 @@ cargo build
 cargo nextest run  # or `cargo test` if nextest is not installed
 
 # Run the TUI
-cargo run
+cargo run -p aiobscura --bin aiobscura
+
+# Run sync (one-shot or watch mode)
+cargo run -p aiobscura --bin aiobscura-sync
+cargo run -p aiobscura --bin aiobscura-sync -- --watch
 ```
+
+### Runtime Coordination
+
+- `aiobscura-sync` exits if `aiobscura` is already running for the same database path.
+- If `aiobscura-sync` is already running, `aiobscura` starts in read-only mode.
 
 ## Code Style
 

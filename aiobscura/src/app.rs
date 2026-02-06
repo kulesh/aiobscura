@@ -1597,6 +1597,11 @@ impl App {
         )
     }
 
+    /// Returns true if current view is Live.
+    pub fn is_live_view(&self) -> bool {
+        matches!(self.view_mode, ViewMode::Live)
+    }
+
     /// Refresh data for the current view, preserving selection state.
     pub fn refresh_current_view(&mut self) -> Result<()> {
         // Always refresh dashboard stats for list views

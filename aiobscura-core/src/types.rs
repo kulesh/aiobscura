@@ -1013,29 +1013,6 @@ pub struct DiscoveredAssistant {
 }
 
 // ============================================
-// Backward Compatibility Type Aliases
-// ============================================
-
-// These aliases help with migration from the old naming scheme
-// TODO: Remove after full migration
-
-/// Alias for backward compatibility
-#[deprecated(note = "Use Assistant instead")]
-pub type AgentType = Assistant;
-
-/// Alias for backward compatibility
-#[deprecated(note = "Use Message instead")]
-pub type Event = Message;
-
-/// Alias for backward compatibility
-#[deprecated(note = "Use MessageType instead")]
-pub type EventType = MessageType;
-
-/// Alias for backward compatibility
-#[deprecated(note = "Use DiscoveredAssistant instead")]
-pub type DiscoveredAgent = DiscoveredAssistant;
-
-// ============================================
 // Live View Types
 // ============================================
 

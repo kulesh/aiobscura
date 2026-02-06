@@ -6,7 +6,6 @@ use aiobscura_core::analytics::{create_default_engine, PluginRunStatus};
 use aiobscura_core::{Config, Database, SessionFilter};
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "aiobscura-analyze")]
@@ -35,40 +34,10 @@ struct Args {
     verbose: bool,
 }
 
-/// Returns $HOME or panics
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .expect("HOME environment variable not set")
-}
-
-/// Returns the XDG-compliant database path
-fn database_path() -> PathBuf {
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".local/share"));
-    data_home.join("aiobscura/data.db")
-}
-
-/// Sets XDG environment variables to ensure the core library uses XDG paths
-fn ensure_xdg_env() {
-    let home = home_dir();
-
-    if std::env::var("XDG_DATA_HOME").is_err() {
-        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
-    }
-    if std::env::var("XDG_STATE_HOME").is_err() {
-        std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
-    }
-    if std::env::var("XDG_CONFIG_HOME").is_err() {
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-    }
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    ensure_xdg_env();
+    Config::ensure_xdg_env();
 
     // Load configuration
     let config = Config::load().context("failed to load configuration")?;
@@ -78,7 +47,7 @@ fn main() -> Result<()> {
         aiobscura_core::logging::init(&config.logging).context("failed to initialize logging")?;
 
     // Open database
-    let db_path = database_path();
+    let db_path = Config::database_path();
     let db = Database::open(&db_path).context("failed to open database")?;
     db.migrate().context("failed to run database migrations")?;
 
