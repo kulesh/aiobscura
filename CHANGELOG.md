@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-02-06
+
+### Added
+
+- Process-level runtime coordination locks for `aiobscura` and `aiobscura-sync`
+- Automatic read-only fallback in `aiobscura` when `aiobscura-sync` already owns ingest
+- CLI acceptance tests covering sync/analyze/collector release paths
+
+### Changed
+
+- Live TUI behavior now ingests only when the TUI owns the sync lock for the database path
+- Release and contributor documentation updated to reflect lock-coordinated runtime modes
+
 ## [0.1.5] - 2024-12-19
 
 ### Added
@@ -121,7 +134,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/kulesh/aiobscura/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/kulesh/aiobscura/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/kulesh/aiobscura/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/kulesh/aiobscura/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/kulesh/aiobscura/compare/v0.1.2...v0.1.3
