@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-02-09
+
+### Added
+
+- Analytics engine panic isolation for plugin session/thread runs with regression tests
+- Explicit LLM assessment HTTP timeout configuration (`llm.timeout_secs`, default 30s)
+- Session detail UI decomposition (`ui/detail/session.rs`) for maintainability
+
+### Changed
+
+- Event-count trigger semantics now use tool-call counts (matching `tool_call_threshold`)
+- LLM assessment execution now reuses a single initialized client/runtime per sync trigger pass
+
 ## [0.1.7] - 2026-02-06
 
 ### Added
@@ -134,7 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/kulesh/aiobscura/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/kulesh/aiobscura/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/kulesh/aiobscura/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/kulesh/aiobscura/compare/v0.1.4...v0.1.5
