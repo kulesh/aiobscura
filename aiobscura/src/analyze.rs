@@ -2,7 +2,7 @@
 //!
 //! Runs the analytics plugin framework on sessions and displays metrics.
 
-use aiobscura_core::analytics::{create_default_engine, PluginRunStatus};
+use aiobscura_core::analytics::{create_default_engine_with_config, PluginRunStatus};
 use aiobscura_core::{Config, Database, SessionFilter};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -16,6 +16,10 @@ struct Args {
     /// If not provided, analyzes all sessions
     #[arg(short, long)]
     session: Option<String>,
+
+    /// Filter sessions by `metadata.workflow_tag`
+    #[arg(long)]
+    workflow: Option<String>,
 
     /// Show only specific plugin results
     #[arg(short, long)]
@@ -52,7 +56,7 @@ fn main() -> Result<()> {
     db.migrate().context("failed to run database migrations")?;
 
     // Create analytics engine
-    let engine = create_default_engine();
+    let engine = create_default_engine_with_config(&config.analytics);
 
     // List plugins mode
     if args.list_plugins {
@@ -86,9 +90,22 @@ fn main() -> Result<()> {
         db.list_sessions(&SessionFilter::default())?
     };
 
+    let sessions: Vec<_> = if let Some(ref workflow_tag) = args.workflow {
+        sessions
+            .into_iter()
+            .filter(|s| s.workflow_tag() == Some(workflow_tag.as_str()))
+            .collect()
+    } else {
+        sessions
+    };
+
     if sessions.is_empty() {
-        println!("No sessions found in database.");
-        println!("Run 'aiobscura-sync' first to sync AI assistant logs.");
+        if let Some(workflow_tag) = &args.workflow {
+            println!("No sessions found with workflow tag '{}'.", workflow_tag);
+        } else {
+            println!("No sessions found in database.");
+            println!("Run 'aiobscura-sync' first to sync AI assistant logs.");
+        }
         return Ok(());
     }
 
@@ -190,6 +207,7 @@ fn print_text_results(
         let status_icon = match result.status {
             PluginRunStatus::Success => "+",
             PluginRunStatus::Error => "!",
+            PluginRunStatus::Timeout => "~",
         };
 
         println!(

@@ -107,17 +107,45 @@ const FIRST_ORDER_METRICS: &[MetricDescriptor] = &[
     },
 ];
 
-const ALL_METRICS: &[MetricDescriptor] = FIRST_ORDER_METRICS;
+const OUTCOME_METRICS: &[MetricDescriptor] = &[
+    MetricDescriptor {
+        plugin: "core.outcome",
+        entity_type: "session",
+        name: "outcome_success",
+        value_type: MetricValueType::Boolean,
+        summary: "Prototype boolean outcome for the session.",
+        description: "True when tool results were observed without error messages.",
+    },
+    MetricDescriptor {
+        plugin: "core.outcome",
+        entity_type: "session",
+        name: "outcome_evidence_type",
+        value_type: MetricValueType::Text,
+        summary: "Reason code supporting the prototype outcome.",
+        description: "Categorical evidence (e.g. tool_result_no_errors, errors_only).",
+    },
+    MetricDescriptor {
+        plugin: "core.outcome",
+        entity_type: "session",
+        name: "outcome_notes",
+        value_type: MetricValueType::Text,
+        summary: "Human-readable notes for the outcome prototype.",
+        description: "Debug note with observed signal counts used in outcome heuristics.",
+    },
+];
+
+fn all_metrics_iter() -> impl Iterator<Item = &'static MetricDescriptor> {
+    FIRST_ORDER_METRICS.iter().chain(OUTCOME_METRICS.iter())
+}
 
 /// List all registered metrics.
 pub fn list_metrics() -> Vec<MetricDescriptor> {
-    ALL_METRICS.to_vec()
+    all_metrics_iter().cloned().collect()
 }
 
 /// List metrics for a given plugin name.
 pub fn list_metrics_for_plugin(plugin: &str) -> Vec<MetricDescriptor> {
-    ALL_METRICS
-        .iter()
+    all_metrics_iter()
         .filter(|m| m.plugin == plugin)
         .cloned()
         .collect()
@@ -125,8 +153,7 @@ pub fn list_metrics_for_plugin(plugin: &str) -> Vec<MetricDescriptor> {
 
 /// List metrics for a given entity type.
 pub fn list_metrics_for_entity(entity_type: &str) -> Vec<MetricDescriptor> {
-    ALL_METRICS
-        .iter()
+    all_metrics_iter()
         .filter(|m| m.entity_type == entity_type)
         .cloned()
         .collect()
@@ -147,8 +174,7 @@ pub fn search_metrics_with_scoring<F>(query: &str, scorer: F) -> Vec<MetricSearc
 where
     F: Fn(&MetricDescriptor, &str) -> Option<f64>,
 {
-    let mut results: Vec<MetricSearchResult> = ALL_METRICS
-        .iter()
+    let mut results: Vec<MetricSearchResult> = all_metrics_iter()
         .filter_map(|metric| {
             scorer(metric, query).map(|score| MetricSearchResult {
                 metric: metric.clone(),
@@ -198,6 +224,10 @@ mod tests {
         let metrics = list_metrics_for_plugin("core.first_order");
         assert_eq!(metrics.len(), 8);
         assert!(metrics.iter().any(|m| m.name == "tokens_in"));
+
+        let outcome_metrics = list_metrics_for_plugin("core.outcome");
+        assert_eq!(outcome_metrics.len(), 3);
+        assert!(outcome_metrics.iter().any(|m| m.name == "outcome_success"));
     }
 
     #[test]

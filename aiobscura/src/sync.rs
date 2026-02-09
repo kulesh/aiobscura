@@ -11,12 +11,13 @@
 mod process_lock;
 
 use aiobscura_core::collector::SyncPublisher;
-use aiobscura_core::ingest::IngestCoordinator;
-use aiobscura_core::{Config, Database};
+use aiobscura_core::ingest::{IngestCoordinator, SyncResult};
+use aiobscura_core::{Config, Database, SessionFilter};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 use process_lock::acquire_sync_guard;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -127,10 +128,22 @@ fn main() -> Result<()> {
 
     let result = if args.watch {
         // Watch mode - continuous polling
-        run_watch_mode(&coordinator, &args, publish_db.as_ref(), &mut publisher)
+        run_watch_mode(
+            &coordinator,
+            &config,
+            &args,
+            publish_db.as_ref(),
+            &mut publisher,
+        )
     } else {
         // One-shot sync
-        run_single_sync(&coordinator, &args, publish_db.as_ref(), &mut publisher)
+        run_single_sync(
+            &coordinator,
+            &config,
+            &args,
+            publish_db.as_ref(),
+            &mut publisher,
+        )
     };
 
     // Flush any pending events on shutdown
@@ -171,6 +184,7 @@ fn main() -> Result<()> {
 /// Run a single sync operation with progress bar
 fn run_single_sync(
     coordinator: &IngestCoordinator,
+    config: &Config,
     args: &Args,
     publish_db: Option<&Database>,
     publisher: &mut Option<SyncPublisher>,
@@ -208,6 +222,8 @@ fn run_single_sync(
         publish_new_messages(publish_db, publisher, sync_start, result.messages_inserted);
     }
 
+    run_analytics_triggers(coordinator, config, &result, true)?;
+
     print_sync_result(&result, args.verbose);
 
     tracing::info!(
@@ -222,6 +238,7 @@ fn run_single_sync(
 /// Run continuous watch mode
 fn run_watch_mode(
     coordinator: &IngestCoordinator,
+    config: &Config,
     args: &Args,
     publish_db: Option<&Database>,
     publisher: &mut Option<SyncPublisher>,
@@ -245,6 +262,7 @@ fn run_watch_mode(
     println!();
 
     let mut iteration = 0u64;
+    let mut since_last_inactivity_trigger = Duration::from_secs(60);
 
     while running.load(Ordering::SeqCst) {
         iteration += 1;
@@ -304,6 +322,14 @@ fn run_watch_mode(
             );
         }
 
+        let run_inactivity = since_last_inactivity_trigger >= Duration::from_secs(60);
+        run_analytics_triggers(coordinator, config, &result, run_inactivity)?;
+        since_last_inactivity_trigger = if run_inactivity {
+            Duration::ZERO
+        } else {
+            since_last_inactivity_trigger.saturating_add(poll_duration)
+        };
+
         // Sleep until next poll
         thread::sleep(poll_duration);
     }
@@ -312,6 +338,128 @@ fn run_watch_mode(
     tracing::info!("aiobscura-sync watch mode stopped");
 
     Ok(())
+}
+
+/// Run automatic analytics triggers for updated or inactive sessions.
+fn run_analytics_triggers(
+    coordinator: &IngestCoordinator,
+    config: &Config,
+    sync_result: &SyncResult,
+    include_inactivity: bool,
+) -> Result<()> {
+    let event_threshold = usize::try_from(config.analytics.tool_call_threshold)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let mut triggered_sessions = collect_event_count_sessions(sync_result, event_threshold);
+
+    if include_inactivity {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::minutes(i64::from(config.analytics.inactivity_minutes));
+        for session in coordinator.db().list_sessions(&SessionFilter::default())? {
+            if session
+                .last_activity_at
+                .map(|last| last <= cutoff)
+                .unwrap_or(false)
+            {
+                triggered_sessions.insert(session.id);
+            }
+        }
+    }
+
+    if triggered_sessions.is_empty() {
+        return Ok(());
+    }
+
+    let engine = aiobscura_core::analytics::create_default_engine_with_config(&config.analytics);
+
+    let mut attempted = 0usize;
+    let mut failures = 0usize;
+    let mut llm_failures = 0usize;
+    let mut llm_inserted = 0usize;
+
+    let session_ids: Vec<String> = triggered_sessions.into_iter().collect();
+
+    for session_id in &session_ids {
+        attempted += 1;
+
+        if let Err(e) = engine.ensure_session_analytics(session_id, coordinator.db()) {
+            failures += 1;
+            tracing::warn!(
+                session_id = session_id,
+                error = %e,
+                "Failed event/inactivity trigger for core.edit_churn"
+            );
+        }
+
+        if let Err(e) = engine.ensure_first_order_metrics(session_id, coordinator.db()) {
+            failures += 1;
+            tracing::warn!(
+                session_id = session_id,
+                error = %e,
+                "Failed event/inactivity trigger for core.first_order"
+            );
+        }
+    }
+
+    if let Some(llm) = &config.llm {
+        for session_id in &session_ids {
+            let session = match coordinator.db().get_session(session_id)? {
+                Some(session) => session,
+                None => continue,
+            };
+            let messages = coordinator.db().get_session_messages(session_id, 100_000)?;
+
+            match aiobscura_core::assessment::assess_and_store_session(
+                coordinator.db(),
+                &session,
+                &messages,
+                llm,
+            ) {
+                Ok(Some(_)) => {
+                    llm_inserted += 1;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    llm_failures += 1;
+                    tracing::warn!(
+                        session_id = session_id,
+                        error = %e,
+                        "Failed LLM assessment trigger"
+                    );
+                }
+            }
+        }
+    }
+
+    tracing::debug!(
+        sessions_considered = attempted,
+        trigger_failures = failures,
+        llm_failures,
+        llm_assessments_inserted = llm_inserted,
+        include_inactivity,
+        event_threshold,
+        "Processed analytics triggers"
+    );
+
+    Ok(())
+}
+
+/// Find session IDs that crossed the per-sync event-count threshold.
+fn collect_event_count_sessions(sync_result: &SyncResult, threshold: usize) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for file_result in &sync_result.file_results {
+        if file_result.new_messages == 0 {
+            continue;
+        }
+        if let Some(session_id) = &file_result.session_id {
+            *counts.entry(session_id.clone()).or_insert(0) += file_result.new_messages;
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(session_id, count)| (count >= threshold).then_some(session_id))
+        .collect()
 }
 
 /// Print sync result summary
@@ -415,5 +563,64 @@ fn publish_new_messages(
         Err(e) => {
             tracing::warn!(error = %e, "Failed to query messages for publishing");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aiobscura_core::ingest::{FileSyncResult, MessageSummary, SkipReason};
+    use std::path::PathBuf;
+
+    fn file_result(session_id: Option<&str>, new_messages: usize) -> FileSyncResult {
+        FileSyncResult {
+            path: PathBuf::from("/tmp/test.jsonl"),
+            new_messages,
+            session_id: session_id.map(ToString::to_string),
+            new_checkpoint: aiobscura_core::Checkpoint::ByteOffset { offset: 0 },
+            is_new_session: false,
+            warnings: vec![],
+            skip_reason: Some(SkipReason::NoNewContent),
+            message_summaries: vec![MessageSummary {
+                role: "assistant".to_string(),
+                preview: "ok".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn collect_event_count_sessions_aggregates_by_session() {
+        let sync_result = SyncResult {
+            file_results: vec![
+                file_result(Some("sess-a"), 3),
+                file_result(Some("sess-a"), 2),
+                file_result(Some("sess-b"), 1),
+                file_result(Some("sess-c"), 5),
+            ],
+            ..Default::default()
+        };
+
+        let sessions = collect_event_count_sessions(&sync_result, 5);
+
+        assert!(sessions.contains("sess-a"));
+        assert!(sessions.contains("sess-c"));
+        assert!(!sessions.contains("sess-b"));
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn collect_event_count_sessions_ignores_unlinked_or_empty_results() {
+        let sync_result = SyncResult {
+            file_results: vec![
+                file_result(None, 10),
+                file_result(Some("sess-a"), 0),
+                file_result(Some("sess-b"), 2),
+            ],
+            ..Default::default()
+        };
+
+        let sessions = collect_event_count_sessions(&sync_result, 3);
+
+        assert!(sessions.is_empty());
     }
 }

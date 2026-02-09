@@ -1,6 +1,6 @@
 //! Shared message formatting helpers for TUI rendering.
 
-use aiobscura_core::{AuthorRole, Message, MessageType};
+use aiobscura_core::{AuthorRole, Message, MessageType, MessageWithContext};
 use ratatui::style::{Color, Style};
 
 /// Role prefix and style for session detail message rows.
@@ -50,4 +50,30 @@ pub fn detail_content(msg: &Message) -> String {
     }
 
     msg.content.clone().unwrap_or_default()
+}
+
+/// Short preview text for thread/session detail rows.
+pub fn detail_preview(msg: &Message, max_chars: usize) -> String {
+    msg.preview(max_chars)
+}
+
+/// Preview text for live stream rows.
+pub fn live_preview(msg: &MessageWithContext) -> String {
+    if msg.message_type == MessageType::ToolCall {
+        if let Some(tool_name) = &msg.tool_name {
+            return format!("{}: {}", tool_name, truncate_preview(&msg.preview, 40));
+        }
+    }
+    truncate_preview(&msg.preview, 50).to_string()
+}
+
+fn truncate_preview(input: &str, max_chars: usize) -> &str {
+    if input.chars().count() <= max_chars {
+        return input;
+    }
+    input
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| &input[..idx])
+        .unwrap_or(input)
 }

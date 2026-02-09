@@ -16,6 +16,7 @@
 
 pub mod edit_churn;
 pub mod first_order;
+pub mod outcome;
 
 use super::AnalyticsEngine;
 
@@ -33,6 +34,17 @@ pub fn create_default_engine() -> AnalyticsEngine {
     let mut engine = AnalyticsEngine::new();
     engine.register(Box::new(edit_churn::EditChurnAnalyzer::new()));
     engine.register(Box::new(first_order::FirstOrderMetrics::new()));
+    engine.register(Box::new(outcome::OutcomeMetrics::new()));
+    engine
+}
+
+/// Create an engine with built-in plugins and timeout settings from config.
+pub fn create_default_engine_with_config(
+    config: &crate::config::AnalyticsConfig,
+) -> AnalyticsEngine {
+    let mut engine = create_default_engine();
+    engine.set_default_timeout_ms(config.timeout_ms);
+    engine.set_plugin_timeouts_ms(config.plugin_timeouts.clone());
     engine
 }
 
@@ -53,6 +65,10 @@ mod tests {
         assert!(
             names.contains(&"core.first_order"),
             "Should include first_order plugin"
+        );
+        assert!(
+            names.contains(&"core.outcome"),
+            "Should include outcome plugin"
         );
     }
 }

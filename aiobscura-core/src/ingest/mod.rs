@@ -140,6 +140,11 @@ impl IngestCoordinator {
         Self { db, parsers }
     }
 
+    /// Get read/write database handle used by this coordinator.
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
     /// Register an additional parser.
     pub fn register_parser(&mut self, parser: Box<dyn AssistantParser>) {
         self.parsers.push(parser);

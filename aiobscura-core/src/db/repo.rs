@@ -157,12 +157,30 @@ pub struct CollectorPublishState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Insert payload for a new assessment record.
+pub struct NewAssessment<'a> {
+    pub session_id: &'a str,
+    pub assessor: &'a str,
+    pub model: Option<&'a str>,
+    pub assessed_at: &'a DateTime<Utc>,
+    pub scores: &'a serde_json::Value,
+    pub raw_response: Option<&'a str>,
+    pub prompt_hash: Option<&'a str>,
+}
+
 /// Database handle with connection pooling (single connection for now)
 pub struct Database {
     conn: Mutex<Connection>,
 }
 
 impl Database {
+    /// Acquire the shared database connection or return a typed error.
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| Error::Config(format!("database connection lock poisoned: {e}")))
+    }
+
     /// Open or create a database at the given path
     pub fn open(path: &PathBuf) -> Result<Self> {
         // Ensure parent directory exists
@@ -198,13 +216,60 @@ impl Database {
 
     /// Run migrations on this database
     pub fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         super::schema::run_migrations(&conn)
     }
 
     /// Get the underlying connection (for advanced use)
-    pub fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap()
+    pub fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.lock_conn()
+    }
+
+    fn decode_error(field: &str, value: &str, err: impl std::fmt::Display) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid {field} value '{value}': {err}"),
+            )),
+        )
+    }
+
+    fn parse_rfc3339_field(field: &str, value: &str) -> rusqlite::Result<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| Self::decode_error(field, value, e))
+    }
+
+    fn parse_optional_rfc3339_field(
+        field: &str,
+        value: Option<String>,
+    ) -> rusqlite::Result<Option<DateTime<Utc>>> {
+        value
+            .map(|v| Self::parse_rfc3339_field(field, &v))
+            .transpose()
+    }
+
+    fn parse_json_field(field: &str, value: &str) -> rusqlite::Result<serde_json::Value> {
+        serde_json::from_str(value).map_err(|e| Self::decode_error(field, value, e))
+    }
+
+    fn parse_optional_json_field(
+        field: &str,
+        value: Option<String>,
+    ) -> rusqlite::Result<Option<serde_json::Value>> {
+        value.map(|v| Self::parse_json_field(field, &v)).transpose()
+    }
+
+    fn parse_enum_field<T>(field: &str, value: &str) -> rusqlite::Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        value
+            .parse::<T>()
+            .map_err(|e| Self::decode_error(field, value, e))
     }
 
     // ============================================
@@ -213,7 +278,7 @@ impl Database {
 
     /// Insert or update a project
     pub fn upsert_project(&self, project: &Project) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO projects (id, path, name, created_at, last_activity_at, metadata)
@@ -237,7 +302,7 @@ impl Database {
 
     /// Get a project by ID
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row("SELECT * FROM projects WHERE id = ?", [id], |row| {
             Self::row_to_project(row)
         })
@@ -247,7 +312,7 @@ impl Database {
 
     /// Get a project by path
     pub fn get_project_by_path(&self, path: &Path) -> Result<Option<Project>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT * FROM projects WHERE path = ?",
             [path.to_string_lossy().to_string()],
@@ -267,13 +332,12 @@ impl Database {
             id: row.get("id")?,
             path: PathBuf::from(path_str),
             name: row.get("name")?,
-            created_at: DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            last_activity_at: last_activity_str
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+            created_at: Self::parse_rfc3339_field("projects.created_at", &created_at_str)?,
+            last_activity_at: Self::parse_optional_rfc3339_field(
+                "projects.last_activity_at",
+                last_activity_str,
+            )?,
+            metadata: Self::parse_json_field("projects.metadata", &metadata_str)?,
         })
     }
 
@@ -283,7 +347,7 @@ impl Database {
 
     /// Insert or update a backing model
     pub fn upsert_backing_model(&self, model: &BackingModel) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO backing_models (id, provider, model_id, display_name, first_seen_at, metadata)
@@ -306,7 +370,7 @@ impl Database {
 
     /// Get a backing model by ID
     pub fn get_backing_model(&self, id: &str) -> Result<Option<BackingModel>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT * FROM backing_models WHERE id = ?",
             [id],
@@ -325,10 +389,11 @@ impl Database {
             provider: row.get("provider")?,
             model_id: row.get("model_id")?,
             display_name: row.get("display_name")?,
-            first_seen_at: DateTime::parse_from_rfc3339(&first_seen_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+            first_seen_at: Self::parse_rfc3339_field(
+                "backing_models.first_seen_at",
+                &first_seen_str,
+            )?,
+            metadata: Self::parse_json_field("backing_models.metadata", &metadata_str)?,
         })
     }
 
@@ -338,7 +403,7 @@ impl Database {
 
     /// Insert or update a source file
     pub fn upsert_source_file(&self, file: &SourceFile) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let (checkpoint_type, checkpoint_data) = match &file.checkpoint {
             Checkpoint::ByteOffset { offset } => (
@@ -393,7 +458,7 @@ impl Database {
 
     /// Get a source file by path
     pub fn get_source_file(&self, path: &str) -> Result<Option<SourceFile>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT * FROM source_files WHERE path = ?",
             [path],
@@ -416,29 +481,75 @@ impl Database {
 
         let checkpoint = match checkpoint_type.as_deref() {
             Some("byte_offset") => {
-                let data: serde_json::Value = checkpoint_data_str
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or(serde_json::json!({}));
-                Checkpoint::ByteOffset {
-                    offset: data["offset"].as_u64().unwrap_or(0),
-                }
+                let raw = checkpoint_data_str.as_deref().ok_or_else(|| {
+                    Self::decode_error(
+                        "source_files.checkpoint_data",
+                        "<null>",
+                        "missing checkpoint_data for byte_offset",
+                    )
+                })?;
+                let data = Self::parse_json_field("source_files.checkpoint_data", raw)?;
+                let offset = data.get("offset").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    Self::decode_error(
+                        "source_files.checkpoint_data",
+                        raw,
+                        "missing numeric offset",
+                    )
+                })?;
+                Checkpoint::ByteOffset { offset }
             }
             Some("content_hash") => {
-                let data: serde_json::Value = checkpoint_data_str
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or(serde_json::json!({}));
+                let raw = checkpoint_data_str.as_deref().ok_or_else(|| {
+                    Self::decode_error(
+                        "source_files.checkpoint_data",
+                        "<null>",
+                        "missing checkpoint_data for content_hash",
+                    )
+                })?;
+                let data = Self::parse_json_field("source_files.checkpoint_data", raw)?;
+                let hash = data.get("hash").and_then(|v| v.as_str()).ok_or_else(|| {
+                    Self::decode_error("source_files.checkpoint_data", raw, "missing hash")
+                })?;
                 Checkpoint::ContentHash {
-                    hash: data["hash"].as_str().unwrap_or("").to_string(),
+                    hash: hash.to_string(),
                 }
             }
             Some("database_cursor") => {
-                let data: serde_json::Value = checkpoint_data_str
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or(serde_json::json!({}));
+                let raw = checkpoint_data_str.as_deref().ok_or_else(|| {
+                    Self::decode_error(
+                        "source_files.checkpoint_data",
+                        "<null>",
+                        "missing checkpoint_data for database_cursor",
+                    )
+                })?;
+                let data = Self::parse_json_field("source_files.checkpoint_data", raw)?;
+                let table = data.get("table").and_then(|v| v.as_str()).ok_or_else(|| {
+                    Self::decode_error("source_files.checkpoint_data", raw, "missing table")
+                })?;
+                let cursor_column = data
+                    .get("cursor_column")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        Self::decode_error(
+                            "source_files.checkpoint_data",
+                            raw,
+                            "missing cursor_column",
+                        )
+                    })?;
+                let cursor_value = data
+                    .get("cursor_value")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        Self::decode_error(
+                            "source_files.checkpoint_data",
+                            raw,
+                            "missing cursor_value",
+                        )
+                    })?;
                 Checkpoint::DatabaseCursor {
-                    table: data["table"].as_str().unwrap_or("").to_string(),
-                    cursor_column: data["cursor_column"].as_str().unwrap_or("").to_string(),
-                    cursor_value: data["cursor_value"].as_str().unwrap_or("").to_string(),
+                    table: table.to_string(),
+                    cursor_column: cursor_column.to_string(),
+                    cursor_value: cursor_value.to_string(),
                 }
             }
             _ => Checkpoint::None,
@@ -446,18 +557,15 @@ impl Database {
 
         Ok(SourceFile {
             path: PathBuf::from(path_str),
-            file_type: file_type_str.parse().unwrap_or(FileType::Jsonl),
-            assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
-            created_at: DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            modified_at: DateTime::parse_from_rfc3339(&modified_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+            file_type: Self::parse_enum_field("source_files.file_type", &file_type_str)?,
+            assistant: Self::parse_enum_field("source_files.assistant", &assistant_str)?,
+            created_at: Self::parse_rfc3339_field("source_files.created_at", &created_at_str)?,
+            modified_at: Self::parse_rfc3339_field("source_files.modified_at", &modified_at_str)?,
             size_bytes: size_bytes as u64,
-            last_parsed_at: last_parsed_str
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
+            last_parsed_at: Self::parse_optional_rfc3339_field(
+                "source_files.last_parsed_at",
+                last_parsed_str,
+            )?,
             checkpoint,
         })
     }
@@ -468,7 +576,7 @@ impl Database {
 
     /// Insert or update a session
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO sessions (id, assistant, backing_model_id, project_id, started_at,
@@ -498,7 +606,7 @@ impl Database {
 
     /// Get a session by ID
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row("SELECT * FROM sessions WHERE id = ?", [id], |row| {
             Self::row_to_session(row)
         })
@@ -508,7 +616,7 @@ impl Database {
 
     /// List sessions with optional filtering
     pub fn list_sessions(&self, filter: &SessionFilter) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut sql = String::from("SELECT * FROM sessions WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
@@ -554,7 +662,7 @@ impl Database {
     /// Returns sessions with pre-computed thread count, message count, and model name
     /// to avoid N+1 queries when rendering session lists.
     pub fn list_project_sessions(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Join sessions with aggregated stats from threads and messages
         let mut stmt = conn.prepare(
@@ -585,13 +693,12 @@ impl Database {
 
                 Ok(SessionSummary {
                     id: row.get(0)?,
-                    assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
-                    started_at: DateTime::parse_from_rfc3339(&started_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    last_activity_at: last_activity_str
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc)),
+                    assistant: Self::parse_enum_field("sessions.assistant", &assistant_str)?,
+                    started_at: Self::parse_rfc3339_field("sessions.started_at", &started_at_str)?,
+                    last_activity_at: Self::parse_optional_rfc3339_field(
+                        "sessions.last_activity_at",
+                        last_activity_str,
+                    )?,
                     thread_count: row.get(4)?,
                     message_count: row.get(5)?,
                     model_name: row.get(6)?,
@@ -611,18 +718,17 @@ impl Database {
 
         Ok(Session {
             id: row.get("id")?,
-            assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
+            assistant: Self::parse_enum_field("sessions.assistant", &assistant_str)?,
             backing_model_id: row.get("backing_model_id")?,
             project_id: row.get("project_id")?,
-            started_at: DateTime::parse_from_rfc3339(&started_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            last_activity_at: last_activity_str
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            status: status_str.parse().unwrap_or(SessionStatus::Stale),
+            started_at: Self::parse_rfc3339_field("sessions.started_at", &started_at_str)?,
+            last_activity_at: Self::parse_optional_rfc3339_field(
+                "sessions.last_activity_at",
+                last_activity_str,
+            )?,
+            status: Self::parse_enum_field("sessions.status", &status_str)?,
             source_file_path: row.get("source_file_path")?,
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+            metadata: Self::parse_json_field("sessions.metadata", &metadata_str)?,
         })
     }
 
@@ -632,7 +738,7 @@ impl Database {
 
     /// Insert a thread
     pub fn insert_thread(&self, thread: &Thread) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO threads (id, session_id, thread_type, parent_thread_id,
@@ -656,7 +762,7 @@ impl Database {
 
     /// Get threads for a session
     pub fn get_session_threads(&self, session_id: &str) -> Result<Vec<Thread>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt =
             conn.prepare("SELECT * FROM threads WHERE session_id = ? ORDER BY started_at ASC")?;
 
@@ -669,7 +775,7 @@ impl Database {
 
     /// List all threads with message counts and session/project context.
     pub fn list_threads_with_counts(&self) -> Result<Vec<ThreadSummary>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT
@@ -694,7 +800,7 @@ impl Database {
                 let assistant_str: String = row.get("assistant")?;
                 Ok(ThreadSummary {
                     thread: Self::row_to_thread(row)?,
-                    assistant: assistant_str.parse().unwrap_or(Assistant::ClaudeCode),
+                    assistant: Self::parse_enum_field("sessions.assistant", &assistant_str)?,
                     project_name: row.get("project_name")?,
                     message_count: row.get("message_count")?,
                 })
@@ -706,7 +812,7 @@ impl Database {
 
     /// Get a single thread by ID
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<Thread>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let thread = conn
             .query_row("SELECT * FROM threads WHERE id = ?", [thread_id], |row| {
                 Self::row_to_thread(row)
@@ -726,19 +832,16 @@ impl Database {
         Ok(Thread {
             id: row.get("id")?,
             session_id: row.get("session_id")?,
-            thread_type: thread_type_str.parse().unwrap_or(ThreadType::Main),
+            thread_type: Self::parse_enum_field("threads.thread_type", &thread_type_str)?,
             parent_thread_id: row.get("parent_thread_id")?,
             spawned_by_message_id: row.get("spawned_by_message_id")?,
-            started_at: DateTime::parse_from_rfc3339(&started_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            ended_at: ended_at_str
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            last_activity_at: last_activity_at_str
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+            started_at: Self::parse_rfc3339_field("threads.started_at", &started_at_str)?,
+            ended_at: Self::parse_optional_rfc3339_field("threads.ended_at", ended_at_str)?,
+            last_activity_at: Self::parse_optional_rfc3339_field(
+                "threads.last_activity_at",
+                last_activity_at_str,
+            )?,
+            metadata: Self::parse_json_field("threads.metadata", &metadata_str)?,
         })
     }
 
@@ -751,7 +854,7 @@ impl Database {
         spawned_by_message_id: i64,
         parent_thread_id: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             UPDATE threads
@@ -769,7 +872,7 @@ impl Database {
         thread_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             UPDATE threads
@@ -787,7 +890,7 @@ impl Database {
         thread_id: &str,
         last_activity_at: DateTime<Utc>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             UPDATE threads
@@ -812,7 +915,7 @@ impl Database {
         session_id: &str,
         spawning_seq: i64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO agent_spawns (agent_id, session_id, spawning_message_seq, created_at)
@@ -830,7 +933,7 @@ impl Database {
     ///
     /// Returns the session ID and spawning message seq for linking agent threads.
     pub fn get_agent_spawn(&self, agent_id: &str) -> Result<Option<AgentSpawnInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT agent_id, session_id, spawning_message_seq FROM agent_spawns WHERE agent_id = ?",
         )?;
@@ -854,7 +957,7 @@ impl Database {
 
     /// Insert a message
     pub fn insert_message(&self, message: &Message) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO messages (session_id, thread_id, seq, emitted_at, observed_at, author_role, author_name,
@@ -892,7 +995,7 @@ impl Database {
 
     /// Insert multiple messages in a transaction
     pub fn insert_messages(&self, messages: &[Message]) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
 
         for message in messages {
@@ -936,7 +1039,7 @@ impl Database {
 
     /// Get messages for a session
     pub fn get_session_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY emitted_at ASC LIMIT ?",
         )?;
@@ -952,7 +1055,7 @@ impl Database {
 
     /// Count messages for a session
     pub fn count_session_messages(&self, session_id: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?",
             [session_id],
@@ -963,7 +1066,7 @@ impl Database {
 
     /// Count messages for a thread
     pub fn count_thread_messages(&self, thread_id: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
             [thread_id],
@@ -974,7 +1077,7 @@ impl Database {
 
     /// Get messages for a thread
     pub fn get_thread_messages(&self, thread_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt =
             conn.prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY seq ASC LIMIT ?")?;
 
@@ -993,7 +1096,7 @@ impl Database {
         session_id: &str,
         seq: i64,
     ) -> Result<Option<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn
             .query_row(
                 r#"
@@ -1014,7 +1117,7 @@ impl Database {
 
     /// Get the last sequence number for a thread
     pub fn get_last_message_seq(&self, thread_id: &str) -> Result<Option<i32>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT MAX(seq) FROM messages WHERE thread_id = ?",
             [thread_id],
@@ -1027,7 +1130,7 @@ impl Database {
 
     /// Get the last activity timestamp for a thread.
     pub fn get_thread_last_activity(&self, thread_id: &str) -> Result<Option<DateTime<Utc>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result: Option<String> = conn
             .query_row(
                 "SELECT last_activity_at FROM threads WHERE id = ?",
@@ -1049,7 +1152,7 @@ impl Database {
     /// Used by TUI to detect when new data has been synced.
     /// Note: Uses observed_at since we want to detect new ingestions, not event times.
     pub fn get_latest_message_ts(&self) -> Result<Option<DateTime<Utc>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result: Option<String> = conn
             .query_row("SELECT MAX(observed_at) FROM messages", [], |row| {
                 row.get(0)
@@ -1068,7 +1171,7 @@ impl Database {
     /// Get the latest message timestamp for a specific session.
     /// Used for analytics freshness checking.
     pub fn get_session_last_message_ts(&self, session_id: &str) -> Result<Option<DateTime<Utc>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result: Option<String> = conn
             .query_row(
                 "SELECT MAX(emitted_at) FROM messages WHERE session_id = ?",
@@ -1091,7 +1194,7 @@ impl Database {
     /// Used by the collector to find newly ingested messages for publishing.
     /// Returns messages ordered by observed_at ascending.
     pub fn get_messages_since(&self, after: DateTime<Utc>, limit: usize) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -1115,40 +1218,36 @@ impl Database {
         let after_str = after.to_rfc3339();
         let messages = stmt
             .query_map([&after_str, &limit.to_string()], |row| {
+                let emitted_at_str: String = row.get(4)?;
+                let observed_at_str: String = row.get(5)?;
+                let author_role_str: String = row.get(6)?;
+                let message_type_str: String = row.get(8)?;
                 Ok(Message {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
                     thread_id: row.get(2)?,
                     seq: row.get(3)?,
-                    emitted_at: row
-                        .get::<_, String>(4)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                    observed_at: row
-                        .get::<_, String>(5)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                    author_role: row
-                        .get::<_, String>(6)?
-                        .parse()
-                        .unwrap_or(crate::types::AuthorRole::System),
+                    emitted_at: Self::parse_rfc3339_field("messages.emitted_at", &emitted_at_str)?,
+                    observed_at: Self::parse_rfc3339_field(
+                        "messages.observed_at",
+                        &observed_at_str,
+                    )?,
+                    author_role: Self::parse_enum_field("messages.author_role", &author_role_str)?,
                     author_name: row.get(7)?,
-                    message_type: row
-                        .get::<_, String>(8)?
-                        .parse()
-                        .unwrap_or(crate::types::MessageType::Context),
+                    message_type: Self::parse_enum_field(
+                        "messages.message_type",
+                        &message_type_str,
+                    )?,
                     content: row.get(9)?,
                     content_type: row
                         .get::<_, Option<String>>(10)?
-                        .and_then(|s| s.parse().ok()),
+                        .map(|s| Self::parse_enum_field("messages.content_type", &s))
+                        .transpose()?,
                     tool_name: row.get(11)?,
                     tool_input: row
                         .get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
+                        .map(|s| Self::parse_json_field("messages.tool_input", &s))
+                        .transpose()?,
                     tool_result: row.get(13)?,
                     tokens_in: row.get(14)?,
                     tokens_out: row.get(15)?,
@@ -1312,7 +1411,7 @@ impl Database {
         &self,
         thread_id: &str,
     ) -> Result<Vec<crate::types::PluginMetric>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -1334,13 +1433,13 @@ impl Database {
                     entity_id: row.get(3)?,
                     metric_name: row.get(4)?,
                     metric_value,
-                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
+                    computed_at: Self::parse_rfc3339_field(
+                        "plugin_metrics.computed_at",
+                        &computed_at_str,
+                    )?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(metrics)
     }
@@ -1450,19 +1549,17 @@ impl Database {
             session_id: row.get("session_id")?,
             thread_id: row.get("thread_id")?,
             seq: row.get("seq")?,
-            emitted_at: DateTime::parse_from_rfc3339(&emitted_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            observed_at: DateTime::parse_from_rfc3339(&observed_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            author_role: author_role_str.parse().unwrap_or(AuthorRole::System),
+            emitted_at: Self::parse_rfc3339_field("messages.emitted_at", &emitted_at_str)?,
+            observed_at: Self::parse_rfc3339_field("messages.observed_at", &observed_at_str)?,
+            author_role: Self::parse_enum_field("messages.author_role", &author_role_str)?,
             author_name: row.get("author_name")?,
-            message_type: message_type_str.parse().unwrap_or(MessageType::Response),
+            message_type: Self::parse_enum_field("messages.message_type", &message_type_str)?,
             content: row.get("content")?,
-            content_type: content_type_str.and_then(|s| s.parse().ok()),
+            content_type: content_type_str
+                .map(|s| Self::parse_enum_field("messages.content_type", &s))
+                .transpose()?,
             tool_name: row.get("tool_name")?,
-            tool_input: tool_input_str.and_then(|s| serde_json::from_str(&s).ok()),
+            tool_input: Self::parse_optional_json_field("messages.tool_input", tool_input_str)?,
             tool_result: row.get("tool_result")?,
             tokens_in: row.get("tokens_in")?,
             tokens_out: row.get("tokens_out")?,
@@ -1470,8 +1567,8 @@ impl Database {
             source_file_path: row.get("source_file_path")?,
             source_offset: row.get("source_offset")?,
             source_line: row.get("source_line")?,
-            raw_data: serde_json::from_str(&raw_data_str).unwrap_or(serde_json::json!({})),
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+            raw_data: Self::parse_json_field("messages.raw_data", &raw_data_str)?,
+            metadata: Self::parse_json_field("messages.metadata", &metadata_str)?,
         })
     }
 
@@ -1483,14 +1580,16 @@ impl Database {
     ///
     /// Returns true if a new version was inserted, false if this content already exists.
     pub fn upsert_plan_version(&self, plan: &Plan) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Extract content hash from metadata
         let content_hash = plan
             .metadata
             .get("content_hash")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .ok_or_else(|| {
+                Error::Config(format!("plan {} missing metadata.content_hash", plan.id))
+            })?;
 
         // Try to insert - will fail silently if (slug, hash) already exists
         let result = conn.execute(
@@ -1521,7 +1620,7 @@ impl Database {
         plan_slug: &str,
         first_used_at: DateTime<Utc>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT OR IGNORE INTO session_plans (session_id, plan_slug, first_used_at)
@@ -1534,7 +1633,7 @@ impl Database {
 
     /// Get the latest version of a plan by slug
     pub fn get_plan_by_slug(&self, slug: &str) -> Result<Option<Plan>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result = conn
             .query_row(
                 r#"
@@ -1552,12 +1651,14 @@ impl Database {
                         session_id: String::new(), // Not stored in plan_versions
                         path: PathBuf::from(row.get::<_, String>("source_file")?),
                         title: row.get("title")?,
-                        created_at: DateTime::parse_from_rfc3339(&captured_at_str)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
-                        modified_at: DateTime::parse_from_rfc3339(&captured_at_str)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
+                        created_at: Self::parse_rfc3339_field(
+                            "plan_versions.captured_at",
+                            &captured_at_str,
+                        )?,
+                        modified_at: Self::parse_rfc3339_field(
+                            "plan_versions.captured_at",
+                            &captured_at_str,
+                        )?,
                         status: PlanStatus::Unknown,
                         content: row.get("content")?,
                         source_file_path: row.get("source_file")?,
@@ -1573,7 +1674,7 @@ impl Database {
 
     /// Get all plan slugs for a session
     pub fn get_plan_slugs_for_session(&self, session_id: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT plan_slug FROM session_plans WHERE session_id = ? ORDER BY first_used_at",
         )?;
@@ -1601,7 +1702,7 @@ impl Database {
 
     /// List plans for a project (latest version per plan slug).
     pub fn list_project_plans(&self, project_id: &str) -> Result<Vec<Plan>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT
@@ -1629,9 +1730,8 @@ impl Database {
         let plans = stmt
             .query_map([project_id], |row| {
                 let captured_at_str: String = row.get("captured_at")?;
-                let captured_at = DateTime::parse_from_rfc3339(&captured_at_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
+                let captured_at =
+                    Self::parse_rfc3339_field("plan_versions.captured_at", &captured_at_str)?;
                 let source_file: String = row.get("source_file")?;
 
                 Ok(Plan {
@@ -1659,7 +1759,7 @@ impl Database {
 
     /// Count sessions by status
     pub fn count_sessions_by_status(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM sessions GROUP BY status")?;
 
         let counts: std::collections::HashMap<String, i64> = stmt
@@ -1675,7 +1775,7 @@ impl Database {
 
     /// Count total messages
     pub fn count_messages(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
         Ok(count)
     }
@@ -1688,6 +1788,70 @@ impl Database {
     // ============================================
     // Plugin Metrics operations
     // ============================================
+
+    /// Insert an LLM assessment record.
+    ///
+    /// Returns the inserted assessment ID.
+    pub fn insert_assessment(&self, assessment: &NewAssessment<'_>) -> Result<i64> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            r#"
+            INSERT INTO assessments (
+                session_id, assessor, model, assessed_at, scores, raw_response, prompt_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                assessment.session_id,
+                assessment.assessor,
+                assessment.model,
+                assessment.assessed_at.to_rfc3339(),
+                serde_json::to_string(assessment.scores).unwrap_or_else(|_| "null".to_string()),
+                assessment.raw_response,
+                assessment.prompt_hash,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get the latest assessment for a session/assessor pair.
+    pub fn get_latest_assessment(
+        &self,
+        session_id: &str,
+        assessor: &str,
+    ) -> Result<Option<crate::types::Assessment>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, session_id, assessor, model, assessed_at, scores, raw_response, prompt_hash
+            FROM assessments
+            WHERE session_id = ?1 AND assessor = ?2
+            ORDER BY assessed_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )?;
+
+        let assessment = stmt
+            .query_row(params![session_id, assessor], |row| {
+                let assessed_at_str: String = row.get(4)?;
+                let scores_raw: String = row.get(5)?;
+                Ok(crate::types::Assessment {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    assessor: row.get(2)?,
+                    model: row.get(3)?,
+                    assessed_at: Self::parse_rfc3339_field(
+                        "assessments.assessed_at",
+                        &assessed_at_str,
+                    )?,
+                    scores: Self::parse_json_field("assessments.scores", &scores_raw)?,
+                    raw_response: row.get(6)?,
+                    prompt_hash: row.get(7)?,
+                })
+            })
+            .optional()?;
+
+        Ok(assessment)
+    }
 
     /// Insert or update a plugin metric.
     ///
@@ -1702,7 +1866,7 @@ impl Database {
         metric_value: &serde_json::Value,
         metric_version: i32,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO plugin_metrics (plugin_name, entity_type, entity_id, metric_name, metric_value, metric_version, computed_at)
@@ -1734,7 +1898,7 @@ impl Database {
         entity_type: &str,
         entity_id: Option<&str>,
     ) -> Result<Vec<crate::types::PluginMetric>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -1758,13 +1922,13 @@ impl Database {
                     entity_id: row.get(3)?,
                     metric_name: row.get(4)?,
                     metric_value,
-                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
+                    computed_at: Self::parse_rfc3339_field(
+                        "plugin_metrics.computed_at",
+                        &computed_at_str,
+                    )?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(metrics)
     }
@@ -1778,10 +1942,10 @@ impl Database {
             rusqlite::types::ValueRef::Null => serde_json::json!(null),
             rusqlite::types::ValueRef::Integer(i) => serde_json::json!(i),
             rusqlite::types::ValueRef::Real(f) => serde_json::json!(f),
-            rusqlite::types::ValueRef::Text(s) => {
-                let s = std::str::from_utf8(s).unwrap_or("null");
-                serde_json::from_str(s).unwrap_or(serde_json::json!(null))
-            }
+            rusqlite::types::ValueRef::Text(s) => match std::str::from_utf8(s) {
+                Ok(text) => serde_json::from_str(text).unwrap_or(serde_json::json!(null)),
+                Err(_) => serde_json::json!(null),
+            },
             rusqlite::types::ValueRef::Blob(_) => serde_json::json!(null),
         }
     }
@@ -1791,7 +1955,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::types::PluginMetric>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -1813,13 +1977,13 @@ impl Database {
                     entity_id: row.get(3)?,
                     metric_name: row.get(4)?,
                     metric_value,
-                    computed_at: DateTime::parse_from_rfc3339(&computed_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
+                    computed_at: Self::parse_rfc3339_field(
+                        "plugin_metrics.computed_at",
+                        &computed_at_str,
+                    )?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(metrics)
     }
@@ -1828,7 +1992,7 @@ impl Database {
     ///
     /// Returns the ID of the inserted record.
     pub fn insert_plugin_run(&self, run: &crate::analytics::PluginRunResult) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO plugin_runs (plugin_name, session_id, started_at, duration_ms, status, error_message, metrics_produced, input_message_count, input_token_count)
@@ -1855,7 +2019,7 @@ impl Database {
         plugin_name: &str,
         limit: usize,
     ) -> Result<Vec<crate::analytics::PluginRunResult>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -1874,23 +2038,19 @@ impl Database {
                 Ok(crate::analytics::PluginRunResult {
                     plugin_name: row.get(0)?,
                     session_id: row.get(1)?,
-                    started_at: DateTime::parse_from_rfc3339(&started_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
+                    started_at: Self::parse_rfc3339_field(
+                        "plugin_runs.started_at",
+                        &started_at_str,
+                    )?,
                     duration_ms: row.get(3)?,
-                    status: if status_str == "success" {
-                        crate::analytics::PluginRunStatus::Success
-                    } else {
-                        crate::analytics::PluginRunStatus::Error
-                    },
+                    status: crate::analytics::PluginRunStatus::from_storage(&status_str),
                     error_message: row.get(5)?,
                     metrics_produced: row.get::<_, i64>(6)? as usize,
                     input_message_count: row.get::<_, i64>(7)? as usize,
                     input_token_count: row.get(8)?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(runs)
     }
@@ -1899,14 +2059,14 @@ impl Database {
     ///
     /// Returns (success_count, error_count, avg_duration_ms) for each plugin.
     pub fn get_plugin_stats(&self) -> Result<Vec<(String, i64, i64, f64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
             SELECT
                 plugin_name,
                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
-                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) as error_count,
                 AVG(duration_ms) as avg_duration
             FROM plugin_runs
             GROUP BY plugin_name
@@ -1923,8 +2083,7 @@ impl Database {
                     row.get::<_, f64>(3)?,
                 ))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(stats)
     }
@@ -1935,7 +2094,7 @@ impl Database {
 
     /// Get the source file path for a session
     pub fn get_session_source_path(&self, session_id: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let path: Option<String> = conn
             .query_row(
                 "SELECT source_file_path FROM sessions WHERE id = ?",
@@ -1948,7 +2107,7 @@ impl Database {
 
     /// Get the backing model display name for a session
     pub fn get_session_model_name(&self, session_id: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let name: Option<String> = conn
             .query_row(
                 r#"
@@ -1966,7 +2125,7 @@ impl Database {
 
     /// Get session metadata (cwd, git_branch, etc.)
     pub fn get_session_metadata(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let metadata: Option<String> = conn
             .query_row(
                 "SELECT metadata FROM sessions WHERE id = ?",
@@ -1975,14 +2134,14 @@ impl Database {
             )
             .optional()?;
         match metadata {
-            Some(s) => Ok(Some(serde_json::from_str(&s).unwrap_or_default())),
+            Some(s) => Ok(Some(Self::parse_json_field("sessions.metadata", &s)?)),
             None => Ok(None),
         }
     }
 
     /// Count agent threads for a session
     pub fn count_session_agents(&self, session_id: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM threads WHERE session_id = ? AND thread_type = 'agent'",
             [session_id],
@@ -1993,7 +2152,7 @@ impl Database {
 
     /// Count plans for a session
     pub fn count_session_plans(&self, session_id: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM session_plans WHERE session_id = ?",
             [session_id],
@@ -2004,7 +2163,7 @@ impl Database {
 
     /// Get tool usage statistics for a thread
     pub fn get_thread_tool_stats(&self, thread_id: &str) -> Result<ToolStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Get total tool calls
         let total_calls: i64 = conn.query_row(
@@ -2027,8 +2186,7 @@ impl Database {
             .query_map([thread_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(ToolStats {
             total_calls,
@@ -2038,7 +2196,7 @@ impl Database {
 
     /// Get file modification statistics for a thread (from Edit/Write tool_input)
     pub fn get_thread_file_stats(&self, thread_id: &str) -> Result<FileStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // Query all Edit/Write tool calls and extract file_path from JSON
         let mut stmt = conn.prepare(
@@ -2058,7 +2216,7 @@ impl Database {
 
         let rows = stmt.query_map([thread_id], |row| row.get::<_, Option<String>>(0))?;
         for row in rows {
-            if let Ok(Some(path)) = row {
+            if let Some(path) = row? {
                 *file_counts.entry(path).or_insert(0) += 1;
             }
         }
@@ -2087,7 +2245,7 @@ impl Database {
         }
 
         let result: Option<ThreadMetadataRow> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn()?;
             conn.query_row(
                 r#"
                 SELECT
@@ -2121,11 +2279,10 @@ impl Database {
             return Ok(None);
         };
 
-        let metadata: serde_json::Value = row
-            .metadata
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::json!({}));
+        let metadata = match row.metadata {
+            Some(s) => Self::parse_json_field("sessions.metadata", &s)?,
+            None => serde_json::json!({}),
+        };
         let cwd = metadata
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -2135,14 +2292,9 @@ impl Database {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let started_at = DateTime::parse_from_rfc3339(&row.started_at)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-        let last_activity = row.last_activity_at.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok()
-        });
+        let started_at = Self::parse_rfc3339_field("sessions.started_at", &row.started_at)?;
+        let last_activity =
+            Self::parse_optional_rfc3339_field("sessions.last_activity_at", row.last_activity_at)?;
         let duration_secs = last_activity
             .map(|last| last.signed_duration_since(started_at).num_seconds().max(0))
             .unwrap_or(0);
@@ -2173,7 +2325,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> Result<Option<(DateTime<Utc>, Option<DateTime<Utc>>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT started_at, last_activity_at FROM sessions WHERE id = ?",
@@ -2211,7 +2363,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<crate::analytics::TotalStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2321,7 +2473,7 @@ impl Database {
         end: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2344,8 +2496,7 @@ impl Database {
             .query_map(params![&start_str, &end_str, limit as i64], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(rows)
     }
@@ -2356,7 +2507,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<[i64; 24]> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2377,8 +2528,8 @@ impl Database {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
         })?;
 
-        for row in rows.flatten() {
-            let (hour, count) = row;
+        for row in rows {
+            let (hour, count) = row?;
             if (0..24).contains(&hour) {
                 distribution[hour as usize] = count;
             }
@@ -2393,7 +2544,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<[i64; 7]> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2414,8 +2565,8 @@ impl Database {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
         })?;
 
-        for row in rows.flatten() {
-            let (dow, count) = row;
+        for row in rows {
+            let (dow, count) = row?;
             if (0..7).contains(&dow) {
                 distribution[dow as usize] = count;
             }
@@ -2431,7 +2582,7 @@ impl Database {
         end: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<crate::analytics::ProjectRanking>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2475,8 +2626,7 @@ impl Database {
                     first_session,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(rows)
     }
@@ -2491,7 +2641,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Option<crate::analytics::MarathonSession>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2545,9 +2695,7 @@ impl Database {
 
         match result {
             Some((session_id, duration, date_str, project_name, tool_calls, tokens)) => {
-                let date = DateTime::parse_from_rfc3339(&date_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
+                let date = Self::parse_rfc3339_field("marathon.date", &date_str)?;
 
                 Ok(Some(crate::analytics::MarathonSession {
                     session_id,
@@ -2569,7 +2717,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<crate::analytics::StreakStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -2585,8 +2733,7 @@ impl Database {
 
         let dates: Vec<String> = stmt
             .query_map([&start_str, &end_str], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let active_days = dates.len() as i64;
         let total_days = (end - start).num_days();
@@ -2600,34 +2747,40 @@ impl Database {
         let mut prev_date: Option<chrono::NaiveDate> = None;
 
         for date_str in &dates {
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                match prev_date {
-                    Some(prev) if (date - prev).num_days() == 1 => {
-                        // Consecutive day
-                        current_streak += 1;
-                    }
-                    _ => {
-                        // New streak
-                        if current_streak > longest_streak {
-                            longest_streak = current_streak;
-                            longest_start =
-                                current_start.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc());
-                            longest_end =
-                                prev_date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc());
-                        }
-                        current_streak = 1;
-                        current_start = Some(date);
-                    }
+            let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                .map_err(|e| Error::Config(format!("invalid activity_date '{date_str}': {e}")))?;
+            match prev_date {
+                Some(prev) if (date - prev).num_days() == 1 => {
+                    // Consecutive day
+                    current_streak += 1;
                 }
-                prev_date = Some(date);
+                _ => {
+                    // New streak
+                    if current_streak > longest_streak {
+                        longest_streak = current_streak;
+                        longest_start = current_start
+                            .and_then(|d| d.and_hms_opt(0, 0, 0))
+                            .map(|dt| dt.and_utc());
+                        longest_end = prev_date
+                            .and_then(|d| d.and_hms_opt(23, 59, 59))
+                            .map(|dt| dt.and_utc());
+                    }
+                    current_streak = 1;
+                    current_start = Some(date);
+                }
             }
+            prev_date = Some(date);
         }
 
         // Check final streak
         if current_streak > longest_streak {
             longest_streak = current_streak;
-            longest_start = current_start.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc());
-            longest_end = prev_date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc());
+            longest_start = current_start
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|dt| dt.and_utc());
+            longest_end = prev_date
+                .and_then(|d| d.and_hms_opt(23, 59, 59))
+                .map(|dt| dt.and_utc());
         }
 
         // Calculate current streak (days from today going backwards)
@@ -2635,13 +2788,13 @@ impl Database {
         let mut current_streak_days = 0i64;
 
         for date_str in dates.iter().rev() {
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                let days_ago = (today - date).num_days();
-                if days_ago == current_streak_days {
-                    current_streak_days += 1;
-                } else {
-                    break;
-                }
+            let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                .map_err(|e| Error::Config(format!("invalid activity_date '{date_str}': {e}")))?;
+            let days_ago = (today - date).num_days();
+            if days_ago == current_streak_days {
+                current_streak_days += 1;
+            } else {
+                break;
             }
         }
 
@@ -2661,7 +2814,7 @@ impl Database {
 
     /// List all projects with summary stats for the project list view.
     pub fn list_projects_with_stats(&self) -> Result<Vec<crate::analytics::ProjectRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -2697,8 +2850,7 @@ impl Database {
                     total_tokens: row.get(5)?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(rows)
     }
@@ -2708,7 +2860,7 @@ impl Database {
         &self,
         project_id: &str,
     ) -> Result<Option<crate::analytics::ProjectStats>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // First, get the project info
         let project_info: Option<(String, String, String)> = conn
@@ -2813,8 +2965,7 @@ impl Database {
             .query_map([project_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let tool_stats = ToolStats {
             total_calls,
@@ -2839,7 +2990,7 @@ impl Database {
             std::collections::HashMap::new();
         let rows = file_stmt.query_map([project_id], |row| row.get::<_, Option<String>>(0))?;
         for row in rows {
-            if let Ok(Some(path)) = row {
+            if let Some(path) = row? {
                 *file_counts.entry(path).or_insert(0) += 1;
             }
         }
@@ -2892,8 +3043,8 @@ impl Database {
         let hourly_rows = hourly_stmt.query_map([project_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
         })?;
-        for row in hourly_rows.flatten() {
-            let (hour, count) = row;
+        for row in hourly_rows {
+            let (hour, count) = row?;
             if (0..24).contains(&hour) {
                 hourly[hour as usize] = count;
             }
@@ -2914,8 +3065,8 @@ impl Database {
         let daily_rows = daily_stmt.query_map([project_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
         })?;
-        for row in daily_rows.flatten() {
-            let (dow, count) = row;
+        for row in daily_rows {
+            let (dow, count) = row?;
             if (0..7).contains(&dow) {
                 daily[dow as usize] = count;
             }
@@ -2935,8 +3086,7 @@ impl Database {
             .query_map([project_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(Some(crate::analytics::ProjectStats {
             id,
@@ -2966,7 +3116,7 @@ impl Database {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<crate::analytics::personality::UsageProfile> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
@@ -3045,8 +3195,8 @@ impl Database {
             let rows = stmt.query_map([&start_str, &end_str], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
             })?;
-            for row in rows.flatten() {
-                let (hour, count) = row;
+            for row in rows {
+                let (hour, count) = row?;
                 if (0..24).contains(&hour) {
                     hourly[hour as usize] = count;
                 }
@@ -3101,7 +3251,7 @@ impl Database {
     ///
     /// Returns aggregate stats, activity heatmap (last 28 days), streaks, and patterns.
     pub fn get_dashboard_stats(&self) -> Result<crate::analytics::DashboardStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         // 1. Get aggregate totals
         let (project_count, session_count, total_tokens): (i64, i64, i64) = conn.query_row(
@@ -3220,7 +3370,7 @@ impl Database {
         &self,
         since_minutes: i64,
     ) -> Result<Vec<crate::types::ActiveSession>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -3254,21 +3404,17 @@ impl Database {
                     session_id: row.get(0)?,
                     thread_id: row.get(1)?,
                     project_name: row.get(2)?,
-                    thread_type: thread_type_str
-                        .parse()
-                        .unwrap_or(crate::types::ThreadType::Main),
-                    assistant: assistant_str
-                        .parse()
-                        .unwrap_or(crate::types::Assistant::ClaudeCode),
-                    last_activity: chrono::DateTime::parse_from_rfc3339(&last_activity_str)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    thread_type: Self::parse_enum_field("threads.thread_type", &thread_type_str)?,
+                    assistant: Self::parse_enum_field("sessions.assistant", &assistant_str)?,
+                    last_activity: Self::parse_rfc3339_field(
+                        "messages.last_activity",
+                        &last_activity_str,
+                    )?,
                     message_count: row.get(6)?,
                     parent_thread_id: row.get(7)?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(sessions)
     }
@@ -3278,7 +3424,7 @@ impl Database {
     /// Returns message count, token totals, agent count, and tool call count
     /// for messages within the specified time window.
     pub fn get_live_stats(&self, since_minutes: i64) -> Result<crate::types::LiveStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let since_param = format!("-{}", since_minutes);
 
         // Get message count, token totals, and tool call count
@@ -3327,7 +3473,7 @@ impl Database {
         &self,
         limit: usize,
     ) -> Result<Vec<crate::types::MessageWithContext>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -3368,26 +3514,20 @@ impl Database {
 
                 Ok(crate::types::MessageWithContext {
                     id: row.get(0)?,
-                    emitted_at: chrono::DateTime::parse_from_rfc3339(&emitted_at_str)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now()),
-                    assistant: assistant_str
-                        .parse()
-                        .unwrap_or(crate::types::Assistant::ClaudeCode),
+                    emitted_at: Self::parse_rfc3339_field("messages.emitted_at", &emitted_at_str)?,
+                    assistant: Self::parse_enum_field("sessions.assistant", &assistant_str)?,
                     project_name: row.get(3)?,
                     thread_name: row.get(4)?,
-                    author_role: author_role_str
-                        .parse()
-                        .unwrap_or(crate::types::AuthorRole::System),
-                    message_type: message_type_str
-                        .parse()
-                        .unwrap_or(crate::types::MessageType::Response),
+                    author_role: Self::parse_enum_field("messages.author_role", &author_role_str)?,
+                    message_type: Self::parse_enum_field(
+                        "messages.message_type",
+                        &message_type_str,
+                    )?,
                     preview: row.get(7)?,
                     tool_name: row.get(8)?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(messages)
     }
@@ -3396,7 +3536,7 @@ impl Database {
 
     /// Get the database file size in bytes.
     pub fn get_database_size(&self) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let page_count: u64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
         let page_size: u64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -3407,7 +3547,7 @@ impl Database {
     /// Get environment health stats for each assistant.
     /// Returns a list of (assistant, file_count, total_size_bytes, last_parsed_at).
     pub fn get_assistant_source_stats(&self) -> Result<Vec<AssistantSourceStats>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let mut stmt = conn.prepare(
             r#"
@@ -3426,28 +3566,26 @@ impl Database {
             .query_map([], |row| {
                 let assistant_str: String = row.get(0)?;
                 let last_parsed_str: Option<String> = row.get(3)?;
-                let last_parsed = last_parsed_str
-                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.with_timezone(&Utc));
+                let last_parsed = Self::parse_optional_rfc3339_field(
+                    "source_files.last_parsed_at",
+                    last_parsed_str,
+                )?;
 
                 Ok((
-                    assistant_str
-                        .parse()
-                        .unwrap_or(crate::types::Assistant::ClaudeCode),
+                    Self::parse_enum_field("source_files.assistant", &assistant_str)?,
                     row.get(1)?,
                     row.get(2)?,
                     last_parsed,
                 ))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(rows)
     }
 
     /// Get total counts for environment overview.
     pub fn get_total_counts(&self) -> Result<(i64, i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
 
         let session_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
@@ -3496,7 +3634,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> Result<Option<CollectorPublishState>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let result = conn
             .query_row(
                 r#"
@@ -3539,7 +3677,7 @@ impl Database {
     ///
     /// Uses UPSERT semantics - creates if not exists, updates if exists.
     pub fn upsert_collector_publish_state(&self, state: &CollectorPublishState) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             INSERT INTO collector_publish_state
@@ -3570,7 +3708,7 @@ impl Database {
     /// Returns sessions where there are messages with seq > last_published_seq.
     /// Used for crash recovery to resume publishing.
     pub fn get_incomplete_publish_states(&self) -> Result<Vec<CollectorPublishState>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT ps.session_id, ps.last_published_seq, ps.last_published_at,
@@ -3624,7 +3762,7 @@ impl Database {
         last_published_seq: i64,
         limit: usize,
     ) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT
@@ -3656,7 +3794,7 @@ impl Database {
 
     /// Mark a session's publish state as failed with an error message.
     pub fn mark_publish_failed(&self, session_id: &str, error: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             r#"
             UPDATE collector_publish_state
@@ -3672,7 +3810,7 @@ impl Database {
     ///
     /// Returns all sessions that are currently being tracked for publishing.
     pub fn get_active_publish_states(&self) -> Result<Vec<CollectorPublishState>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT session_id, last_published_seq, last_published_at,
@@ -3962,6 +4100,153 @@ mod tests {
         assert!(
             (profile.plans_per_session - 1.0).abs() < f64::EPSILON,
             "plans_per_session should include plans counted by plan_slug"
+        );
+    }
+
+    #[test]
+    fn test_get_thread_messages_errors_on_invalid_author_role() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        let source_file = create_test_source_file();
+        db.upsert_source_file(&source_file).unwrap();
+
+        let session = create_test_session();
+        db.upsert_session(&session).unwrap();
+
+        let thread = create_test_thread(&session.id);
+        db.insert_thread(&thread).unwrap();
+
+        let message = create_test_message(&session.id, &thread.id, 1);
+        db.insert_messages(&[message]).unwrap();
+
+        {
+            let conn = db.connection().unwrap();
+            conn.execute(
+                "UPDATE messages SET author_role = 'invalid_role' WHERE thread_id = ?1",
+                [&thread.id],
+            )
+            .unwrap();
+        }
+
+        let err = db
+            .get_thread_messages(&thread.id, 10)
+            .expect_err("invalid author_role should fail decoding");
+        assert!(
+            matches!(err, Error::Database(_)),
+            "expected database decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_get_plugin_runs_errors_on_invalid_duration_type() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        {
+            let conn = db.connection().unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO plugin_runs (
+                    plugin_name, session_id, started_at, duration_ms, status,
+                    error_message, metrics_produced, input_message_count, input_token_count
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
+                "#,
+                rusqlite::params![
+                    "core.edit_churn",
+                    "session-1",
+                    Utc::now().to_rfc3339(),
+                    "not_an_integer",
+                    "success",
+                    1_i64,
+                    1_i64,
+                    1_i64
+                ],
+            )
+            .unwrap();
+        }
+
+        let err = db
+            .get_plugin_runs("core.edit_churn", 10)
+            .expect_err("non-integer duration_ms should fail decoding");
+        assert!(
+            matches!(err, Error::Database(_)),
+            "expected database decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_get_plugin_runs_parses_timeout_status() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        {
+            let conn = db.connection().unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO plugin_runs (
+                    plugin_name, session_id, started_at, duration_ms, status,
+                    error_message, metrics_produced, input_message_count, input_token_count
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+                rusqlite::params![
+                    "core.edit_churn",
+                    "session-1",
+                    Utc::now().to_rfc3339(),
+                    123_i64,
+                    "timeout",
+                    "plugin exceeded timeout",
+                    0_i64,
+                    10_i64,
+                    42_i64
+                ],
+            )
+            .unwrap();
+        }
+
+        let runs = db.get_plugin_runs("core.edit_churn", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, crate::analytics::PluginRunStatus::Timeout);
+    }
+
+    #[test]
+    fn test_insert_and_get_latest_assessment() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        let source_file = create_test_source_file();
+        db.upsert_source_file(&source_file).unwrap();
+
+        let session = create_test_session();
+        db.upsert_session(&session).unwrap();
+
+        let now = Utc::now();
+        db.insert_assessment(&NewAssessment {
+            session_id: &session.id,
+            assessor: "llm.assessment",
+            model: Some("gpt-5-mini"),
+            assessed_at: &now,
+            scores: &serde_json::json!({"goal_clarity": 0.8}),
+            raw_response: Some("raw-response"),
+            prompt_hash: Some("prompt-hash-1"),
+        })
+        .unwrap();
+
+        let assessment = db
+            .get_latest_assessment(&session.id, "llm.assessment")
+            .unwrap()
+            .expect("assessment should be present");
+
+        assert_eq!(assessment.session_id, session.id);
+        assert_eq!(assessment.assessor, "llm.assessment");
+        assert_eq!(assessment.model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(assessment.prompt_hash.as_deref(), Some("prompt-hash-1"));
+        assert_eq!(
+            assessment
+                .scores
+                .get("goal_clarity")
+                .and_then(|v| v.as_f64()),
+            Some(0.8)
         );
     }
 }

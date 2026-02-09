@@ -359,6 +359,14 @@ impl Session {
     pub fn refresh_status(&mut self) {
         self.status = SessionStatus::from_last_activity(self.last_activity_at);
     }
+
+    /// Optional workflow tag from session metadata.
+    ///
+    /// This is a lightweight grouping mechanism before introducing a first-class
+    /// Workflow entity/table.
+    pub fn workflow_tag(&self) -> Option<&str> {
+        self.metadata.get("workflow_tag").and_then(|v| v.as_str())
+    }
 }
 
 // ============================================

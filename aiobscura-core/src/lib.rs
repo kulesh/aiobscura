@@ -37,6 +37,7 @@ pub use types::*;
 
 // Public modules
 pub mod analytics;
+pub mod assessment;
 pub mod collector;
 pub mod config;
 pub mod db;

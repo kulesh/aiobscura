@@ -9,6 +9,6 @@ pub mod repo;
 pub mod schema;
 
 pub use repo::{
-    AssistantHealth, CollectorPublishState, Database, EnvironmentHealth, FileStats, SessionFilter,
-    SessionSummary, ThreadMetadata, ThreadSummary, TokenUsage, ToolStats,
+    AssistantHealth, CollectorPublishState, Database, EnvironmentHealth, FileStats, NewAssessment,
+    SessionFilter, SessionSummary, ThreadMetadata, ThreadSummary, TokenUsage, ToolStats,
 };

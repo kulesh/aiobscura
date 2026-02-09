@@ -47,12 +47,14 @@ use crate::db::Database;
 use crate::error::{Error, Result};
 use crate::types::{Message, Session, Thread};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Current metric schema version.
 ///
 /// Increment this when the metric format changes to trigger recomputation.
 pub const METRIC_VERSION: i32 = 1;
+const DEFAULT_PLUGIN_TIMEOUT_MS: u64 = 30_000;
 
 // ============================================
 // Trigger types (for future expansion)
@@ -169,6 +171,8 @@ pub enum PluginRunStatus {
     Success,
     /// Plugin encountered an error
     Error,
+    /// Plugin exceeded configured timeout
+    Timeout,
 }
 
 impl PluginRunStatus {
@@ -177,6 +181,16 @@ impl PluginRunStatus {
         match self {
             PluginRunStatus::Success => "success",
             PluginRunStatus::Error => "error",
+            PluginRunStatus::Timeout => "timeout",
+        }
+    }
+
+    /// Parse status string from storage.
+    pub fn from_storage(value: &str) -> Self {
+        match value {
+            "success" => PluginRunStatus::Success,
+            "timeout" => PluginRunStatus::Timeout,
+            _ => PluginRunStatus::Error,
         }
     }
 }
@@ -286,6 +300,8 @@ pub trait AnalyticsPlugin: Send + Sync {
 /// - Recording plugin run results for observability
 pub struct AnalyticsEngine {
     plugins: Vec<Box<dyn AnalyticsPlugin>>,
+    default_timeout_ms: u64,
+    plugin_timeouts_ms: HashMap<String, u64>,
 }
 
 impl AnalyticsEngine {
@@ -293,6 +309,8 @@ impl AnalyticsEngine {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            default_timeout_ms: DEFAULT_PLUGIN_TIMEOUT_MS,
+            plugin_timeouts_ms: HashMap::new(),
         }
     }
 
@@ -300,6 +318,19 @@ impl AnalyticsEngine {
     pub fn register(&mut self, plugin: Box<dyn AnalyticsPlugin>) {
         tracing::info!(plugin = plugin.name(), "Registered analytics plugin");
         self.plugins.push(plugin);
+    }
+
+    /// Set default timeout (milliseconds) for plugin execution.
+    pub fn set_default_timeout_ms(&mut self, timeout_ms: u64) {
+        self.default_timeout_ms = timeout_ms.max(1);
+    }
+
+    /// Set per-plugin timeout overrides (milliseconds).
+    pub fn set_plugin_timeouts_ms(&mut self, plugin_timeouts_ms: HashMap<String, u64>) {
+        self.plugin_timeouts_ms = plugin_timeouts_ms
+            .into_iter()
+            .map(|(name, timeout)| (name, timeout.max(1)))
+            .collect();
     }
 
     /// Get list of registered plugin names.
@@ -310,6 +341,23 @@ impl AnalyticsEngine {
     /// Check if a plugin is registered.
     pub fn has_plugin(&self, name: &str) -> bool {
         self.plugins.iter().any(|p| p.name() == name)
+    }
+
+    fn timeout_for_plugin_ms(&self, plugin_name: &str) -> u64 {
+        self.plugin_timeouts_ms
+            .get(plugin_name)
+            .copied()
+            .unwrap_or(self.default_timeout_ms)
+    }
+
+    fn timeout_error(plugin_name: &str, duration_ms: i64, timeout_ms: u64) -> String {
+        format!("plugin {plugin_name} exceeded timeout: {duration_ms}ms > {timeout_ms}ms")
+    }
+
+    fn record_plugin_run(db: &Database, result: &PluginRunResult) {
+        if let Err(e) = db.insert_plugin_run(result) {
+            tracing::warn!(error = %e, "Failed to record plugin run");
+        }
     }
 
     /// Run a specific plugin on a session.
@@ -337,6 +385,7 @@ impl AnalyticsEngine {
         let ctx = AnalyticsContext { db };
         let started_at = Utc::now();
         let start = Instant::now();
+        let timeout_ms = self.timeout_for_plugin_ms(plugin.name());
 
         // Calculate input token count for observability
         let input_token_count: i64 = messages
@@ -348,12 +397,39 @@ impl AnalyticsEngine {
             plugin = plugin.name(),
             session_id = session.id,
             message_count = messages.len(),
+            timeout_ms,
             "Running analytics plugin"
         );
 
         match plugin.analyze_session(session, messages, &ctx) {
             Ok(metrics) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
+
+                if duration_ms as u64 > timeout_ms {
+                    let error_msg = Self::timeout_error(plugin.name(), duration_ms, timeout_ms);
+                    tracing::warn!(
+                        plugin = plugin.name(),
+                        session_id = session.id,
+                        duration_ms,
+                        timeout_ms,
+                        "Plugin exceeded timeout; dropping computed metrics"
+                    );
+
+                    let result = PluginRunResult {
+                        plugin_name: plugin.name().to_string(),
+                        session_id: Some(session.id.clone()),
+                        started_at,
+                        duration_ms,
+                        status: PluginRunStatus::Timeout,
+                        error_message: Some(error_msg),
+                        metrics_produced: 0,
+                        input_message_count: messages.len(),
+                        input_token_count,
+                    };
+
+                    Self::record_plugin_run(db, &result);
+                    return Ok(result);
+                }
 
                 // Store metrics in database
                 for metric in &metrics {
@@ -379,10 +455,7 @@ impl AnalyticsEngine {
                     input_token_count,
                 };
 
-                // Record the run for observability
-                if let Err(e) = db.insert_plugin_run(&result) {
-                    tracing::warn!(error = %e, "Failed to record plugin run");
-                }
+                Self::record_plugin_run(db, &result);
 
                 tracing::info!(
                     plugin = plugin.name(),
@@ -417,10 +490,7 @@ impl AnalyticsEngine {
                     input_token_count,
                 };
 
-                // Record the failed run
-                if let Err(e) = db.insert_plugin_run(&result) {
-                    tracing::warn!(error = %e, "Failed to record plugin run");
-                }
+                Self::record_plugin_run(db, &result);
 
                 Ok(result)
             }
@@ -599,6 +669,7 @@ impl AnalyticsEngine {
         let ctx = AnalyticsContext { db };
         let started_at = Utc::now();
         let start = Instant::now();
+        let timeout_ms = self.timeout_for_plugin_ms(plugin.name());
 
         // Calculate input token count for observability
         let input_token_count: i64 = messages
@@ -610,12 +681,39 @@ impl AnalyticsEngine {
             plugin = plugin.name(),
             thread_id = thread.id,
             message_count = messages.len(),
+            timeout_ms,
             "Running analytics plugin on thread"
         );
 
         match plugin.analyze_thread(thread, messages, &ctx) {
             Ok(metrics) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
+
+                if duration_ms as u64 > timeout_ms {
+                    let error_msg = Self::timeout_error(plugin.name(), duration_ms, timeout_ms);
+                    tracing::warn!(
+                        plugin = plugin.name(),
+                        thread_id = thread.id,
+                        duration_ms,
+                        timeout_ms,
+                        "Thread plugin exceeded timeout; dropping computed metrics"
+                    );
+
+                    let result = PluginRunResult {
+                        plugin_name: plugin.name().to_string(),
+                        session_id: Some(thread.session_id.clone()),
+                        started_at,
+                        duration_ms,
+                        status: PluginRunStatus::Timeout,
+                        error_message: Some(error_msg),
+                        metrics_produced: 0,
+                        input_message_count: messages.len(),
+                        input_token_count,
+                    };
+
+                    Self::record_plugin_run(db, &result);
+                    return Ok(result);
+                }
 
                 // Store metrics in database
                 for metric in &metrics {
@@ -641,6 +739,8 @@ impl AnalyticsEngine {
                     input_token_count,
                 };
 
+                Self::record_plugin_run(db, &result);
+
                 tracing::info!(
                     plugin = plugin.name(),
                     thread_id = thread.id,
@@ -662,7 +762,7 @@ impl AnalyticsEngine {
                     "Plugin failed on thread"
                 );
 
-                Ok(PluginRunResult {
+                let result = PluginRunResult {
                     plugin_name: plugin.name().to_string(),
                     session_id: Some(thread.session_id.clone()),
                     started_at,
@@ -672,7 +772,10 @@ impl AnalyticsEngine {
                     metrics_produced: 0,
                     input_message_count: messages.len(),
                     input_token_count,
-                })
+                };
+
+                Self::record_plugin_run(db, &result);
+                Ok(result)
             }
         }
     }
@@ -743,6 +846,8 @@ impl Default for AnalyticsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Duration;
 
     struct TestPlugin {
         name: String,
@@ -793,6 +898,58 @@ mod tests {
         }
     }
 
+    struct SlowPlugin {
+        name: String,
+        sleep_ms: u64,
+    }
+
+    impl SlowPlugin {
+        fn new(name: &str, sleep_ms: u64) -> Self {
+            Self {
+                name: name.to_string(),
+                sleep_ms,
+            }
+        }
+    }
+
+    impl AnalyticsPlugin for SlowPlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn triggers(&self) -> Vec<AnalyticsTrigger> {
+            vec![AnalyticsTrigger::OnDemand]
+        }
+
+        fn analyze_session(
+            &self,
+            session: &Session,
+            _messages: &[Message],
+            _ctx: &AnalyticsContext,
+        ) -> Result<Vec<MetricOutput>> {
+            thread::sleep(Duration::from_millis(self.sleep_ms));
+            Ok(vec![MetricOutput::session(
+                &session.id,
+                "slow_metric",
+                serde_json::json!(1),
+            )])
+        }
+    }
+
+    fn test_session() -> Session {
+        Session {
+            id: "session-timeout".to_string(),
+            assistant: crate::types::Assistant::Codex,
+            backing_model_id: None,
+            project_id: None,
+            started_at: Utc::now(),
+            last_activity_at: Some(Utc::now()),
+            status: crate::types::SessionStatus::Active,
+            source_file_path: "/tmp/session-timeout.jsonl".to_string(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
     #[test]
     fn test_engine_registration() {
         let mut engine = AnalyticsEngine::new();
@@ -821,5 +978,42 @@ mod tests {
         let global = MetricOutput::global("total", serde_json::json!(100));
         assert_eq!(global.entity_type, "global");
         assert_eq!(global.entity_id, None);
+    }
+
+    #[test]
+    fn test_run_plugin_marks_timeout_and_drops_metrics() {
+        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
+        db.migrate().expect("migrate schema");
+
+        let mut engine = AnalyticsEngine::new();
+        engine.set_default_timeout_ms(5);
+        engine.register(Box::new(SlowPlugin::new("test.slow", 25)));
+
+        let session = test_session();
+        let result = engine
+            .run_plugin("test.slow", &session, &[], &db)
+            .expect("plugin run should return a timeout result");
+
+        assert_eq!(result.status, PluginRunStatus::Timeout);
+        assert_eq!(result.metrics_produced, 0);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("exceeded timeout"));
+
+        let metrics = db
+            .get_session_plugin_metrics(&session.id)
+            .expect("read session metrics");
+        assert!(
+            metrics.is_empty(),
+            "timed out run should not persist metrics"
+        );
+
+        let runs = db
+            .get_plugin_runs("test.slow", 10)
+            .expect("read plugin runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, PluginRunStatus::Timeout);
     }
 }

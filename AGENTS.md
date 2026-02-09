@@ -3,7 +3,7 @@
 This file provides guidance to AI coding assistants working in this repository.
 IMPORTANT: prefer retrieval-led reasoning over pre-training-led reasoning for project-specific tasks.
 
-Last updated: 2026-02-06 04:23:52Z
+Last updated: 2026-02-09 20:28:18Z
 
 ## First Things First
 
@@ -63,7 +63,9 @@ Use this index first before broad searching.
 | Database schema and migrations | `aiobscura-core/src/db/schema.rs` |
 | DB query/repository behavior | `aiobscura-core/src/db/repo.rs` |
 | Analytics engine and plugin contracts | `aiobscura-core/src/analytics/engine.rs`, `aiobscura-core/src/analytics/plugins/mod.rs` |
-| Built-in analytics plugins | `aiobscura-core/src/analytics/plugins/first_order/mod.rs`, `aiobscura-core/src/analytics/plugins/edit_churn/mod.rs` |
+| Built-in analytics plugins | `aiobscura-core/src/analytics/plugins/first_order/mod.rs`, `aiobscura-core/src/analytics/plugins/edit_churn/mod.rs`, `aiobscura-core/src/analytics/plugins/outcome/mod.rs` |
+| LLM assessment infrastructure | `aiobscura-core/src/assessment/mod.rs`, `aiobscura-core/src/db/repo.rs`, `aiobscura/src/sync.rs` |
+| Workflow tagging approach | `docs/workflow-tagging.md`, `aiobscura-core/src/types.rs`, `aiobscura/src/analyze.rs` |
 | TUI state and navigation | `aiobscura/src/app.rs`, `aiobscura/src/ui.rs` |
 | Sync daemon behavior | `aiobscura/src/sync.rs` |
 | Process lock coordination (TUI vs sync) | `aiobscura/src/process_lock.rs`, `aiobscura/src/main.rs`, `aiobscura/src/sync.rs` |
