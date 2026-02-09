@@ -77,6 +77,8 @@ pub struct FileSyncResult {
     pub path: PathBuf,
     /// Number of new messages parsed
     pub new_messages: usize,
+    /// Number of new tool-call messages parsed
+    pub new_tool_calls: usize,
     /// Session ID (if session was created/updated)
     pub session_id: Option<String>,
     /// Updated checkpoint for next sync
@@ -355,6 +357,7 @@ impl IngestCoordinator {
             return Ok(FileSyncResult {
                 path: path.to_path_buf(),
                 new_messages: 0,
+                new_tool_calls: 0,
                 session_id: None,
                 new_checkpoint: parse_result.new_checkpoint,
                 is_new_session: false,
@@ -473,6 +476,11 @@ impl IngestCoordinator {
 
         // Store messages
         let new_messages = parse_result.messages.len();
+        let new_tool_calls = parse_result
+            .messages
+            .iter()
+            .filter(|msg| msg.message_type == MessageType::ToolCall)
+            .count();
 
         // Build message summaries for verbose output
         let message_summaries: Vec<MessageSummary> = parse_result
@@ -544,6 +552,7 @@ impl IngestCoordinator {
         Ok(FileSyncResult {
             path: path.to_path_buf(),
             new_messages,
+            new_tool_calls,
             session_id,
             new_checkpoint: parse_result.new_checkpoint,
             is_new_session,

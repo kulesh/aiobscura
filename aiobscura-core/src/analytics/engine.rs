@@ -47,7 +47,9 @@ use crate::db::Database;
 use crate::error::{Error, Result};
 use crate::types::{Message, Session, Thread};
 use chrono::{DateTime, Utc};
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 /// Current metric schema version.
@@ -354,6 +356,16 @@ impl AnalyticsEngine {
         format!("plugin {plugin_name} exceeded timeout: {duration_ms}ms > {timeout_ms}ms")
     }
 
+    fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+        if let Some(message) = payload.as_ref().downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.as_ref().downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        }
+    }
+
     fn record_plugin_run(db: &Database, result: &PluginRunResult) {
         if let Err(e) = db.insert_plugin_run(result) {
             tracing::warn!(error = %e, "Failed to record plugin run");
@@ -401,8 +413,10 @@ impl AnalyticsEngine {
             "Running analytics plugin"
         );
 
-        match plugin.analyze_session(session, messages, &ctx) {
-            Ok(metrics) => {
+        match catch_unwind(AssertUnwindSafe(|| {
+            plugin.analyze_session(session, messages, &ctx)
+        })) {
+            Ok(Ok(metrics)) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
 
                 if duration_ms as u64 > timeout_ms {
@@ -467,7 +481,7 @@ impl AnalyticsEngine {
 
                 Ok(result)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 let error_msg = e.to_string();
 
@@ -492,6 +506,33 @@ impl AnalyticsEngine {
 
                 Self::record_plugin_run(db, &result);
 
+                Ok(result)
+            }
+            Err(payload) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                let panic_message = Self::panic_payload_to_string(payload);
+                let error_msg = format!("plugin {} panicked: {}", plugin.name(), panic_message);
+
+                tracing::error!(
+                    plugin = plugin.name(),
+                    session_id = session.id,
+                    panic = panic_message,
+                    "Plugin panicked"
+                );
+
+                let result = PluginRunResult {
+                    plugin_name: plugin.name().to_string(),
+                    session_id: Some(session.id.clone()),
+                    started_at,
+                    duration_ms,
+                    status: PluginRunStatus::Error,
+                    error_message: Some(error_msg),
+                    metrics_produced: 0,
+                    input_message_count: messages.len(),
+                    input_token_count,
+                };
+
+                Self::record_plugin_run(db, &result);
                 Ok(result)
             }
         }
@@ -685,8 +726,10 @@ impl AnalyticsEngine {
             "Running analytics plugin on thread"
         );
 
-        match plugin.analyze_thread(thread, messages, &ctx) {
-            Ok(metrics) => {
+        match catch_unwind(AssertUnwindSafe(|| {
+            plugin.analyze_thread(thread, messages, &ctx)
+        })) {
+            Ok(Ok(metrics)) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
 
                 if duration_ms as u64 > timeout_ms {
@@ -751,7 +794,7 @@ impl AnalyticsEngine {
 
                 Ok(result)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 let error_msg = e.to_string();
 
@@ -760,6 +803,33 @@ impl AnalyticsEngine {
                     thread_id = thread.id,
                     error = %e,
                     "Plugin failed on thread"
+                );
+
+                let result = PluginRunResult {
+                    plugin_name: plugin.name().to_string(),
+                    session_id: Some(thread.session_id.clone()),
+                    started_at,
+                    duration_ms,
+                    status: PluginRunStatus::Error,
+                    error_message: Some(error_msg),
+                    metrics_produced: 0,
+                    input_message_count: messages.len(),
+                    input_token_count,
+                };
+
+                Self::record_plugin_run(db, &result);
+                Ok(result)
+            }
+            Err(payload) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                let panic_message = Self::panic_payload_to_string(payload);
+                let error_msg = format!("plugin {} panicked: {}", plugin.name(), panic_message);
+
+                tracing::error!(
+                    plugin = plugin.name(),
+                    thread_id = thread.id,
+                    panic = panic_message,
+                    "Thread plugin panicked"
                 );
 
                 let result = PluginRunResult {
@@ -936,6 +1006,50 @@ mod tests {
         }
     }
 
+    struct PanicPlugin {
+        name: String,
+    }
+
+    impl PanicPlugin {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+            }
+        }
+    }
+
+    impl AnalyticsPlugin for PanicPlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn triggers(&self) -> Vec<AnalyticsTrigger> {
+            vec![AnalyticsTrigger::OnDemand]
+        }
+
+        fn analyze_session(
+            &self,
+            _session: &Session,
+            _messages: &[Message],
+            _ctx: &AnalyticsContext,
+        ) -> Result<Vec<MetricOutput>> {
+            panic!("session panic")
+        }
+
+        fn supports_thread_analysis(&self) -> bool {
+            true
+        }
+
+        fn analyze_thread(
+            &self,
+            _thread: &Thread,
+            _messages: &[Message],
+            _ctx: &AnalyticsContext,
+        ) -> Result<Vec<MetricOutput>> {
+            panic!("thread panic")
+        }
+    }
+
     fn test_session() -> Session {
         Session {
             id: "session-timeout".to_string(),
@@ -1015,5 +1129,81 @@ mod tests {
             .expect("read plugin runs");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, PluginRunStatus::Timeout);
+    }
+
+    fn test_thread(session_id: &str) -> Thread {
+        Thread {
+            id: "thread-timeout".to_string(),
+            session_id: session_id.to_string(),
+            thread_type: crate::types::ThreadType::Main,
+            parent_thread_id: None,
+            spawned_by_message_id: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            last_activity_at: Some(Utc::now()),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn test_run_plugin_marks_panic_as_error_and_records_run() {
+        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
+        db.migrate().expect("migrate schema");
+
+        let mut engine = AnalyticsEngine::new();
+        engine.register(Box::new(PanicPlugin::new("test.panic")));
+
+        let session = test_session();
+        let result = engine
+            .run_plugin("test.panic", &session, &[], &db)
+            .expect("plugin run should return panic result");
+
+        assert_eq!(result.status, PluginRunStatus::Error);
+        assert_eq!(result.metrics_produced, 0);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("panicked"));
+
+        let metrics = db
+            .get_session_plugin_metrics(&session.id)
+            .expect("read session metrics");
+        assert!(metrics.is_empty(), "panic run should not persist metrics");
+
+        let runs = db
+            .get_plugin_runs("test.panic", 10)
+            .expect("read plugin runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, PluginRunStatus::Error);
+    }
+
+    #[test]
+    fn test_run_thread_plugin_marks_panic_as_error_and_records_run() {
+        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
+        db.migrate().expect("migrate schema");
+
+        let mut engine = AnalyticsEngine::new();
+        engine.register(Box::new(PanicPlugin::new("test.thread_panic")));
+
+        let session = test_session();
+        let thread = test_thread(&session.id);
+        let result = engine
+            .run_thread_plugin("test.thread_panic", &thread, &[], &db)
+            .expect("thread plugin run should return panic result");
+
+        assert_eq!(result.status, PluginRunStatus::Error);
+        assert_eq!(result.metrics_produced, 0);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("panicked"));
+
+        let runs = db
+            .get_plugin_runs("test.thread_panic", 10)
+            .expect("read plugin runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, PluginRunStatus::Error);
     }
 }

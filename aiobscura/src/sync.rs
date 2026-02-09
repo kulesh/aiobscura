@@ -347,10 +347,10 @@ fn run_analytics_triggers(
     sync_result: &SyncResult,
     include_inactivity: bool,
 ) -> Result<()> {
-    let event_threshold = usize::try_from(config.analytics.tool_call_threshold)
+    let tool_call_threshold = usize::try_from(config.analytics.tool_call_threshold)
         .unwrap_or(usize::MAX)
         .max(1);
-    let mut triggered_sessions = collect_event_count_sessions(sync_result, event_threshold);
+    let mut triggered_sessions = collect_tool_call_sessions(sync_result, tool_call_threshold);
 
     if include_inactivity {
         let cutoff = chrono::Utc::now()
@@ -402,31 +402,43 @@ fn run_analytics_triggers(
     }
 
     if let Some(llm) = &config.llm {
-        for session_id in &session_ids {
-            let session = match coordinator.db().get_session(session_id)? {
-                Some(session) => session,
-                None => continue,
-            };
-            let messages = coordinator.db().get_session_messages(session_id, 100_000)?;
+        match aiobscura_core::assessment::create_assessment_client(llm) {
+            Ok(client) => {
+                for session_id in &session_ids {
+                    let session = match coordinator.db().get_session(session_id)? {
+                        Some(session) => session,
+                        None => continue,
+                    };
+                    let messages = coordinator.db().get_session_messages(session_id, 100_000)?;
 
-            match aiobscura_core::assessment::assess_and_store_session(
-                coordinator.db(),
-                &session,
-                &messages,
-                llm,
-            ) {
-                Ok(Some(_)) => {
-                    llm_inserted += 1;
+                    match aiobscura_core::assessment::assess_and_store_session_with_client(
+                        coordinator.db(),
+                        &session,
+                        &messages,
+                        llm,
+                        client.as_ref(),
+                    ) {
+                        Ok(Some(_)) => {
+                            llm_inserted += 1;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            llm_failures += 1;
+                            tracing::warn!(
+                                session_id = session_id,
+                                error = %e,
+                                "Failed LLM assessment trigger"
+                            );
+                        }
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    llm_failures += 1;
-                    tracing::warn!(
-                        session_id = session_id,
-                        error = %e,
-                        "Failed LLM assessment trigger"
-                    );
-                }
+            }
+            Err(e) => {
+                llm_failures += 1;
+                tracing::warn!(
+                    error = %e,
+                    "Failed to initialize LLM assessment client; skipping triggered assessments"
+                );
             }
         }
     }
@@ -437,22 +449,22 @@ fn run_analytics_triggers(
         llm_failures,
         llm_assessments_inserted = llm_inserted,
         include_inactivity,
-        event_threshold,
+        tool_call_threshold,
         "Processed analytics triggers"
     );
 
     Ok(())
 }
 
-/// Find session IDs that crossed the per-sync event-count threshold.
-fn collect_event_count_sessions(sync_result: &SyncResult, threshold: usize) -> HashSet<String> {
+/// Find session IDs that crossed the per-sync tool-call threshold.
+fn collect_tool_call_sessions(sync_result: &SyncResult, threshold: usize) -> HashSet<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for file_result in &sync_result.file_results {
-        if file_result.new_messages == 0 {
+        if file_result.new_tool_calls == 0 {
             continue;
         }
         if let Some(session_id) = &file_result.session_id {
-            *counts.entry(session_id.clone()).or_insert(0) += file_result.new_messages;
+            *counts.entry(session_id.clone()).or_insert(0) += file_result.new_tool_calls;
         }
     }
 
@@ -572,10 +584,15 @@ mod tests {
     use aiobscura_core::ingest::{FileSyncResult, MessageSummary, SkipReason};
     use std::path::PathBuf;
 
-    fn file_result(session_id: Option<&str>, new_messages: usize) -> FileSyncResult {
+    fn file_result(
+        session_id: Option<&str>,
+        new_messages: usize,
+        new_tool_calls: usize,
+    ) -> FileSyncResult {
         FileSyncResult {
             path: PathBuf::from("/tmp/test.jsonl"),
             new_messages,
+            new_tool_calls,
             session_id: session_id.map(ToString::to_string),
             new_checkpoint: aiobscura_core::Checkpoint::ByteOffset { offset: 0 },
             is_new_session: false,
@@ -589,18 +606,18 @@ mod tests {
     }
 
     #[test]
-    fn collect_event_count_sessions_aggregates_by_session() {
+    fn collect_tool_call_sessions_aggregates_by_session() {
         let sync_result = SyncResult {
             file_results: vec![
-                file_result(Some("sess-a"), 3),
-                file_result(Some("sess-a"), 2),
-                file_result(Some("sess-b"), 1),
-                file_result(Some("sess-c"), 5),
+                file_result(Some("sess-a"), 6, 3),
+                file_result(Some("sess-a"), 4, 2),
+                file_result(Some("sess-b"), 7, 1),
+                file_result(Some("sess-c"), 8, 5),
             ],
             ..Default::default()
         };
 
-        let sessions = collect_event_count_sessions(&sync_result, 5);
+        let sessions = collect_tool_call_sessions(&sync_result, 5);
 
         assert!(sessions.contains("sess-a"));
         assert!(sessions.contains("sess-c"));
@@ -609,17 +626,29 @@ mod tests {
     }
 
     #[test]
-    fn collect_event_count_sessions_ignores_unlinked_or_empty_results() {
+    fn collect_tool_call_sessions_ignores_unlinked_or_empty_results() {
         let sync_result = SyncResult {
             file_results: vec![
-                file_result(None, 10),
-                file_result(Some("sess-a"), 0),
-                file_result(Some("sess-b"), 2),
+                file_result(None, 10, 10),
+                file_result(Some("sess-a"), 0, 0),
+                file_result(Some("sess-b"), 2, 2),
             ],
             ..Default::default()
         };
 
-        let sessions = collect_event_count_sessions(&sync_result, 3);
+        let sessions = collect_tool_call_sessions(&sync_result, 3);
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_call_sessions_ignores_non_tool_messages() {
+        let sync_result = SyncResult {
+            file_results: vec![file_result(Some("sess-a"), 20, 0)],
+            ..Default::default()
+        };
+
+        let sessions = collect_tool_call_sessions(&sync_result, 1);
 
         assert!(sessions.is_empty());
     }

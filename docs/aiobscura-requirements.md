@@ -494,6 +494,7 @@ Since session boundaries are fuzzy, assessments trigger on:
 provider = "ollama"                      # or "claude", "openai"
 model = "llama3.2"
 endpoint = "http://localhost:11434"
+timeout_secs = 30
 
 [analytics]
 # Built-in plugins (enabled by default)

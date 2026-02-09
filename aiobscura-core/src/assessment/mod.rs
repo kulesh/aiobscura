@@ -7,6 +7,7 @@ use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 const DEFAULT_ASSESSOR: &str = "llm.assessment";
 const MAX_TRANSCRIPT_CHARS: usize = 16_000;
@@ -29,6 +30,11 @@ pub trait LlmAssessmentClient: Send + Sync {
     fn complete(&self, prompt: &str) -> Result<String>;
 }
 
+/// Create the default HTTP-backed assessment client.
+pub fn create_assessment_client(llm: &LlmConfig) -> Result<Box<dyn LlmAssessmentClient>> {
+    Ok(Box::new(HttpLlmAssessmentClient::new(llm)?))
+}
+
 /// Assess a session and persist it to `assessments` if prompt hash changed.
 ///
 /// Returns:
@@ -44,8 +50,25 @@ pub fn assess_and_store_session(
         return Ok(None);
     }
 
-    let client = HttpLlmAssessmentClient::new(llm)?;
-    let draft = assess_with_client(session, messages, llm, &client)?;
+    let client = create_assessment_client(llm)?;
+    assess_and_store_session_with_client(db, session, messages, llm, client.as_ref())
+}
+
+/// Assess a session and persist it using a supplied client.
+///
+/// This allows callers to reuse a single initialized client across many sessions.
+pub fn assess_and_store_session_with_client(
+    db: &Database,
+    session: &Session,
+    messages: &[Message],
+    llm: &LlmConfig,
+    client: &dyn LlmAssessmentClient,
+) -> Result<Option<i64>> {
+    if messages.is_empty() {
+        return Ok(None);
+    }
+
+    let draft = assess_with_client(session, messages, llm, client)?;
 
     if let Some(prompt_hash) = draft.prompt_hash.as_deref() {
         let latest_hash = db
@@ -168,6 +191,8 @@ struct HttpLlmAssessmentClient {
     provider: LlmProvider,
     endpoint: String,
     api_key: Option<String>,
+    runtime: tokio::runtime::Runtime,
+    http: reqwest::Client,
 }
 
 impl HttpLlmAssessmentClient {
@@ -195,31 +220,35 @@ impl HttpLlmAssessmentClient {
             ));
         }
 
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Llm(format!("failed to build tokio runtime: {e}")))?;
+        let timeout_secs = config.timeout_secs.max(1);
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| Error::Llm(format!("failed to build HTTP client: {e}")))?;
+
         Ok(Self {
             model: config.model.clone(),
             provider: config.provider,
             endpoint,
             api_key,
+            runtime,
+            http,
         })
-    }
-
-    fn runtime() -> Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Llm(format!("failed to build tokio runtime: {e}")))
     }
 }
 
 impl LlmAssessmentClient for HttpLlmAssessmentClient {
     fn complete(&self, prompt: &str) -> Result<String> {
-        let rt = Self::runtime()?;
-        rt.block_on(async move {
-            let http = reqwest::Client::new();
+        self.runtime.block_on(async {
             match self.provider {
                 LlmProvider::Ollama => {
                     let url = format!("{}/api/generate", self.endpoint.trim_end_matches('/'));
-                    let resp = http
+                    let resp = self
+                        .http
                         .post(url)
                         .json(&json!({
                             "model": self.model,
@@ -264,7 +293,8 @@ impl LlmAssessmentClient for HttpLlmAssessmentClient {
                     );
                     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
-                    let resp = http
+                    let resp = self
+                        .http
                         .post(url)
                         .headers(headers)
                         .json(&json!({
@@ -316,7 +346,8 @@ impl LlmAssessmentClient for HttpLlmAssessmentClient {
                         .map_err(|e| Error::Llm(format!("invalid auth header: {e}")))?,
                     );
 
-                    let resp = http
+                    let resp = self
+                        .http
                         .post(url)
                         .headers(headers)
                         .json(&json!({
@@ -427,6 +458,7 @@ mod tests {
             model: "test-model".to_string(),
             endpoint: Some("http://localhost:11434".to_string()),
             api_key: None,
+            timeout_secs: 30,
         }
     }
 

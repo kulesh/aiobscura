@@ -75,6 +75,9 @@ pub struct LlmConfig {
     pub endpoint: Option<String>,
     /// API key (can also use env var)
     pub api_key: Option<String>,
+    /// HTTP request timeout in seconds
+    #[serde(default = "default_llm_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 /// Supported LLM providers
@@ -143,6 +146,10 @@ fn default_tool_call_threshold() -> u32 {
 
 fn default_plugin_timeout() -> u64 {
     30000
+}
+
+fn default_llm_timeout_secs() -> u64 {
+    30
 }
 
 /// Override paths for agent directories
@@ -404,6 +411,7 @@ level = "debug"
         let llm = config.llm.unwrap();
         assert_eq!(llm.provider, LlmProvider::Ollama);
         assert_eq!(llm.model, "llama3.2");
+        assert_eq!(llm.timeout_secs, 30);
         assert_eq!(config.analytics.inactivity_minutes, 30);
         assert_eq!(config.logging.level, "debug");
     }
