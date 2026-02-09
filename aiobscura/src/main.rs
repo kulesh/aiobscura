@@ -3,6 +3,7 @@
 //! Terminal UI for observing, querying, and analyzing AI coding agent activity.
 
 mod app;
+mod message_format;
 mod process_lock;
 mod thread_row;
 mod ui;

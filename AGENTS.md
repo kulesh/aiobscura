@@ -70,7 +70,7 @@ Use this index first before broad searching.
 | Collector integration | `docs/design-collector-client.md`, `aiobscura-core/src/collector/*`, `aiobscura/src/collector.rs` |
 | Main binary entrypoints | `aiobscura/src/main.rs`, `aiobscura/src/sync.rs`, `aiobscura/src/analyze.rs`, `aiobscura/src/collector.rs` |
 | Parser/ingest tests and fixtures | `aiobscura-core/tests/integration.rs`, `aiobscura-core/tests/fixtures/*` |
-| Top-level integration test status | `tests/integration.rs` (currently placeholder) |
+| CLI/integration coverage status | `aiobscura/tests/cli_acceptance.rs` (`tests/` is currently empty) |
 
 ## Build and Test Commands
 

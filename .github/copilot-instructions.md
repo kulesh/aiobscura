@@ -21,7 +21,8 @@ aiobscura/
 ├── aiobscura/             # TUI + CLI binaries (aiobscura, sync, analyze, collector, debuggers)
 ├── aiobscura-wrapped/     # Wrapped summary CLI
 ├── docs/                  # Product, architecture, format specs, design docs
-├── tests/                 # Top-level integration tests
+├── aiobscura/tests/       # CLI acceptance/integration tests
+├── tests/                 # Currently empty (reserved for top-level integration tests)
 └── .beads/issues.jsonl    # Git-synced issue storage
 ```
 

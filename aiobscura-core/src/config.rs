@@ -11,11 +11,12 @@ use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Returns $HOME or panics
+/// Returns a best-effort home directory path.
 fn home_dir() -> PathBuf {
-    std::env::var("HOME")
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .expect("HOME environment variable not set")
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Returns XDG_CONFIG_HOME or ~/.config

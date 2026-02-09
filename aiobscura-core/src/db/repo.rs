@@ -2147,11 +2147,11 @@ impl Database {
             .map(|last| last.signed_duration_since(started_at).num_seconds().max(0))
             .unwrap_or(0);
 
-        let message_count = self.count_thread_messages(thread_id).unwrap_or(0);
-        let agent_count = self.count_session_agents(&row.session_id).unwrap_or(0);
-        let tool_stats = self.get_thread_tool_stats(thread_id).unwrap_or_default();
-        let plan_count = self.count_session_plans(&row.session_id).unwrap_or(0);
-        let file_stats = self.get_thread_file_stats(thread_id).unwrap_or_default();
+        let message_count = self.count_thread_messages(thread_id)?;
+        let agent_count = self.count_session_agents(&row.session_id)?;
+        let tool_stats = self.get_thread_tool_stats(thread_id)?;
+        let plan_count = self.count_session_plans(&row.session_id)?;
+        let file_stats = self.get_thread_file_stats(thread_id)?;
 
         Ok(Some(ThreadMetadata {
             source_path: Some(row.source_path),
@@ -2216,9 +2216,8 @@ impl Database {
         let end_str = end.to_rfc3339();
 
         // Sessions and duration
-        let (sessions, total_duration_secs): (i64, i64) = conn
-            .query_row(
-                r#"
+        let (sessions, total_duration_secs): (i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     COUNT(*),
                     COALESCE(SUM(
@@ -2229,15 +2228,13 @@ impl Database {
                 FROM sessions
                 WHERE started_at >= ? AND started_at < ?
                 "#,
-                [&start_str, &end_str],
-                |r| Ok((r.get(0)?, r.get::<_, f64>(1)? as i64)),
-            )
-            .unwrap_or((0, 0));
+            [&start_str, &end_str],
+            |r| Ok((r.get(0)?, r.get::<_, f64>(1)? as i64)),
+        )?;
 
         // Tokens and tool calls from messages
-        let (tokens_in, tokens_out, tool_calls): (i64, i64, i64) = conn
-            .query_row(
-                r#"
+        let (tokens_in, tokens_out, tool_calls): (i64, i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     COALESCE(SUM(tokens_in), 0),
                     COALESCE(SUM(tokens_out), 0),
@@ -2247,44 +2244,38 @@ impl Database {
                 JOIN sessions s ON t.session_id = s.id
                 WHERE s.started_at >= ? AND s.started_at < ?
                 "#,
-                [&start_str, &end_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap_or((0, 0, 0));
+            [&start_str, &end_str],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
 
         // Plans
-        let plans: i64 = conn
-            .query_row(
-                r#"
-                SELECT COUNT(DISTINCT sp.plan_id)
+        let plans: i64 = conn.query_row(
+            r#"
+                SELECT COUNT(DISTINCT sp.plan_slug)
                 FROM session_plans sp
                 JOIN sessions s ON sp.session_id = s.id
                 WHERE s.started_at >= ? AND s.started_at < ?
                 "#,
-                [&start_str, &end_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [&start_str, &end_str],
+            |r| r.get(0),
+        )?;
 
         // Agents spawned
-        let agents_spawned: i64 = conn
-            .query_row(
-                r#"
+        let agents_spawned: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(*)
                 FROM threads t
                 JOIN sessions s ON t.session_id = s.id
                 WHERE t.thread_type = 'agent'
                   AND s.started_at >= ? AND s.started_at < ?
                 "#,
-                [&start_str, &end_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [&start_str, &end_str],
+            |r| r.get(0),
+        )?;
 
         // Files modified (from Edit/Write tool_input)
-        let files_modified: i64 = conn
-            .query_row(
-                r#"
+        let files_modified: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(DISTINCT json_extract(tool_input, '$.file_path'))
                 FROM messages m
                 JOIN threads t ON m.thread_id = t.id
@@ -2294,24 +2285,21 @@ impl Database {
                   AND m.tool_name IN ('Edit', 'Write', 'MultiEdit')
                   AND json_extract(tool_input, '$.file_path') IS NOT NULL
                 "#,
-                [&start_str, &end_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [&start_str, &end_str],
+            |r| r.get(0),
+        )?;
 
         // Unique projects
-        let unique_projects: i64 = conn
-            .query_row(
-                r#"
+        let unique_projects: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(DISTINCT project_id)
                 FROM sessions
                 WHERE started_at >= ? AND started_at < ?
                   AND project_id IS NOT NULL
                 "#,
-                [&start_str, &end_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [&start_str, &end_str],
+            |r| r.get(0),
+        )?;
 
         Ok(crate::analytics::TotalStats {
             sessions,
@@ -2742,9 +2730,8 @@ impl Database {
             f64,
             Option<String>,
             Option<String>,
-        ) = conn
-            .query_row(
-                r#"
+        ) = conn.query_row(
+            r#"
                 SELECT
                     COUNT(*),
                     COALESCE(SUM(
@@ -2757,10 +2744,9 @@ impl Database {
                 FROM sessions
                 WHERE project_id = ?
                 "#,
-                [project_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap_or((0, 0.0, None, None));
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
 
         let first_session = first_session_str
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
@@ -2770,9 +2756,8 @@ impl Database {
             .map(|dt| dt.with_timezone(&Utc));
 
         // Thread and message counts
-        let (thread_count, message_count): (i64, i64) = conn
-            .query_row(
-                r#"
+        let (thread_count, message_count): (i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     COUNT(DISTINCT t.id),
                     COUNT(m.id)
@@ -2781,15 +2766,13 @@ impl Database {
                 LEFT JOIN messages m ON m.thread_id = t.id
                 WHERE s.project_id = ?
                 "#,
-                [project_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, 0));
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
 
         // Token usage
-        let (tokens_in, tokens_out): (i64, i64) = conn
-            .query_row(
-                r#"
+        let (tokens_in, tokens_out): (i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     COALESCE(SUM(m.tokens_in), 0),
                     COALESCE(SUM(m.tokens_out), 0)
@@ -2798,25 +2781,22 @@ impl Database {
                 JOIN sessions s ON t.session_id = s.id
                 WHERE s.project_id = ?
                 "#,
-                [project_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, 0));
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
 
         // Tool stats
-        let total_calls: i64 = conn
-            .query_row(
-                r#"
+        let total_calls: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(*)
                 FROM messages m
                 JOIN threads t ON m.thread_id = t.id
                 JOIN sessions s ON t.session_id = s.id
                 WHERE s.project_id = ? AND m.message_type = 'tool_call'
                 "#,
-                [project_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [project_id],
+            |r| r.get(0),
+        )?;
 
         let mut tool_stmt = conn.prepare(
             r#"
@@ -2874,32 +2854,28 @@ impl Database {
         };
 
         // Agents spawned
-        let agents_spawned: i64 = conn
-            .query_row(
-                r#"
+        let agents_spawned: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(*)
                 FROM threads t
                 JOIN sessions s ON t.session_id = s.id
                 WHERE s.project_id = ? AND t.thread_type = 'agent'
                 "#,
-                [project_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [project_id],
+            |r| r.get(0),
+        )?;
 
         // Plans created
-        let plans_created: i64 = conn
-            .query_row(
-                r#"
+        let plans_created: i64 = conn.query_row(
+            r#"
                 SELECT COUNT(DISTINCT sp.plan_slug)
                 FROM session_plans sp
                 JOIN sessions s ON sp.session_id = s.id
                 WHERE s.project_id = ?
                 "#,
-                [project_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [project_id],
+            |r| r.get(0),
+        )?;
 
         // Hourly distribution
         let mut hourly = [0i64; 24];
@@ -2999,9 +2975,9 @@ impl Database {
             .query_row(
                 r#"
                 SELECT
-                    SUM(CASE WHEN tool_name = 'Read' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN tool_name IN ('Edit', 'MultiEdit', 'Write') THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN tool_name = 'Bash' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN tool_name = 'Read' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN tool_name IN ('Edit', 'MultiEdit', 'Write') THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN tool_name = 'Bash' THEN 1 ELSE 0 END), 0),
                     COUNT(*)
                 FROM messages m
                 JOIN threads t ON m.thread_id = t.id
@@ -3011,13 +2987,11 @@ impl Database {
                 "#,
                 [&start_str, &end_str],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap_or((0, 0, 0, 0));
+            )?;
 
         // Sessions and agents
-        let (sessions, agents): (i64, i64) = conn
-            .query_row(
-                r#"
+        let (sessions, agents): (i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     (SELECT COUNT(*) FROM sessions WHERE started_at >= ? AND started_at < ?),
                     (SELECT COUNT(*) FROM threads t
@@ -3025,38 +2999,34 @@ impl Database {
                      WHERE t.thread_type = 'agent'
                        AND s.started_at >= ? AND s.started_at < ?)
                 "#,
-                [&start_str, &end_str, &start_str, &end_str],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, 0));
+            [&start_str, &end_str, &start_str, &end_str],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
 
         // Average session duration
         let avg_duration: f64 = conn
             .query_row(
                 r#"
-                SELECT AVG((julianday(last_activity_at) - julianday(started_at)) * 86400)
+                SELECT COALESCE(AVG((julianday(last_activity_at) - julianday(started_at)) * 86400), 0)
                 FROM sessions
                 WHERE started_at >= ? AND started_at < ?
                   AND last_activity_at IS NOT NULL
                 "#,
                 [&start_str, &end_str],
                 |r| r.get(0),
-            )
-            .unwrap_or(0.0);
+            )?;
 
         // Plans
-        let plans: i64 = conn
-            .query_row(
-                r#"
-                SELECT COUNT(DISTINCT sp.plan_id)
+        let plans: i64 = conn.query_row(
+            r#"
+                SELECT COUNT(DISTINCT sp.plan_slug)
                 FROM session_plans sp
                 JOIN sessions s ON sp.session_id = s.id
                 WHERE s.started_at >= ? AND s.started_at < ?
                 "#,
-                [&start_str, &end_str],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+            [&start_str, &end_str],
+            |r| r.get(0),
+        )?;
 
         // Time distribution for night owl / early bird
         // Inline the query to avoid deadlock (can't call get_wrapped_hourly_distribution while holding lock)
@@ -3087,9 +3057,8 @@ impl Database {
         let early_morning: i64 = hourly[5..9].iter().sum();
 
         // Projects
-        let (unique_projects, top_project_sessions): (i64, i64) = conn
-            .query_row(
-                r#"
+        let (unique_projects, top_project_sessions): (i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     COUNT(DISTINCT project_id),
                     (SELECT COUNT(*) FROM sessions s2
@@ -3102,10 +3071,9 @@ impl Database {
                 WHERE started_at >= ? AND started_at < ?
                   AND project_id IS NOT NULL
                 "#,
-                params![&start_str, &end_str, &start_str, &end_str, &start_str, &end_str],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, 0));
+            params![&start_str, &end_str, &start_str, &end_str, &start_str, &end_str],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
 
         let sessions_f = sessions.max(1) as f64;
         let total_tools_f = total_tools.max(1) as f64;
@@ -3136,36 +3104,30 @@ impl Database {
         let conn = self.conn.lock().unwrap();
 
         // 1. Get aggregate totals
-        let (project_count, session_count, total_tokens): (i64, i64, i64) = conn
-            .query_row(
-                r#"
+        let (project_count, session_count, total_tokens): (i64, i64, i64) = conn.query_row(
+            r#"
                 SELECT
                     (SELECT COUNT(*) FROM projects),
                     (SELECT COUNT(*) FROM sessions),
                     COALESCE((SELECT SUM(tokens_in + tokens_out) FROM messages), 0)
                 "#,
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap_or((0, 0, 0));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
 
         // 2. Get total duration (sum of session durations)
-        // Note: SQLite returns REAL for julianday calculations, so we get as f64 and cast
-        let total_duration_secs: i64 = conn
-            .query_row(
-                r#"
-                SELECT COALESCE(SUM(
+        let total_duration_secs: i64 = conn.query_row(
+            r#"
+                SELECT CAST(COALESCE(SUM(
                     CASE WHEN last_activity_at IS NOT NULL AND started_at IS NOT NULL
                     THEN MAX(0, (julianday(last_activity_at) - julianday(started_at)) * 86400)
                     ELSE 0 END
-                ), 0) as duration
+                ), 0) AS INTEGER) as duration
                 FROM sessions
                 "#,
-                [],
-                |row| row.get::<_, f64>(0),
-            )
-            .map(|f| f as i64)
-            .unwrap_or(0);
+            [],
+            |row| row.get(0),
+        )?;
 
         // 3. Get daily activity for last 28 days
         // Use localtime to match user's timezone for "today"
@@ -3183,8 +3145,8 @@ impl Database {
             )?;
             let rows =
                 stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-            for row in rows.flatten() {
-                let (days_ago, count) = row;
+            for row in rows {
+                let (days_ago, count) = row?;
                 if (0..28).contains(&days_ago) {
                     // Index 27 = today (0 days ago), index 0 = 27 days ago
                     let idx = 27 - days_ago as usize;
@@ -3198,36 +3160,40 @@ impl Database {
             crate::analytics::DashboardStats::calculate_streaks(&daily_activity);
 
         // 5. Get peak hour (most active hour of day)
-        let peak_hour: u8 = conn
-            .query_row(
-                r#"
-                SELECT CAST(strftime('%H', emitted_at) AS INTEGER) as hour
-                FROM messages
-                GROUP BY hour
-                ORDER BY COUNT(*) DESC
-                LIMIT 1
+        let peak_hour: u8 = conn.query_row(
+            r#"
+                SELECT COALESCE(
+                    (
+                        SELECT CAST(strftime('%H', emitted_at) AS INTEGER) as hour
+                        FROM messages
+                        GROUP BY hour
+                        ORDER BY COUNT(*) DESC
+                        LIMIT 1
+                    ),
+                    12
+                )
                 "#,
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|h| h as u8)
-            .unwrap_or(12);
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as u8;
 
         // 6. Get busiest day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
-        let busiest_day: u8 = conn
-            .query_row(
-                r#"
-                SELECT CAST(strftime('%w', emitted_at) AS INTEGER) as dow
-                FROM messages
-                GROUP BY dow
-                ORDER BY COUNT(*) DESC
-                LIMIT 1
+        let busiest_day: u8 = conn.query_row(
+            r#"
+                SELECT COALESCE(
+                    (
+                        SELECT CAST(strftime('%w', emitted_at) AS INTEGER) as dow
+                        FROM messages
+                        GROUP BY dow
+                        ORDER BY COUNT(*) DESC
+                        LIMIT 1
+                    ),
+                    1
+                )
                 "#,
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|d| d as u8)
-            .unwrap_or(1);
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as u8;
 
         Ok(crate::analytics::DashboardStats {
             project_count,
@@ -3808,6 +3774,20 @@ mod tests {
         }
     }
 
+    fn create_test_session_at(started_at: DateTime<Utc>) -> Session {
+        Session {
+            id: "test-session-at".to_string(),
+            assistant: Assistant::ClaudeCode,
+            backing_model_id: None,
+            project_id: None,
+            started_at,
+            last_activity_at: Some(started_at + chrono::Duration::minutes(30)),
+            status: SessionStatus::Inactive,
+            source_file_path: "/path/to/source.jsonl".to_string(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
     fn create_test_message(session_id: &str, thread_id: &str, seq: i32) -> Message {
         Message {
             id: 0,
@@ -3927,5 +3907,61 @@ mod tests {
             Checkpoint::ByteOffset { offset } => assert_eq!(offset, 2048),
             _ => panic!("Expected ByteOffset checkpoint"),
         }
+    }
+
+    #[test]
+    fn test_wrapped_totals_counts_plans_via_plan_slug() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        let source_file = create_test_source_file();
+        db.upsert_source_file(&source_file).unwrap();
+
+        let started_at = Utc::now() - chrono::Duration::hours(1);
+        let session = create_test_session_at(started_at);
+        db.upsert_session(&session).unwrap();
+
+        db.link_session_plan(&session.id, "plan-alpha", started_at)
+            .unwrap();
+
+        let totals = db
+            .get_wrapped_totals(
+                started_at - chrono::Duration::minutes(5),
+                started_at + chrono::Duration::hours(2),
+            )
+            .unwrap();
+
+        assert_eq!(
+            totals.plans, 1,
+            "wrapped totals should count plans from session_plans.plan_slug"
+        );
+    }
+
+    #[test]
+    fn test_wrapped_usage_profile_uses_plan_slug_for_plan_rate() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate().unwrap();
+
+        let source_file = create_test_source_file();
+        db.upsert_source_file(&source_file).unwrap();
+
+        let started_at = Utc::now() - chrono::Duration::hours(1);
+        let session = create_test_session_at(started_at);
+        db.upsert_session(&session).unwrap();
+
+        db.link_session_plan(&session.id, "plan-alpha", started_at)
+            .unwrap();
+
+        let profile = db
+            .get_wrapped_usage_profile(
+                started_at - chrono::Duration::minutes(5),
+                started_at + chrono::Duration::hours(2),
+            )
+            .unwrap();
+
+        assert!(
+            (profile.plans_per_session - 1.0).abs() < f64::EPSILON,
+            "plans_per_session should include plans counted by plan_slug"
+        );
     }
 }

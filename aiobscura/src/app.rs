@@ -253,8 +253,35 @@ impl App {
     }
 
     /// Load environment health stats from the database.
-    fn load_environment_health(&mut self) {
-        self.environment_health = self.db.get_environment_health().unwrap_or_default();
+    fn load_environment_health(&mut self) -> Result<()> {
+        self.environment_health = self.db.get_environment_health()?;
+        Ok(())
+    }
+
+    /// Refresh supporting data shown in live view side panels.
+    fn refresh_live_supporting_data(&mut self) -> Result<()> {
+        // Get sessions active in last 30 minutes for the panel.
+        self.active_sessions = self.db.get_active_sessions(30)?;
+        // Load stats for both time windows (30m and 24h).
+        self.live_stats = self.db.get_live_stats(30)?;
+        self.live_stats_24h = self.db.get_live_stats(24 * 60)?;
+        // Load dashboard stats and projects for the dashboard panel.
+        self.dashboard_stats = Some(self.db.get_dashboard_stats()?);
+        self.projects = self.db.list_projects_with_stats()?;
+        // Load environment health.
+        self.load_environment_health()?;
+        Ok(())
+    }
+
+    /// Refresh dashboard stats and log failures instead of silently dropping them.
+    fn refresh_dashboard_stats(&mut self) {
+        match self.db.get_dashboard_stats() {
+            Ok(stats) => self.dashboard_stats = Some(stats),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load dashboard stats");
+                self.dashboard_stats = None;
+            }
+        }
     }
 
     /// Tick the animation state (call each frame).
@@ -363,7 +390,9 @@ impl App {
 
         // Build final thread list with hierarchy
         for project_name in project_names {
-            let threads = project_threads.get(&project_name).unwrap();
+            let Some(threads) = project_threads.get(&project_name) else {
+                continue;
+            };
 
             // Separate main threads and orphan agents
             let mut main_threads: Vec<&ThreadInfo> = Vec::new();
@@ -568,22 +597,27 @@ impl App {
                 let thread_name = format!("{} - {}", thread.project_name, thread.short_id());
 
                 // Load messages for this thread
-                if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
-                    self.messages = messages;
-                    self.scroll_offset = 0;
+                match self.db.get_thread_messages(&thread_id, 10000) {
+                    Ok(messages) => {
+                        self.messages = messages;
+                        self.scroll_offset = 0;
 
-                    // Load metadata for the header
-                    self.thread_metadata = self.load_thread_metadata(&thread_id);
+                        // Load metadata for the header
+                        self.thread_metadata = self.load_thread_metadata(&thread_id);
 
-                    // Load/compute analytics (both session and thread)
-                    self.load_session_analytics(&session_id);
-                    self.load_first_order_metrics(&session_id);
-                    self.load_thread_analytics(&thread_id);
+                        // Load/compute analytics (both session and thread)
+                        self.load_session_analytics(&session_id);
+                        self.load_first_order_metrics(&session_id);
+                        self.load_thread_analytics(&thread_id);
 
-                    self.view_mode = ViewMode::Detail {
-                        thread_id,
-                        thread_name,
-                    };
+                        self.view_mode = ViewMode::Detail {
+                            thread_id,
+                            thread_name,
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(thread_id = %thread_id, error = %e, "Failed to load thread messages");
+                    }
                 }
             }
         }
@@ -591,7 +625,13 @@ impl App {
 
     /// Load metadata for the detail view header.
     fn load_thread_metadata(&self, thread_id: &str) -> Option<ThreadMetadata> {
-        self.db.get_thread_metadata(thread_id).ok().flatten()
+        match self.db.get_thread_metadata(thread_id) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                tracing::warn!(thread_id = %thread_id, error = %e, "Failed to load thread metadata");
+                None
+            }
+        }
     }
 
     /// Load or compute session analytics for the detail view.
@@ -838,20 +878,29 @@ impl App {
                 );
 
                 // Load plans for this session
-                if let Ok(plans) = self.db.get_plans_for_session(&session_id) {
-                    self.plans = plans;
-                    self.plan_table_state = TableState::default();
-                    if !self.plans.is_empty() {
-                        self.plan_table_state.select(Some(0));
-                    }
+                match self.db.get_plans_for_session(&session_id) {
+                    Ok(plans) => {
+                        self.plans = plans;
+                        self.plan_table_state = TableState::default();
+                        if !self.plans.is_empty() {
+                            self.plan_table_state.select(Some(0));
+                        }
 
-                    self.view_mode = ViewMode::PlanList {
-                        session_id,
-                        session_name,
-                        came_from_detail: from_detail,
-                        return_thread_id: if from_detail { Some(thread_id) } else { None },
-                        return_thread_name: if from_detail { Some(thread_name) } else { None },
-                    };
+                        self.view_mode = ViewMode::PlanList {
+                            session_id,
+                            session_name,
+                            came_from_detail: from_detail,
+                            return_thread_id: if from_detail { Some(thread_id) } else { None },
+                            return_thread_name: if from_detail { Some(thread_name) } else { None },
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to load plans for session"
+                        );
+                    }
                 }
             }
         }
@@ -871,15 +920,23 @@ impl App {
                     (return_thread_id.clone(), return_thread_name.clone())
                 {
                     // Reload messages and return to detail view
-                    if let Ok(messages) = self.db.get_thread_messages(&thread_id, 10000) {
-                        self.messages = messages;
-                        self.scroll_offset = 0;
-                        self.view_mode = ViewMode::Detail {
-                            thread_id,
-                            thread_name,
-                        };
-                    } else {
-                        self.view_mode = ViewMode::List;
+                    match self.db.get_thread_messages(&thread_id, 10000) {
+                        Ok(messages) => {
+                            self.messages = messages;
+                            self.scroll_offset = 0;
+                            self.view_mode = ViewMode::Detail {
+                                thread_id,
+                                thread_name,
+                            };
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                error = %e,
+                                "Failed to reload thread messages while closing plan list"
+                            );
+                            self.view_mode = ViewMode::List;
+                        }
                     }
                 } else {
                     self.view_mode = ViewMode::List;
@@ -1125,11 +1182,16 @@ impl App {
 
         // Cache miss - generate and store
         let config = WrappedConfig::default();
-        if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
-            self.wrapped_cache
-                .insert(self.wrapped_period, stats.clone());
-            self.wrapped_stats = Some(stats);
-            self.wrapped_card_index = 0;
+        match generate_wrapped(&self.db, self.wrapped_period, &config) {
+            Ok(stats) => {
+                self.wrapped_cache
+                    .insert(self.wrapped_period, stats.clone());
+                self.wrapped_stats = Some(stats);
+                self.wrapped_card_index = 0;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to generate wrapped stats");
+            }
         }
     }
 
@@ -1184,11 +1246,16 @@ impl App {
 
         // Cache miss - generate and store
         let config = WrappedConfig::default();
-        if let Ok(stats) = generate_wrapped(&self.db, self.wrapped_period, &config) {
-            self.wrapped_cache
-                .insert(self.wrapped_period, stats.clone());
-            self.wrapped_stats = Some(stats);
-            self.wrapped_card_index = 0;
+        match generate_wrapped(&self.db, self.wrapped_period, &config) {
+            Ok(stats) => {
+                self.wrapped_cache
+                    .insert(self.wrapped_period, stats.clone());
+                self.wrapped_stats = Some(stats);
+                self.wrapped_card_index = 0;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to generate wrapped stats");
+            }
         }
     }
 
@@ -1203,8 +1270,9 @@ impl App {
             KeyCode::Esc | KeyCode::Tab => {
                 // Tab cycles: Live -> Projects
                 // Always reload for fresh data
-                let _ = self.load_projects();
-                self.dashboard_stats = self.db.get_dashboard_stats().ok();
+                if let Err(e) = self.load_projects() {
+                    tracing::warn!(error = %e, "Failed to load projects for project list");
+                }
                 self.view_mode = ViewMode::ProjectList;
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -1267,15 +1335,26 @@ impl App {
     /// Open project detail view by ID and name (for quick navigation).
     fn open_project_detail_by_id(&mut self, project_id: &str, project_name: &str) {
         // Load project stats
-        if let Ok(Some(stats)) = self.db.get_project_stats(project_id) {
-            self.project_stats = Some(stats);
+        match self.db.get_project_stats(project_id) {
+            Ok(Some(stats)) => self.project_stats = Some(stats),
+            Ok(None) => self.project_stats = None,
+            Err(e) => {
+                tracing::warn!(project_id = %project_id, error = %e, "Failed to load project stats");
+                self.project_stats = None;
+            }
         }
         // Load sessions for the sessions sub-tab
-        let _ = self.load_project_sessions(project_id);
+        if let Err(e) = self.load_project_sessions(project_id) {
+            tracing::warn!(project_id = %project_id, error = %e, "Failed to load project sessions");
+        }
         // Load plans for the plans sub-tab
-        let _ = self.load_project_plans(project_id);
+        if let Err(e) = self.load_project_plans(project_id) {
+            tracing::warn!(project_id = %project_id, error = %e, "Failed to load project plans");
+        }
         // Load files for the files sub-tab
-        let _ = self.load_project_files(project_id);
+        if let Err(e) = self.load_project_files(project_id) {
+            tracing::warn!(project_id = %project_id, error = %e, "Failed to load project files");
+        }
 
         self.view_mode = ViewMode::ProjectDetail {
             project_id: project_id.to_string(),
@@ -1287,16 +1366,7 @@ impl App {
     /// Open the live activity view (called from main for startup).
     pub fn start_live_view(&mut self) -> Result<()> {
         self.live_messages = self.db.get_recent_messages(50)?;
-        // Get sessions active in last 30 minutes for the panel
-        self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
-        // Load stats for both time windows (30m and 24h)
-        self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
-        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
-        // Load dashboard stats and projects for the dashboard panel
-        self.dashboard_stats = self.db.get_dashboard_stats().ok();
-        self.projects = self.db.list_projects_with_stats().unwrap_or_default();
-        // Load environment health
-        self.load_environment_health();
+        self.refresh_live_supporting_data()?;
         self.live_scroll_offset = 0;
         self.live_auto_scroll = true;
         self.view_mode = ViewMode::Live;
@@ -1306,33 +1376,34 @@ impl App {
     /// Open the live activity view (internal navigation).
     fn open_live_view(&mut self) {
         // Load recent messages (limit to 50 as per plan)
-        if let Ok(messages) = self.db.get_recent_messages(50) {
-            self.live_messages = messages;
-            self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
-            self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
-            self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
-            self.dashboard_stats = self.db.get_dashboard_stats().ok();
-            self.projects = self.db.list_projects_with_stats().unwrap_or_default();
-            self.load_environment_health();
-            self.live_scroll_offset = 0;
-            self.live_auto_scroll = true;
-            self.view_mode = ViewMode::Live;
+        match self.db.get_recent_messages(50) {
+            Ok(messages) => {
+                self.live_messages = messages;
+                if let Err(e) = self.refresh_live_supporting_data() {
+                    tracing::warn!(error = %e, "Failed to refresh live supporting data");
+                }
+                self.live_scroll_offset = 0;
+                self.live_auto_scroll = true;
+                self.view_mode = ViewMode::Live;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load live messages");
+            }
         }
     }
 
     /// Refresh live messages from database.
     pub fn refresh_live_messages(&mut self) -> Result<()> {
-        if let Ok(messages) = self.db.get_recent_messages(50) {
-            self.live_messages = messages;
-            // If auto-scroll is on, keep at top (showing newest)
-            if self.live_auto_scroll {
-                self.live_scroll_offset = 0;
-            }
+        let messages = self.db.get_recent_messages(50)?;
+        self.live_messages = messages;
+        // If auto-scroll is on, keep at top (showing newest)
+        if self.live_auto_scroll {
+            self.live_scroll_offset = 0;
         }
         // Also refresh active sessions and stats (both time windows)
-        self.active_sessions = self.db.get_active_sessions(30).unwrap_or_default();
-        self.live_stats = self.db.get_live_stats(30).unwrap_or_default();
-        self.live_stats_24h = self.db.get_live_stats(24 * 60).unwrap_or_default();
+        self.active_sessions = self.db.get_active_sessions(30)?;
+        self.live_stats = self.db.get_live_stats(30)?;
+        self.live_stats_24h = self.db.get_live_stats(24 * 60)?;
         Ok(())
     }
 
@@ -1467,8 +1538,10 @@ impl App {
     /// Close project list and switch to thread list.
     fn close_project_list(&mut self) {
         // Always reload threads and stats for fresh data
-        let _ = self.load_threads();
-        self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        if let Err(e) = self.load_threads() {
+            tracing::warn!(error = %e, "Failed to load threads while closing project list");
+        }
+        self.refresh_dashboard_stats();
         self.view_mode = ViewMode::List;
     }
 
@@ -1480,13 +1553,21 @@ impl App {
                 let project_name = project.name.clone();
 
                 // Load project stats
-                if let Ok(Some(stats)) = self.db.get_project_stats(&project_id) {
-                    self.project_stats = Some(stats);
-                    self.view_mode = ViewMode::ProjectDetail {
-                        project_id,
-                        project_name,
-                        sub_tab: ProjectSubTab::Overview,
-                    };
+                match self.db.get_project_stats(&project_id) {
+                    Ok(Some(stats)) => {
+                        self.project_stats = Some(stats);
+                        self.view_mode = ViewMode::ProjectDetail {
+                            project_id,
+                            project_name,
+                            sub_tab: ProjectSubTab::Overview,
+                        };
+                    }
+                    Ok(None) => {
+                        tracing::warn!(project_id = %project_id, "Project stats missing for selected project");
+                    }
+                    Err(e) => {
+                        tracing::warn!(project_id = %project_id, error = %e, "Failed to load project stats");
+                    }
                 }
             }
         }
@@ -1557,7 +1638,7 @@ impl App {
             self.project_table_state.select(Some(0));
         }
         // Load dashboard stats for the header panel
-        self.dashboard_stats = self.db.get_dashboard_stats().ok();
+        self.refresh_dashboard_stats();
         Ok(())
     }
 
@@ -1606,7 +1687,7 @@ impl App {
     pub fn refresh_current_view(&mut self) -> Result<()> {
         // Always refresh dashboard stats for list views
         if self.is_list_view() {
-            self.dashboard_stats = self.db.get_dashboard_stats().ok();
+            self.refresh_dashboard_stats();
         }
 
         match &self.view_mode {
@@ -1731,10 +1812,19 @@ impl App {
         // Use the file_stats from ProjectStats if available
         if let Some(stats) = &self.project_stats {
             self.project_files = stats.file_stats.breakdown.clone();
-        } else if let Ok(Some(stats)) = self.db.get_project_stats(project_id) {
-            self.project_files = stats.file_stats.breakdown.clone();
         } else {
-            self.project_files.clear();
+            match self.db.get_project_stats(project_id) {
+                Ok(Some(stats)) => self.project_files = stats.file_stats.breakdown.clone(),
+                Ok(None) => self.project_files.clear(),
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %e,
+                        "Failed to load project files from project stats"
+                    );
+                    self.project_files.clear();
+                }
+            }
         }
 
         // Select first if any
@@ -1790,13 +1880,31 @@ impl App {
                     // Overview data is already loaded in project_stats
                 }
                 ProjectSubTab::Sessions => {
-                    let _ = self.load_project_sessions(&project_id);
+                    if let Err(e) = self.load_project_sessions(&project_id) {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %e,
+                            "Failed to load project sessions for sub-tab switch"
+                        );
+                    }
                 }
                 ProjectSubTab::Plans => {
-                    let _ = self.load_project_plans(&project_id);
+                    if let Err(e) = self.load_project_plans(&project_id) {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %e,
+                            "Failed to load project plans for sub-tab switch"
+                        );
+                    }
                 }
                 ProjectSubTab::Files => {
-                    let _ = self.load_project_files(&project_id);
+                    if let Err(e) = self.load_project_files(&project_id) {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %e,
+                            "Failed to load project files for sub-tab switch"
+                        );
+                    }
                 }
             }
 
@@ -1909,26 +2017,44 @@ impl App {
                             let session_name = format!("Session {}", session_row.short_id());
 
                             // Load messages for this session (merged across all threads)
-                            if let Ok(messages) = self.db.get_session_messages(&session_id, 10_000)
-                            {
-                                // Load threads for this session
-                                let threads =
-                                    self.db.get_session_threads(&session_id).unwrap_or_default();
+                            match self.db.get_session_messages(&session_id, 10_000) {
+                                Ok(messages) => {
+                                    // Load threads for this session
+                                    let threads = match self.db.get_session_threads(&session_id) {
+                                        Ok(threads) => threads,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                error = %e,
+                                                "Failed to load session threads"
+                                            );
+                                            Vec::new()
+                                        }
+                                    };
 
-                                // Save return destination
-                                self.return_to_project = Some((project_id, project_name, sub_tab));
-                                self.session_messages = messages;
-                                self.session_threads = threads;
-                                self.session_scroll_offset = 0;
+                                    // Save return destination
+                                    self.return_to_project =
+                                        Some((project_id, project_name, sub_tab));
+                                    self.session_messages = messages;
+                                    self.session_threads = threads;
+                                    self.session_scroll_offset = 0;
 
-                                // Load session analytics
-                                self.load_session_analytics(&session_id);
-                                self.load_first_order_metrics(&session_id);
+                                    // Load session analytics
+                                    self.load_session_analytics(&session_id);
+                                    self.load_first_order_metrics(&session_id);
 
-                                self.view_mode = ViewMode::SessionDetail {
-                                    session_id,
-                                    session_name,
-                                };
+                                    self.view_mode = ViewMode::SessionDetail {
+                                        session_id,
+                                        session_name,
+                                    };
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        error = %e,
+                                        "Failed to load session messages"
+                                    );
+                                }
                             }
                         }
                     }

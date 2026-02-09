@@ -3,8 +3,7 @@
 use aiobscura_core::analytics::{TimePatterns, WrappedStats};
 use aiobscura_core::format::format_relative_time;
 use aiobscura_core::{
-    ActiveSession, Assistant, AuthorRole, Message, MessageType, MessageWithContext, PlanStatus,
-    ThreadType,
+    ActiveSession, Assistant, Message, MessageType, MessageWithContext, PlanStatus, ThreadType,
 };
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
@@ -20,6 +19,7 @@ use ratatui::{
 };
 
 use crate::app::{App, ProjectSubTab, ViewMode};
+use crate::message_format::{detail_content, live_role_label, session_role_prefix};
 use aiobscura_core::db::EnvironmentHealth;
 
 // ========== Wrapped Color Palette ==========
@@ -243,10 +243,15 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         // For non-main threads, calculate and show duration
-        let duration_str = if !matches!(thread_type, ThreadType::Main) && !messages.is_empty() {
-            let first_ts = messages.first().unwrap().emitted_at;
-            let last_ts = messages.last().unwrap().emitted_at;
-            format!(" ({})", format_group_duration(first_ts, last_ts))
+        let duration_str = if !matches!(thread_type, ThreadType::Main) {
+            if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
+                format!(
+                    " ({})",
+                    format_group_duration(first.emitted_at, last.emitted_at)
+                )
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };
@@ -268,24 +273,7 @@ fn render_session_messages(frame: &mut Frame, app: &App, area: Rect) {
 
         // Add messages for this thread
         for msg in messages {
-            // Map author role directly to display style and label.
-            // The parser layer determines the correct role (Human vs Caller)
-            // based on context, so UI just needs a 1:1 mapping.
-            let (role_style, role_prefix) = match msg.author_role {
-                AuthorRole::Human => (Style::default().fg(Color::Green), "[human]"),
-                AuthorRole::Caller => (Style::default().fg(Color::Cyan), "[caller]"),
-                AuthorRole::Assistant => (Style::default().fg(Color::Blue), "[assistant]"),
-                AuthorRole::Agent => (Style::default().fg(Color::Cyan), "[agent]"),
-                AuthorRole::Tool => (Style::default().fg(Color::Magenta), "[tool]"),
-                AuthorRole::System => {
-                    // System is for true system events like snapshots
-                    if msg.author_name.as_deref() == Some("snapshot") {
-                        (Style::default().fg(Color::DarkGray), "[snapshot]")
-                    } else {
-                        (Style::default().fg(Color::DarkGray), "[system]")
-                    }
-                }
-            };
+            let (role_prefix, role_style) = session_role_prefix(msg);
 
             // Get content preview (shortened to leave room for timestamp)
             let content_preview = msg.preview(60);
@@ -1216,7 +1204,7 @@ fn format_message(msg: &Message, index: usize, total: usize) -> Vec<Line<'static
     ]));
 
     // Content
-    let content = get_message_content(msg);
+    let content = detail_content(msg);
     if !content.is_empty() {
         // Truncate very long content (respecting char boundaries)
         let display_content = if content.chars().count() > 2000 {
@@ -1269,7 +1257,7 @@ fn format_tool_message(
     ]));
 
     // Content
-    let content = get_message_content(msg);
+    let content = detail_content(msg);
     if !content.is_empty() {
         let display_content = if content.chars().count() > 2000 {
             let truncated: String = content.chars().take(2000).collect();
@@ -1284,26 +1272,6 @@ fn format_tool_message(
     }
 
     lines
-}
-
-/// Extract displayable content from a message.
-fn get_message_content(msg: &Message) -> String {
-    // For tool calls, show the tool input
-    if msg.message_type == MessageType::ToolCall {
-        if let Some(input) = &msg.tool_input {
-            return serde_json::to_string_pretty(input).unwrap_or_default();
-        }
-    }
-
-    // For tool results, show the result
-    if msg.message_type == MessageType::ToolResult {
-        if let Some(result) = &msg.tool_result {
-            return result.clone();
-        }
-    }
-
-    // Otherwise show content
-    msg.content.clone().unwrap_or_default()
 }
 
 /// Render the footer for list view.
@@ -4043,14 +4011,7 @@ fn format_live_message(msg: &MessageWithContext) -> Line<'static> {
     let context_str = format!("[{}/{}]", msg.project_name, msg.thread_name);
 
     // Role styling
-    let (role_str, role_style) = match msg.author_role {
-        AuthorRole::Human => ("human", Style::default().fg(Color::Cyan)),
-        AuthorRole::Caller => ("caller", Style::default().fg(Color::Cyan)),
-        AuthorRole::Assistant => ("assistant", Style::default().fg(Color::Green)),
-        AuthorRole::Tool => ("tool", Style::default().fg(Color::Yellow)),
-        AuthorRole::Agent => ("agent", Style::default().fg(BADGE_AGENT)),
-        AuthorRole::System => ("system", Style::default().fg(Color::DarkGray)),
-    };
+    let (role_str, role_style) = live_role_label(msg.author_role);
 
     // Preview text
     let preview = if msg.message_type == MessageType::ToolCall {
