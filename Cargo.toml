@@ -12,9 +12,9 @@ repository = "https://github.com/kulesh/aiobscura"
 [workspace.dependencies]
 # Shared dependencies across workspace
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 
 [profile.release]
 strip = true

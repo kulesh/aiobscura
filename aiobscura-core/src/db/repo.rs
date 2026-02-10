@@ -3538,10 +3538,18 @@ impl Database {
     pub fn get_database_size(&self) -> Result<u64> {
         let conn = self.lock_conn()?;
 
-        let page_count: u64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let page_size: u64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
 
-        Ok(page_count * page_size)
+        let page_count = u64::try_from(page_count).map_err(|_| {
+            Error::Config("PRAGMA page_count returned a negative value".to_string())
+        })?;
+        let page_size = u64::try_from(page_size)
+            .map_err(|_| Error::Config("PRAGMA page_size returned a negative value".to_string()))?;
+
+        page_count
+            .checked_mul(page_size)
+            .ok_or_else(|| Error::Config("database size overflow".to_string()))
     }
 
     /// Get environment health stats for each assistant.

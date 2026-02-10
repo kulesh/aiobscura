@@ -13,7 +13,7 @@ use aiobscura_core::{
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
     widgets::{
