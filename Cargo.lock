@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "aiobscura"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aiobscura-core",
  "anyhow",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aiobscura-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "dirs",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "aiobscura-wrapped"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aiobscura-core",
  "anyhow",
