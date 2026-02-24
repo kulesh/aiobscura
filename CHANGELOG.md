@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-02-24
+
+### Added
+
+- `aiobscura-collector register` command to register an edge sensor with CatSyphon and auto-write collector credentials to local config.
+- Safe config write behavior for collector registration:
+  - preserves non-collector config sections
+  - refuses credential overwrite without `--force`
+  - writes config atomically with restricted file permissions
+
+### Changed
+
+- Collector registration defaults:
+  - `collector_type` defaults to `aiobscura`
+  - hostname defaults to `uname -n` (with `--hostname` override)
+- Edge setup docs now use `aiobscura-collector register` as the primary setup path.
+
 ## [0.1.10] - 2026-02-24
 
 ### Added
@@ -174,7 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/kulesh/aiobscura/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/kulesh/aiobscura/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/kulesh/aiobscura/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/kulesh/aiobscura/compare/v0.1.7...v0.1.8

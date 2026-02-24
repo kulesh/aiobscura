@@ -13,6 +13,35 @@ use crate::error::{Error, Result};
 
 use super::events::{CollectorEvent, EventBatch};
 
+/// Request body for POST /collectors
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectorRegisterRequest {
+    /// Type of collector (e.g., aiobscura, watcher, sdk)
+    pub collector_type: String,
+    /// Collector version string
+    pub collector_version: String,
+    /// Hostname of the machine running the collector
+    pub hostname: String,
+    /// Workspace UUID
+    pub workspace_id: String,
+    /// Optional metadata (OS, user, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Response from POST /collectors
+#[derive(Debug, Clone, Deserialize)]
+pub struct CollectorRegisterResponse {
+    /// Collector ID (UUID)
+    pub collector_id: String,
+    /// API key (shown once)
+    pub api_key: String,
+    /// API key prefix
+    pub api_key_prefix: String,
+    /// Creation timestamp (ISO-8601)
+    pub created_at: String,
+}
+
 /// Response from POST /collectors/events
 #[derive(Debug, Deserialize)]
 pub struct EventsResponse {
@@ -47,6 +76,63 @@ pub struct CollectorClient {
 }
 
 impl CollectorClient {
+    /// Register a new collector and retrieve credentials.
+    pub async fn register_collector(
+        server_url: &str,
+        request: &CollectorRegisterRequest,
+        timeout_secs: u64,
+    ) -> Result<CollectorRegisterResponse> {
+        let base_url = server_url.trim_end_matches('/');
+        if base_url.is_empty() {
+            return Err(Error::Config("server_url cannot be empty".to_string()));
+        }
+
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| Error::Config(format!("failed to create HTTP client: {}", e)))?;
+
+        let url = format!("{}/collectors", base_url);
+        let response = http_client
+            .post(&url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| Error::Collector(format!("HTTP request failed: {}", e)))?;
+
+        let status = response.status();
+        if status.is_success() {
+            let result: CollectorRegisterResponse = response
+                .json()
+                .await
+                .map_err(|e| Error::Collector(format!("failed to parse response: {}", e)))?;
+            Ok(result)
+        } else {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
+            Err(Error::Collector(format!(
+                "registration failed ({}): {}",
+                status, error_text
+            )))
+        }
+    }
+
+    /// Blocking wrapper for collector registration.
+    pub fn register_collector_blocking(
+        server_url: &str,
+        request: &CollectorRegisterRequest,
+        timeout_secs: u64,
+    ) -> Result<CollectorRegisterResponse> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Collector(format!("failed to create runtime: {}", e)))?;
+
+        runtime.block_on(Self::register_collector(server_url, request, timeout_secs))
+    }
+
     /// Create a new collector client from configuration
     ///
     /// Returns an error if the configuration is invalid or missing required fields.

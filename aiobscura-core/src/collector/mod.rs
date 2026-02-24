@@ -26,6 +26,6 @@ mod client;
 mod events;
 mod publisher;
 
-pub use client::CollectorClient;
+pub use client::{CollectorClient, CollectorRegisterRequest, CollectorRegisterResponse};
 pub use events::{CollectorEvent, EventBatch};
 pub use publisher::{PublishStats, Publisher, StatefulSyncPublisher, SyncPublisher};

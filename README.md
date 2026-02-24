@@ -162,6 +162,14 @@ Use aiobscura as an edge sensor that forwards to a central CatSyphon collector:
 - [aiobscura edge setup](docs/central-collector-setup.md)
 - [full multi-Mac central deployment guide (CatSyphon)](https://github.com/kulesh/catsyphon/blob/main/docs/collectors/edge-sensors-macos.md)
 
+Quick registration command on each edge machine:
+
+```bash
+aiobscura-collector register \
+  --server-url "https://catsyphon.yourdomain.com" \
+  --workspace-id "<WORKSPACE_UUID>"
+```
+
 ## License
 
 Licensed under either of:

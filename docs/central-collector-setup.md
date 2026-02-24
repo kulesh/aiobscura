@@ -12,23 +12,27 @@ For full end-to-end central deployment (workspace setup, collector registration,
 brew install kulesh/tap/aiobscura
 ```
 
-## 2. Configure collector credentials
+## 2. Register edge collector and auto-configure aiobscura
 
-Create `~/.config/aiobscura/config.toml`:
+Run this once per edge machine:
 
-```toml
-[collector]
-enabled = true
-server_url = "https://catsyphon.yourdomain.com"
-collector_id = "REPLACE_WITH_COLLECTOR_ID"
-api_key = "REPLACE_WITH_API_KEY"
-batch_size = 20
-flush_interval_secs = 5
-timeout_secs = 30
-max_retries = 3
+```bash
+aiobscura-collector register \
+  --server-url "https://catsyphon.yourdomain.com" \
+  --workspace-id "<WORKSPACE_UUID>"
 ```
 
-`collector_id` and `api_key` come from `POST /collectors` on the CatSyphon server.
+Defaults:
+- `collector_type` defaults to `aiobscura`
+- `hostname` defaults to `uname -n` (override with `--hostname`)
+
+The command calls `POST /collectors` and writes `~/.config/aiobscura/config.toml` with:
+- `enabled = true`
+- `server_url`
+- `collector_id`
+- `api_key`
+
+If credentials already exist in config, rerun with `--force` to rotate/replace them.
 
 ## 3. Run sync and publish continuously
 

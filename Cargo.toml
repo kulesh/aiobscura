@@ -3,7 +3,7 @@ members = ["aiobscura-core", "aiobscura", "aiobscura-wrapped"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 authors = ["Kulesh Shanmugasundaram"]
 license = "MIT OR Apache-2.0"
