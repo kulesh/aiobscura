@@ -156,6 +156,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 This project is under active development. See the [docs/](docs/) folder for architecture and requirements documentation.
 
+### Central Collector Mode
+
+Use aiobscura as an edge sensor that forwards to a central CatSyphon collector:
+- [aiobscura edge setup](docs/central-collector-setup.md)
+- [full multi-Mac central deployment guide (CatSyphon)](https://github.com/kulesh/catsyphon/blob/main/docs/collectors/edge-sensors-macos.md)
+
 ## License
 
 Licensed under either of:
