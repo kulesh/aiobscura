@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-02-24
+
+### Added
+
+- Explicit Catsyphon collector lifecycle support in aiobscura client:
+  - remote `session_start` initialization
+  - explicit session completion API support
+- Automatic stale-session completion for collector publishing after inactivity.
+
+### Changed
+
+- `aiobscura-sync` now uses `StatefulSyncPublisher` for sequence-aware recovery and crash-safe resumptions.
+- Session publishing path now uses per-session database state instead of timestamp-window message queries.
+
 ## [0.1.9] - 2026-02-10
 
 ### Changed
@@ -160,7 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aider parser
 - Cursor parser
 
-[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/kulesh/aiobscura/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/kulesh/aiobscura/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/kulesh/aiobscura/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/kulesh/aiobscura/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/kulesh/aiobscura/compare/v0.1.6...v0.1.7
