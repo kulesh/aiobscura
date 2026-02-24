@@ -135,6 +135,78 @@ impl CollectorClient {
         }
     }
 
+    /// Ensure a remote session exists by sending a `session_start` event if needed.
+    ///
+    /// Returns true if a `session_start` event was sent, false if the session already existed.
+    pub async fn ensure_session_started(
+        &self,
+        session_id: &str,
+        session_start: CollectorEvent,
+    ) -> Result<bool> {
+        if self.get_session_status(session_id).await?.is_some() {
+            return Ok(false);
+        }
+
+        let batch = EventBatch {
+            session_id: session_id.to_string(),
+            events: vec![session_start],
+        };
+        self.send_events_with_retry(&batch).await?;
+        Ok(true)
+    }
+
+    /// Mark a session as completed on the server.
+    ///
+    /// Returns true if the completion endpoint succeeded, false if the session did not exist.
+    pub async fn complete_session(
+        &self,
+        session_id: &str,
+        outcome: &str,
+        summary: Option<&str>,
+        event_count: Option<i64>,
+    ) -> Result<bool> {
+        let url = format!(
+            "{}/collectors/sessions/{}/complete",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+
+        let request = SessionCompleteRequest {
+            event_count,
+            outcome,
+            summary,
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::Collector(format!("HTTP request failed: {}", e)))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let _: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| Error::Collector(format!("failed to parse response: {}", e)))?;
+            Ok(true)
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            Ok(false)
+        } else {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
+            Err(Error::Collector(format!(
+                "API error ({}): {}",
+                status, error_text
+            )))
+        }
+    }
+
     /// Send events with retry logic
     ///
     /// Retries transient failures (5xx, timeouts) with exponential backoff.
@@ -238,6 +310,14 @@ impl CollectorClient {
 struct SendEventsRequest<'a> {
     session_id: &'a str,
     events: &'a [CollectorEvent],
+}
+
+/// Request body for POST /collectors/sessions/{session_id}/complete
+#[derive(Serialize)]
+struct SessionCompleteRequest<'a> {
+    event_count: Option<i64>,
+    outcome: &'a str,
+    summary: Option<&'a str>,
 }
 
 /// Check if an error is retryable (transient)

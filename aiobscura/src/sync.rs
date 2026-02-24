@@ -10,7 +10,7 @@
 
 mod process_lock;
 
-use aiobscura_core::collector::SyncPublisher;
+use aiobscura_core::collector::StatefulSyncPublisher;
 use aiobscura_core::ingest::{IngestCoordinator, SyncResult};
 use aiobscura_core::{Config, Database, SessionFilter};
 use anyhow::{Context, Result};
@@ -107,8 +107,13 @@ fn main() -> Result<()> {
     }
 
     // Initialize Catsyphon publisher if configured
-    let mut publisher =
-        SyncPublisher::new(&config.collector).context("failed to create publisher")?;
+    let mut publisher = if config.collector.is_ready() {
+        let publish_db = Database::open(&db_path).context("failed to open publish database")?;
+        StatefulSyncPublisher::new(&config.collector, publish_db)
+            .context("failed to create publisher")?
+    } else {
+        None
+    };
 
     if publisher.is_some() {
         println!("Catsyphon collector: enabled");
@@ -118,32 +123,28 @@ fn main() -> Result<()> {
         );
     }
 
-    // Open a second database connection for publishing queries
-    // (coordinator owns the first connection)
-    let publish_db = if publisher.is_some() {
-        Some(Database::open(&db_path).context("failed to open publish database")?)
-    } else {
-        None
-    };
+    if let Some(ref mut pub_instance) = publisher {
+        let resumed = pub_instance
+            .resume_incomplete(config.collector.batch_size)
+            .context("failed to resume incomplete collector publishes")?;
+        if resumed > 0 {
+            tracing::info!(events = resumed, "Resumed incomplete collector publishes");
+        }
+
+        let completed = pub_instance
+            .complete_stale_sessions()
+            .context("failed to complete stale collector sessions")?;
+        if completed > 0 {
+            tracing::info!(sessions = completed, "Completed stale collector sessions");
+        }
+    }
 
     let result = if args.watch {
         // Watch mode - continuous polling
-        run_watch_mode(
-            &coordinator,
-            &config,
-            &args,
-            publish_db.as_ref(),
-            &mut publisher,
-        )
+        run_watch_mode(&coordinator, &config, &args, &mut publisher)
     } else {
         // One-shot sync
-        run_single_sync(
-            &coordinator,
-            &config,
-            &args,
-            publish_db.as_ref(),
-            &mut publisher,
-        )
+        run_single_sync(&coordinator, &config, &args, &mut publisher)
     };
 
     // Flush any pending events on shutdown
@@ -186,12 +187,8 @@ fn run_single_sync(
     coordinator: &IngestCoordinator,
     config: &Config,
     args: &Args,
-    publish_db: Option<&Database>,
-    publisher: &mut Option<SyncPublisher>,
+    publisher: &mut Option<StatefulSyncPublisher>,
 ) -> Result<()> {
-    // Track time before sync for publishing
-    let sync_start = chrono::Utc::now();
-
     let pb = ProgressBar::new(0);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -217,10 +214,7 @@ fn run_single_sync(
 
     pb.finish_and_clear();
 
-    // Publish newly synced messages to Catsyphon
-    if result.messages_inserted > 0 {
-        publish_new_messages(publish_db, publisher, sync_start, result.messages_inserted);
-    }
+    publish_sync_sessions(config, publisher, &result);
 
     run_analytics_triggers(coordinator, config, &result, true)?;
 
@@ -240,8 +234,7 @@ fn run_watch_mode(
     coordinator: &IngestCoordinator,
     config: &Config,
     args: &Args,
-    publish_db: Option<&Database>,
-    publisher: &mut Option<SyncPublisher>,
+    publisher: &mut Option<StatefulSyncPublisher>,
 ) -> Result<()> {
     // Set up signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
@@ -267,9 +260,6 @@ fn run_watch_mode(
     while running.load(Ordering::SeqCst) {
         iteration += 1;
 
-        // Track time before sync for publishing
-        let sync_start = chrono::Utc::now();
-
         // Run sync (checkpoints ensure incremental parsing)
         let result = coordinator
             .sync_all_with_progress(|_current, _total, _path| {
@@ -277,11 +267,10 @@ fn run_watch_mode(
             })
             .context("sync failed")?;
 
+        publish_sync_sessions(config, publisher, &result);
+
         // Only print if there were changes
         if result.messages_inserted > 0 {
-            // Publish newly synced messages to Catsyphon
-            publish_new_messages(publish_db, publisher, sync_start, result.messages_inserted);
-
             let timestamp = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "[{}] Synced: {} files, {} messages, {} sessions",
@@ -533,47 +522,69 @@ fn shorten_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
-/// Publish newly synced messages to Catsyphon
-fn publish_new_messages(
-    publish_db: Option<&Database>,
-    publisher: &mut Option<SyncPublisher>,
-    sync_start: chrono::DateTime<chrono::Utc>,
-    expected_count: usize,
+/// Publish all updated sessions and run recovery/completion routines.
+fn publish_sync_sessions(
+    config: &Config,
+    publisher: &mut Option<StatefulSyncPublisher>,
+    result: &SyncResult,
 ) {
-    let Some(db) = publish_db else { return };
     let Some(ref mut pub_instance) = publisher else {
         return;
     };
 
-    // Query for messages observed after sync started
-    // Add a small buffer to avoid missing messages due to timing
-    let query_after = sync_start - chrono::Duration::seconds(1);
+    let mut touched_sessions = HashSet::new();
+    for file_result in &result.file_results {
+        if file_result.new_messages == 0 {
+            continue;
+        }
+        if let Some(session_id) = &file_result.session_id {
+            touched_sessions.insert(session_id.clone());
+        }
+    }
 
-    match db.get_messages_since(query_after, expected_count + 100) {
-        Ok(messages) => {
-            if messages.is_empty() {
-                return;
-            }
-
-            tracing::debug!(
-                count = messages.len(),
-                expected = expected_count,
-                "Publishing new messages to Catsyphon"
-            );
-
-            match pub_instance.queue(&messages) {
+    for session_id in touched_sessions {
+        loop {
+            match pub_instance.publish_session(&session_id, config.collector.batch_size) {
+                Ok(0) => break,
                 Ok(sent) => {
-                    if sent > 0 {
-                        tracing::debug!(sent, "Sent events to Catsyphon");
+                    tracing::debug!(
+                        session_id = %session_id,
+                        events = sent,
+                        "Published session events"
+                    );
+                    if sent < config.collector.batch_size {
+                        break;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to queue messages for publishing");
+                    tracing::warn!(
+                        error = %e,
+                        session_id = %session_id,
+                        "Failed to publish session events"
+                    );
+                    break;
                 }
             }
         }
+    }
+
+    match pub_instance.resume_incomplete(config.collector.batch_size) {
+        Ok(resumed) if resumed > 0 => {
+            tracing::info!(events = resumed, "Resumed incomplete collector publishes");
+        }
+        Ok(_) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to query messages for publishing");
+            tracing::warn!(error = %e, "Failed to resume incomplete collector publishes");
+        }
+    }
+
+    match pub_instance.complete_stale_sessions() {
+        Ok(completed) if completed > 0 => {
+            tracing::info!(sessions = completed, "Completed stale collector sessions");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to complete stale collector sessions");
         }
     }
 }
